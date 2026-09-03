@@ -37,7 +37,7 @@ Rectangle {
     }
 
     RowLayout {
-        anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter; anchors.leftMargin: 6; spacing: 4
+        anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter; anchors.leftMargin: 6; spacing: 20
         Repeater {
             model: ["文件", "编辑", "视图", "导航", "代码", "运行", "工具", "VCS", "窗口", "帮助"]
             delegate: Label {
