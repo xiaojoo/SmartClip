@@ -99,6 +99,45 @@ ApplicationWindow {
         if (item) clipboardStore.copyItem(item.id)
     }
 
+    // ---------- top-bar dropdown menus ----------
+    property var ddItems: []
+
+    function hasMenu(label) {
+        return label === "文件" || label === "编辑" || label === "视图" ||
+               label === "运行" || label === "工具" || label === "帮助"
+    }
+    function folderItems() {
+        return [ { label: "今天",  act: "folder:today" },
+                 { label: "昨天",  act: "folder:yesterday" },
+                 { label: "近 7 天", act: "folder:week" },
+                 { label: "更早",  act: "folder:older" } ]
+    }
+    function menuItems(label) {
+        if (label === "文件") return [{ label: "刷新剪贴板", act: "refresh" }, { label: "退出", act: "quit" }]
+        if (label === "编辑") return [{ label: "复制所选", act: "copy" }, { label: "清空搜索", act: "clearsearch" }]
+        if (label === "视图") return folderItems()
+        if (label === "运行") return [{ label: "重新采集剪贴板", act: "refresh" }]
+        if (label === "工具") return [{ label: "设置", act: "none" }, { label: "关于 SmartClip", act: "none" }]
+        if (label === "帮助") return [{ label: "使用说明", act: "none" }, { label: "关于", act: "none" }]
+        return [{ label: "（暂无）", act: "none" }]
+    }
+    function showDropdown(anchor, items) {
+        ddItems = items
+        dd.width = 200
+        dd.height = ddItems.length * 30 + 8
+        var pos = anchor.mapToItem(window.contentItem, 0, anchor.height)
+        dd.x = Math.max(2, Math.min(pos.x, window.width - dd.width - 4))
+        dd.y = pos.y + 3
+        dd.open()
+    }
+    function ddTrigger(act) {
+        if (act === "refresh") refresh()
+        else if (act === "quit") window.close()
+        else if (act === "copy") { if (selectedItem) clipboardStore.copyItem(selectedItem.id) }
+        else if (act === "clearsearch") { search.text = "" }
+        else if (act.indexOf("folder:") === 0) activateFolder(act.substring(7))
+    }
+
     Component.onCompleted: refresh()
     Connections { target: clipboardStore; function onChanged() { window.refresh() } }
 
@@ -110,7 +149,7 @@ ApplicationWindow {
         Rectangle {
             Layout.fillWidth: true; Layout.preferredHeight: 28; color: barBg
             RowLayout {
-                anchors.fill: parent; anchors.leftMargin: 8; spacing: 18
+                anchors.fill: parent; anchors.leftMargin: 8; spacing: 8
                 Repeater {
                     model: ["文件", "编辑", "视图", "导航", "代码", "运行", "工具", "VCS", "窗口", "帮助"]
                     delegate: Label {
@@ -119,7 +158,8 @@ ApplicationWindow {
                         Layout.alignment: Qt.AlignVCenter
                         MouseArea { anchors.fill: parent; hoverEnabled: true
                             onEntered: parent.color = textBright
-                            onExited: parent.color = textMain }
+                            onExited: parent.color = textMain
+                            onClicked: if (window.hasMenu(modelData)) window.showDropdown(parent, window.menuItems(modelData)) }
                     }
                 }
             }
@@ -128,7 +168,7 @@ ApplicationWindow {
         Rectangle {
             Layout.fillWidth: true; Layout.preferredHeight: 38; color: panelBg; border.color: border; border.width: 1
             RowLayout {
-                anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 8; spacing: 6
+                anchors.fill: parent; anchors.leftMargin: 6; anchors.rightMargin: 6; spacing: 3
                 Text { text: "◀"; color: textMuted; font.pixelSize: 13; Layout.alignment: Qt.AlignVCenter }
                 Text { text: "▶"; color: textMuted; font.pixelSize: 13; Layout.alignment: Qt.AlignVCenter }
                 Rectangle { Layout.preferredWidth: 1; Layout.preferredHeight: 20; Layout.alignment: Qt.AlignVCenter; color: border }
@@ -142,7 +182,8 @@ ApplicationWindow {
                         Label { text: "SmartClip"; color: textMain; font.pixelSize: 12; Layout.fillWidth: true }
                     }
                     MouseArea { anchors.fill: parent; hoverEnabled: true
-                        onEntered: parent.color = "#454749"; onExited: parent.color = "#3f4144" }
+                        onEntered: parent.color = "#454749"; onExited: parent.color = "#3f4144"
+                        onClicked: window.showDropdown(parent, window.folderItems()) }
                 }
                 Rectangle { Layout.preferredWidth: 26; Layout.preferredHeight: 26; radius: 4; color: "#2f6f4f"
                     Text { anchors.centerIn: parent; text: "▶"; color: "#c8f2d8"; font.pixelSize: 12 }
@@ -169,7 +210,8 @@ ApplicationWindow {
                 Rectangle { Layout.preferredWidth: 28; Layout.preferredHeight: 28; radius: 4; color: "#3f4144"; border.color: border
                     Text { anchors.centerIn: parent; text: "⚙"; color: textMuted; font.pixelSize: 14 }
                     MouseArea { anchors.fill: parent; hoverEnabled: true
-                        onEntered: parent.color = "#454749"; onExited: parent.color = "#3f4144" } }
+                        onEntered: parent.color = "#454749"; onExited: parent.color = "#3f4144"
+                        onClicked: window.showDropdown(parent, window.menuItems("工具")) } }
             }
         }
         // ======================= MAIN ROW =======================
@@ -368,6 +410,36 @@ ApplicationWindow {
                 Label { text: "分支: main"; color: textMuted; font.pixelSize: 11 }
                 Rectangle { Layout.preferredWidth: 1; Layout.preferredHeight: 12; Layout.alignment: Qt.AlignVCenter; color: border }
                 Label { text: "UTF-8"; color: textMuted; font.pixelSize: 11 }
+            }
+        }
+    }
+
+    // ======================= DROPDOWN MENU POPUP =======================
+    Popup {
+        id: dd
+        x: 0; y: 0
+        width: 200; height: 40
+        padding: 4
+        closePolicy: Popup.CloseOnPressOutside | Popup.CloseOnEscape
+        background: Rectangle { color: "#3c3f41"; radius: 5; border.color: "#4b4d4f" }
+        Column {
+            anchors.fill: parent; spacing: 2
+            Repeater {
+                model: window.ddItems
+                delegate: Rectangle {
+                    required property var modelData
+                    width: parent.width; height: 28; radius: 4
+                    color: ddh.containsMouse ? "#46484a" : "transparent"
+                    Label {
+                        anchors.fill: parent; anchors.leftMargin: 10
+                        verticalAlignment: Text.AlignVCenter
+                        text: modelData.label; color: window.textMain; font.pixelSize: 13
+                    }
+                    MouseArea {
+                        id: ddh; anchors.fill: parent; hoverEnabled: true
+                        onClicked: { window.ddTrigger(modelData.act); dd.close() }
+                    }
+                }
             }
         }
     }
