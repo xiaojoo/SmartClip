@@ -46,7 +46,7 @@ Rectangle {
             id: view
             Layout.fillWidth: true; Layout.fillHeight: true; clip: true
             model: root.rows
-            ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+            ScrollBar.vertical: ThinScrollBar {}
             delegate: TreeDelegate {
                 width: view.width
                 rowHighlight: modelData.kind === "folder"

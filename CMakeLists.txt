@@ -31,6 +31,7 @@ qt_add_qml_module(SmartClip
         qml/models/ClipboardModel.qml
         qml/utils/IconProvider.qml
         qml/utils/AppIcon.qml
+        qml/utils/ThinScrollBar.qml
         js/ClipboardManager.js
         js/FolderManager.js
         js/TimeUtils.js
