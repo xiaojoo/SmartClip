@@ -1,0 +1,20 @@
+# Build output
+/build/
+cmake-build-*/
+*.o
+*.obj
+*.exe
+*.lib
+*.dll
+
+# Qt Creator / IDE
+/.qtcreator/
+CMakeLists.txt.user
+*.user
+.vscode/
+.idea/
+*.swp
+
+# OS
+Thumbs.db
+.DS_Store
