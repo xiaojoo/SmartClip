@@ -1,6 +1,7 @@
 pragma ComponentBehavior: Bound
 
 import QtQuick
+import QtQuick.Layouts
 
 // Tinted vector icon: renders IconProvider.svg(kind, tint) as an Image.
 // (IconImage is only available as a private QtQuick.Controls.impl type.)
@@ -13,7 +14,9 @@ Image {
     property int size: 14
 
     width: size; height: size
-    implicitWidth: size; implicitHeight: size
+    Layout.preferredWidth: size
+    Layout.preferredHeight: size
+
     source: root.provider && root.kind ? root.provider.svg(root.kind, root.tint) : ""
     sourceSize.width: size * 2
     sourceSize.height: size * 2
