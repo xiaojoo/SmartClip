@@ -6,7 +6,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 
-find_package(Qt6 6.5 REQUIRED COMPONENTS Core Gui Qml Quick Sql Widgets)
+find_package(Qt6 6.5 REQUIRED COMPONENTS Core Gui Qml Quick QuickControls2 Sql Widgets)
 
 qt_add_executable(SmartClip
     src/main.cpp
@@ -60,7 +60,7 @@ qt_add_resources(SmartClip "app_icons"
         resources/icons/trash.svg
 )
 
-target_link_libraries(SmartClip PRIVATE Qt6::Core Qt6::Gui Qt6::Qml Qt6::Quick Qt6::Sql Qt6::Widgets)
+target_link_libraries(SmartClip PRIVATE Qt6::Core Qt6::Gui Qt6::Qml Qt6::Quick Qt6::QuickControls2 Qt6::Sql Qt6::Widgets)
 
 include(GNUInstallDirs)
 install(TARGETS SmartClip RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})

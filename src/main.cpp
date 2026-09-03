@@ -4,12 +4,14 @@
 #include <QApplication>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
+#include <QQuickStyle>
 #include <QSystemTrayIcon>
 
 int main(int argc, char *argv[]) {
     QApplication app(argc, argv);
     app.setOrganizationName("SmartClip");
     app.setApplicationName("SmartClip");
+    QQuickStyle::setStyle("Fusion");
 
     ClipboardStore store;
     if (!store.open()) return 1;

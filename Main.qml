@@ -81,7 +81,7 @@ ApplicationWindow {
     DropdownMenu {
         id: ddMenu
         anchors.fill: parent
-        onSelected: window.handleCommand(act)
+        onSelected: (act) => window.handleCommand(act)
     }
 
     // ==================== layout ====================
@@ -91,14 +91,14 @@ ApplicationWindow {
         MenuBar {
             id: menuBar
             Layout.fillWidth: true
-            onOpenMenu: ddMenu.openFor(anchor, items)
+            onOpenMenu: (anchor, items) => ddMenu.openFor(anchor, items)
         }
         ToolBar {
             id: toolBar
             Layout.fillWidth: true
-            onOpenMenu: ddMenu.openFor(anchor, items)
-            onRequestRefresh: window.refresh()
-            onSearchChanged: { window.searchText = text; window.refresh() }
+            onOpenMenu: (anchor, items) => ddMenu.openFor(anchor, items)
+            onRequestRefresh: () => window.refresh()
+            onSearchChanged: (text) => { window.searchText = text; window.refresh() }
         }
 
         RowLayout {
@@ -143,8 +143,8 @@ ApplicationWindow {
                 rows: window.treeRows
                 activeKey: window.activeFolder
                 selected: window.selectedItem
-                onFolderClicked: window.toggleFolder(key)
-                onItemClicked: window.selectItem(item)
+                onFolderClicked: (key) => window.toggleFolder(key)
+                onItemClicked: (item) => window.selectItem(item)
             }
 
             EditorArea {
