@@ -33,11 +33,11 @@ Rectangle {
         // panel header
         Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 30; color: headerColor; border.color: borderColor; border.width: 1
             RowLayout { anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 8; spacing: 8
-                IconImage { source: icons.path("chevron-down"); color: accentColor; width: 12; height: 12 }
+                AppIcon { provider: icons; kind: "chevron-down"; tint: accentColor; size: 12 }
                 Label { text: "项目"; color: textColor; font.pixelSize: 12; font.bold: true }
                 Item { Layout.fillWidth: true }
-                IconImage { source: icons.path("grid"); color: textMuted; width: 13; height: 13 }
-                IconImage { source: icons.path("more"); color: "#d4b652"; width: 14; height: 14 }
+                AppIcon { provider: icons; kind: "grid"; tint: textMuted; size: 13 }
+                AppIcon { provider: icons; kind: "more"; tint: "#d4b652"; size: 14 }
             }
         }
 
@@ -64,12 +64,12 @@ Rectangle {
         Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: borderColor }
         Item { Layout.fillWidth: true; Layout.preferredHeight: 8 }
         RowLayout { Layout.fillWidth: true; Layout.leftMargin: 12; Layout.rightMargin: 8; spacing: 8
-            IconImage { source: icons.path("chevron-down"); color: accentColor; width: 11; height: 11 }
+            AppIcon { provider: icons; kind: "chevron-down"; tint: accentColor; size: 11 }
             Label { text: "外部库"; color: textColor; font.pixelSize: 12 }
             Item { Layout.fillWidth: true }
         }
         RowLayout { Layout.fillWidth: true; Layout.preferredHeight: 24; Layout.leftMargin: 34; Layout.rightMargin: 8; spacing: 8
-            IconImage { source: icons.path("trash"); color: textMuted; width: 12; height: 12 }
+            AppIcon { provider: icons; kind: "trash"; tint: textMuted; size: 12 }
             Label { text: "回收站"; color: textColor; font.pixelSize: 12; Layout.fillWidth: true }
         }
         Item { Layout.fillWidth: true; Layout.preferredHeight: 8 }

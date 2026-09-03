@@ -18,3 +18,8 @@ CMakeLists.txt.user
 # OS
 Thumbs.db
 .DS_Store
+
+# QML caches
+*.qmlc
+*.qml.js
+*.jsc

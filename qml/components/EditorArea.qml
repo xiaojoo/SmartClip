@@ -40,21 +40,21 @@ Rectangle {
             RowLayout { anchors.fill: parent; anchors.leftMargin: 4; anchors.rightMargin: 6; spacing: 4
                 Rectangle { Layout.preferredWidth: 240; Layout.preferredHeight: 28; radius: 4; color: tabBg
                     RowLayout { anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 8; spacing: 8
-                        IconImage { source: item && item.type === "image" ? icons.path("image") : icons.path("file")
-                            color: item && item.type === "image" ? imageColor : accentColor
-                            width: 12; height: 12 }
+                        AppIcon { provider: icons; kind: item && item.type === "image" ? "image" : "file"
+                            tint: item && item.type === "image" ? imageColor : accentColor
+                            size: 12 }
                         Label { text: tabTitle(); color: textBright; font.pixelSize: 12; elide: Text.ElideRight; Layout.fillWidth: true }
-                        IconImage { source: icons.path("close"); color: textMuted; width: 11; height: 11 }
+                        AppIcon { provider: icons; kind: "close"; tint: textMuted; size: 11 }
                     }
                     MouseArea { anchors.fill: parent; hoverEnabled: true }
                 }
                 Rectangle { Layout.preferredWidth: 30; Layout.preferredHeight: 28; radius: 4; color: "transparent"
-                    IconImage { anchors.centerIn: parent; source: icons.path("plus"); color: textMuted; width: 15; height: 15 }
+                    AppIcon { anchors.centerIn: parent; provider: icons; kind: "plus"; tint: textMuted; size: 15 }
                     MouseArea { anchors.fill: parent; hoverEnabled: true }
                 }
                 Item { Layout.fillWidth: true }
-                IconImage { source: icons.path("grid"); color: accentColor; width: 12; height: 12 }
-                IconImage { source: icons.path("chevron-down"); color: textMuted; width: 11; height: 11 }
+                AppIcon { provider: icons; kind: "grid"; tint: accentColor; size: 12 }
+                AppIcon { provider: icons; kind: "chevron-down"; tint: textMuted; size: 11 }
             }
         }
 
@@ -83,7 +83,7 @@ Rectangle {
                 visible: !root.showWelcome && item && item.type === "image"
                 anchors.fill: parent; anchors.margins: 20; spacing: 10
                 RowLayout { width: parent.width; spacing: 8
-                    IconImage { source: icons.path("image"); color: imageColor; width: 14; height: 14 }
+                    AppIcon { provider: icons; kind: "image"; tint: imageColor; size: 14 }
                     Label { text: item ? item.title : ""; color: textMain; font.pixelSize: 13; font.bold: true; Layout.fillWidth: true }
                 }
                 Label { text: item ? Time.displayTime(item.createdAt) : ""; color: textMuted; font.pixelSize: 12 }

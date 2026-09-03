@@ -1,6 +1,7 @@
 pragma ComponentBehavior: Bound
 
 import QtQuick
+import QtQuick.Controls
 import QtQuick.Layouts
 import "../utils"
 
@@ -32,22 +33,24 @@ Rectangle {
         anchors.fill: parent; spacing: 4
         anchors.leftMargin: rowData && rowData.kind === "folder" ? 6 : 24
         anchors.rightMargin: 8
-        IconImage {
+        AppIcon {
             visible: rowData && rowData.kind === "folder"
-            source: rowData && rowData.expanded ? icons.path("chevron-down") : icons.path("chevron-right")
-            color: rowHighlight ? textBright : chevronDim
-            width: 11; height: 11
+            provider: icons
+            kind: rowData && rowData.expanded ? "chevron-down" : "chevron-right"
+            tint: rowHighlight ? textBright : chevronDim
+            size: 11
             Layout.alignment: Qt.AlignVCenter
         }
         Item { width: 2; height: 1 }
-        IconImage {
-            source: rowData && rowData.kind === "folder" ? icons.path("folder")
-                  : rowData && rowData.item && rowData.item.type === "image" ? icons.path("image")
-                  : icons.path("file")
-            color: rowData && rowData.kind === "folder" ? folderColor
-                 : rowData && rowData.item && rowData.item.type === "image" ? imageColor
-                 : accentColor
-            width: 13; height: 13
+        AppIcon {
+            provider: icons
+            kind: rowData && rowData.kind === "folder" ? "folder"
+                : rowData && rowData.item && rowData.item.type === "image" ? "image"
+                : "file"
+            tint: rowData && rowData.kind === "folder" ? folderColor
+                : rowData && rowData.item && rowData.item.type === "image" ? imageColor
+                : accentColor
+            size: 13
             Layout.alignment: Qt.AlignVCenter
         }
         Label {

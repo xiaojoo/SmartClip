@@ -30,6 +30,7 @@ qt_add_qml_module(SmartClip
         qml/delegates/TreeDelegate.qml
         qml/models/ClipboardModel.qml
         qml/utils/IconProvider.qml
+        qml/utils/AppIcon.qml
         js/ClipboardManager.js
         js/FolderManager.js
         js/TimeUtils.js

@@ -30,7 +30,7 @@ Rectangle {
         Label { text: root.copied ? "已复制" : "自动采集"; color: textColor; font.pixelSize: 11 }
         Label { text: root.count + " 项"; color: mutedColor; font.pixelSize: 11 }
         Rectangle { Layout.preferredWidth: 1; Layout.preferredHeight: 12; Layout.alignment: Qt.AlignVCenter; color: "#4b4d4f" }
-        IconImage { source: icons.path("branch"); color: "#8b929e"; width: 12; height: 12 }
+        AppIcon { provider: icons; kind: "branch"; tint: "#8b929e"; size: 12 }
         Label { text: "分支: main"; color: textColor; font.pixelSize: 11 }
         Rectangle { Layout.preferredWidth: 1; Layout.preferredHeight: 12; Layout.alignment: Qt.AlignVCenter; color: "#4b4d4f" }
         Label { text: "UTF-8"; color: textColor; font.pixelSize: 11 }

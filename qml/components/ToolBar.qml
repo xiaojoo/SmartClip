@@ -39,8 +39,8 @@ Rectangle {
 
     RowLayout {
         anchors.fill: parent; anchors.leftMargin: 6; anchors.rightMargin: 6; spacing: 3
-        IconImage { source: icons.path("chevron-left");  color: iconColor; width: 15; height: 15 }
-        IconImage { source: icons.path("chevron-right"); color: iconColor; width: 15; height: 15 }
+        AppIcon { provider: icons; kind: "chevron-left";  tint: iconColor; size: 15 }
+        AppIcon { provider: icons; kind: "chevron-right"; tint: iconColor; size: 15 }
         Rectangle { Layout.preferredWidth: 1; Layout.preferredHeight: 20; Layout.alignment: Qt.AlignVCenter; color: borderColor }
 
         // module / run-config box (opens date-folder menu)
@@ -49,7 +49,7 @@ Rectangle {
             Layout.preferredWidth: 168; Layout.preferredHeight: 28; radius: 4
             color: boxBg; border.color: borderColor
             RowLayout { anchors.fill: parent; anchors.leftMargin: 10; anchors.rightMargin: 10; spacing: 6
-                IconImage { source: icons.path("chevron-down"); color: accentColor; width: 12; height: 12 }
+                AppIcon { provider: icons; kind: "chevron-down"; tint: accentColor; size: 12 }
                 Label { text: "SmartClip"; color: textColor; font.pixelSize: 12; Layout.fillWidth: true }
             }
             MouseArea { anchors.fill: parent; hoverEnabled: true
@@ -57,12 +57,12 @@ Rectangle {
                 onClicked: root.openMenu(combo, root.folderItems()) }
         }
         Rectangle { Layout.preferredWidth: 26; Layout.preferredHeight: 26; radius: 4; color: "#2f6f4f"
-            IconImage { anchors.centerIn: parent; source: icons.path("play"); color: "#c8f2d8"; width: 12; height: 12 }
+            AppIcon { anchors.centerIn: parent; provider: icons; kind: "play"; tint: "#c8f2d8"; size: 12 }
             MouseArea { anchors.fill: parent; hoverEnabled: true; onClicked: root.requestRefresh() } }
         Rectangle { Layout.preferredWidth: 1; Layout.preferredHeight: 20; Layout.alignment: Qt.AlignVCenter; color: borderColor }
-        IconImage { source: icons.path("refresh"); color: iconColor; width: 15; height: 15
+        AppIcon { provider: icons; kind: "refresh"; tint: iconColor; size: 15
             MouseArea { anchors.fill: parent; hoverEnabled: true; onClicked: root.requestRefresh() } }
-        IconImage { source: icons.path("close"); color: iconColor; width: 15; height: 15
+        AppIcon { provider: icons; kind: "close"; tint: iconColor; size: 15
             MouseArea { anchors.fill: parent; hoverEnabled: true; onClicked: root.clearSearch() } }
 
         Item { Layout.fillWidth: true }
@@ -72,7 +72,7 @@ Rectangle {
             Layout.preferredWidth: 300; Layout.preferredHeight: 28; radius: 4
             color: fieldBg; border.color: borderColor
             RowLayout { anchors.fill: parent; anchors.leftMargin: 9; anchors.rightMargin: 9; spacing: 6
-                IconImage { source: icons.path("search"); color: iconColor; width: 13; height: 13 }
+                AppIcon { provider: icons; kind: "search"; tint: iconColor; size: 13 }
                 TextField {
                     id: field; Layout.fillWidth: true; Layout.fillHeight: true
                     placeholderText: "搜索剪贴内容"; placeholderTextColor: "#6d737a"; color: textColor
@@ -84,7 +84,7 @@ Rectangle {
             }
         }
         Rectangle { Layout.preferredWidth: 28; Layout.preferredHeight: 28; radius: 4; color: boxBg; border.color: borderColor
-            IconImage { anchors.centerIn: parent; source: icons.path("gear"); color: iconColor; width: 16; height: 16 }
+            AppIcon { anchors.centerIn: parent; provider: icons; kind: "gear"; tint: iconColor; size: 16 }
             MouseArea { anchors.fill: parent; hoverEnabled: true
                 onEntered: parent.color = boxHover; onExited: parent.color = boxBg
                 onClicked: root.openMenu(parent, root.toolItems()) } }

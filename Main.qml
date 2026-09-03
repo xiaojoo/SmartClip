@@ -119,11 +119,12 @@ ApplicationWindow {
                             required property var modelData
                             width: 26; height: 26; x: 4; radius: 5
                             color: modelData.active ? "#3a4a5a" : "transparent"
-                            IconImage {
+                            AppIcon {
                                 anchors.centerIn: parent
-                                source: stripIcons.path(modelData.k)
-                                color: modelData.active ? "#4c96d8" : "#9aa0a8"
-                                width: 16; height: 16
+                                provider: stripIcons
+                                kind: modelData.k
+                                tint: modelData.active ? "#4c96d8" : "#9aa0a8"
+                                size: 16
                             }
                             MouseArea { anchors.fill: parent; hoverEnabled: true
                                 onEntered: if (!modelData.active) parent.color = "#454749"
@@ -132,7 +133,7 @@ ApplicationWindow {
                     }
                     Item { width: 1; height: Math.max(1, parent.height - 300) }
                     Rectangle { width: 26; height: 26; x: 4; radius: 5; color: "transparent"
-                        IconImage { anchors.centerIn: parent; source: stripIcons.path("gear"); color: "#9aa0a8"; width: 16; height: 16 } }
+                        AppIcon { anchors.centerIn: parent; provider: stripIcons; kind: "gear"; tint: "#9aa0a8"; size: 16 } }
                 }
             }
 
