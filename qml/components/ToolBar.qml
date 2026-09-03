@@ -38,7 +38,7 @@ Rectangle {
     function clearSearch() { field.text = "" }
 
     RowLayout {
-        anchors.fill: parent; anchors.leftMargin: 6; anchors.rightMargin: 6; spacing: 3
+        anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 8; spacing: 8
         AppIcon { provider: icons; kind: "chevron-left";  tint: iconColor; size: 15 }
         AppIcon { provider: icons; kind: "chevron-right"; tint: iconColor; size: 15 }
         Rectangle { Layout.preferredWidth: 1; Layout.preferredHeight: 20; Layout.alignment: Qt.AlignVCenter; color: borderColor }
