@@ -12,6 +12,9 @@ ScrollBar {
     implicitWidth: orientation === Qt.Vertical ? 8 : 0
     implicitHeight: orientation === Qt.Horizontal ? 8 : 0
 
+    // Hide when there is nothing to scroll (content fully visible).
+    visible: root.size < 1.0
+
     background: Item {}
 
     contentItem: Rectangle {
