@@ -102,8 +102,8 @@ Rectangle {
             ScrollView {
                 visible: !root.showWelcome && item && item.type === "text"
                 anchors.fill: parent; clip: true
+                contentItem.boundsBehavior: Flickable.StopAtBounds
                 ScrollBar.vertical: ThinScrollBar {}
-                ScrollBar.horizontal: ThinScrollBar {}
                 TextArea {
                     readOnly: true
                     text: item ? item.content : ""

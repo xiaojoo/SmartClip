@@ -45,6 +45,7 @@ Rectangle {
         ListView {
             id: view
             Layout.fillWidth: true; Layout.fillHeight: true; clip: true
+            boundsBehavior: Flickable.StopAtBounds
             model: root.rows
             ScrollBar.vertical: ThinScrollBar {}
             delegate: TreeDelegate {

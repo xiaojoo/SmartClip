@@ -3,22 +3,22 @@ pragma ComponentBehavior: Bound
 import QtQuick
 import QtQuick.Controls
 
-// Thin, dark scrollbar: transparent track, only a slim dark line as handle.
+// Thin, dark scrollbar: fully transparent track, only a slim dark line handle.
 ScrollBar {
     id: root
 
     policy: ScrollBar.AsNeeded
 
-    implicitWidth: orientation === Qt.Vertical ? 6 : 0
-    implicitHeight: orientation === Qt.Horizontal ? 6 : 0
+    implicitWidth: orientation === Qt.Vertical ? 5 : 0
+    implicitHeight: orientation === Qt.Horizontal ? 5 : 0
 
-    background: Rectangle { color: "transparent" }
+    background: Item {}
 
     contentItem: Rectangle {
-        implicitWidth: 6
-        implicitHeight: 6
-        radius: 3
-        color: "#565a60"
-        opacity: 0.9
+        implicitWidth: 5
+        implicitHeight: 5
+        radius: 2.5
+        color: "#494d51"
+        opacity: 0.8
     }
 }
