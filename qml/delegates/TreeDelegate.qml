@@ -6,10 +6,11 @@ import QtQuick.Layouts
 import "../utils"
 
 // One row of the folder/date tree: a folder header or a clipboard item.
+// Declares `required property var modelData` so ListView injects the row.
 Rectangle {
     id: root
 
-    property var rowData: null
+    required property var modelData
     property bool rowHighlight: false
     signal rowClicked()
 
@@ -23,20 +24,22 @@ Rectangle {
     readonly property color folderColor: "#c8b74f"
     readonly property color imageColor:  "#d7a85b"
 
+    readonly property bool isFolder: modelData && modelData.kind === "folder"
+
     IconProvider { id: icons }
 
-    implicitHeight: rowData && rowData.kind === "folder" ? 28 : 24
+    implicitHeight: isFolder ? 28 : 24
     radius: 3
     color: rowHighlight ? selColor : (mouse.containsMouse ? hoverColor : "transparent")
 
     RowLayout {
         anchors.fill: parent; spacing: 4
-        anchors.leftMargin: rowData && rowData.kind === "folder" ? 6 : 24
+        anchors.leftMargin: isFolder ? 6 : 24
         anchors.rightMargin: 8
         AppIcon {
-            visible: rowData && rowData.kind === "folder"
+            visible: isFolder
             provider: icons
-            kind: rowData && rowData.expanded ? "chevron-down" : "chevron-right"
+            kind: modelData.expanded ? "chevron-down" : "chevron-right"
             tint: rowHighlight ? textBright : chevronDim
             size: 11
             Layout.alignment: Qt.AlignVCenter
@@ -44,24 +47,20 @@ Rectangle {
         Item { width: 2; height: 1 }
         AppIcon {
             provider: icons
-            kind: rowData && rowData.kind === "folder" ? "folder"
-                : rowData && rowData.item && rowData.item.type === "image" ? "image"
-                : "file"
-            tint: rowData && rowData.kind === "folder" ? folderColor
-                : rowData && rowData.item && rowData.item.type === "image" ? imageColor
-                : accentColor
+            kind: isFolder ? "folder" : (modelData.item.type === "image" ? "image" : "file")
+            tint: isFolder ? folderColor : (modelData.item.type === "image" ? imageColor : accentColor)
             size: 13
             Layout.alignment: Qt.AlignVCenter
         }
         Label {
-            text: rowData && rowData.kind === "folder"
-                  ? rowData.label
-                  : (rowData.item && rowData.item.type === "image" ? "图片 · " + rowData.item.title : rowData.item.title)
-            color: rowData && rowData.kind === "folder" ? textBright : textColor
+            text: isFolder
+                  ? modelData.label
+                  : (modelData.item.type === "image" ? "图片 · " + modelData.item.title : modelData.item.title)
+            color: isFolder ? textBright : textColor
             font.pixelSize: 12; elide: Text.ElideRight; Layout.fillWidth: true
         }
         Label {
-            text: rowData && rowData.kind === "folder" ? rowData.count : ""
+            text: isFolder ? modelData.count : ""
             color: textMuted; font.pixelSize: 11; Layout.alignment: Qt.AlignVCenter
         }
     }

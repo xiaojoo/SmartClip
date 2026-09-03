@@ -47,17 +47,14 @@ Rectangle {
             Layout.fillWidth: true; Layout.fillHeight: true; clip: true
             model: root.rows
             ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
-            delegate: Component {
-                TreeDelegate {
-                    rowData: modelData
-                    width: view.width
-                    rowHighlight: modelData.kind === "folder"
-                                  ? root.activeKey === modelData.key
-                                  : (root.selected && root.selected.id === modelData.item.id)
-                    onRowClicked: modelData.kind === "folder"
-                                  ? root.folderClicked(modelData.key)
-                                  : root.itemClicked(modelData.item)
-                }
+            delegate: TreeDelegate {
+                width: view.width
+                rowHighlight: modelData.kind === "folder"
+                              ? root.activeKey === modelData.key
+                              : (root.selected && root.selected.id === modelData.item.id)
+                onRowClicked: modelData.kind === "folder"
+                              ? root.folderClicked(modelData.key)
+                              : root.itemClicked(modelData.item)
             }
         }
 
