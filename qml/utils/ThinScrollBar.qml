@@ -9,16 +9,17 @@ ScrollBar {
 
     policy: ScrollBar.AsNeeded
 
-    implicitWidth: orientation === Qt.Vertical ? 5 : 0
-    implicitHeight: orientation === Qt.Horizontal ? 5 : 0
+    implicitWidth: orientation === Qt.Vertical ? 8 : 0
+    implicitHeight: orientation === Qt.Horizontal ? 8 : 0
 
     background: Item {}
 
     contentItem: Rectangle {
-        implicitWidth: 5
-        implicitHeight: 5
-        radius: 2.5
-        color: "#494d51"
-        opacity: 0.8
+        implicitWidth: 8
+        implicitHeight: 8
+        radius: 4
+        color: "#565a60"
+        opacity: 0.9
     }
 }
+
