@@ -19,7 +19,43 @@ qt_add_executable(SmartClip
 qt_add_qml_module(SmartClip
     URI SmartClip
     VERSION 1.0
-    QML_FILES qml/Main.qml
+    QML_FILES
+        Main.qml
+        qml/components/DropdownMenu.qml
+        qml/components/EditorArea.qml
+        qml/components/FolderTree.qml
+        qml/components/MenuBar.qml
+        qml/components/StatusBar.qml
+        qml/components/ToolBar.qml
+        qml/delegates/TreeDelegate.qml
+        qml/models/ClipboardModel.qml
+        qml/utils/IconProvider.qml
+        js/ClipboardManager.js
+        js/FolderManager.js
+        js/TimeUtils.js
+)
+
+qt_add_resources(SmartClip "app_icons"
+    PREFIX "/icons"
+    BASE "resources/icons"
+    FILES
+        resources/icons/branch.svg
+        resources/icons/chevron-down.svg
+        resources/icons/chevron-left.svg
+        resources/icons/chevron-right.svg
+        resources/icons/chevron-up.svg
+        resources/icons/close.svg
+        resources/icons/file.svg
+        resources/icons/folder.svg
+        resources/icons/gear.svg
+        resources/icons/grid.svg
+        resources/icons/image.svg
+        resources/icons/more.svg
+        resources/icons/play.svg
+        resources/icons/plus.svg
+        resources/icons/refresh.svg
+        resources/icons/search.svg
+        resources/icons/trash.svg
 )
 
 target_link_libraries(SmartClip PRIVATE Qt6::Core Qt6::Gui Qt6::Qml Qt6::Quick Qt6::Sql Qt6::Widgets)
