@@ -6,11 +6,10 @@ import QtQuick.Layouts
 import "../../js/TimeUtils.js" as Time
 import "../utils"
 
-Rectangle {
+// 根改为 Item
+Item {
     id: root
-    color: "#1e1f22"
-    // 去掉边框和圆角
-    // radius: 10; clip: true; border.color...
+    clip: true // 关键：裁剪
 
     property var item: null
     property bool showWelcome: true
@@ -18,7 +17,7 @@ Rectangle {
     readonly property color barBg:       "#313335"
     readonly property color editorBg:    "#1e1f22"
     readonly property color borderColor: "#4b4d4f"
-    readonly property color tabBg:       "#45484c"  // 淡灰色 Tab 背景
+    readonly property color tabBg:       "#45484c"
     readonly property color textBright:  "#e8e8e8"
     readonly property color textMain:    "#bbbbbb"
     readonly property color textMuted:   "#7d7d7d"
@@ -31,6 +30,13 @@ Rectangle {
     IconProvider { id: icons }
 
     function tabTitle() { return item ? item.title : "README.md" }
+
+    // 真正的圆角背景
+    Rectangle {
+        anchors.fill: parent
+        color: "#1e1f22"
+        radius: 10
+    }
 
     ColumnLayout {
         anchors.fill: parent
@@ -49,12 +55,11 @@ Rectangle {
                 anchors.rightMargin: 6
                 spacing: 4
 
-                // 选中的 Tab（淡灰色背景，无蓝线）
                 Rectangle {
                     Layout.preferredWidth: 240
                     Layout.preferredHeight: 28
                     radius: 4
-                    color: root.tabBg  // 淡灰色
+                    color: root.tabBg
 
                     RowLayout {
                         anchors.fill: parent
@@ -77,11 +82,9 @@ Rectangle {
                         }
                         AppIcon { provider: icons; kind: "close"; tint: root.textMuted; size: 11 }
                     }
-
                     MouseArea { anchors.fill: parent; hoverEnabled: true }
                 }
 
-                // 新增 Tab 按钮
                 Rectangle {
                     Layout.preferredWidth: 30
                     Layout.preferredHeight: 28
@@ -92,7 +95,6 @@ Rectangle {
                 }
 
                 Item { Layout.fillWidth: true }
-
                 AppIcon { provider: icons; kind: "grid"; tint: root.accentColor; size: 12 }
                 AppIcon { provider: icons; kind: "chevron-down"; tint: root.textMuted; size: 11 }
             }
@@ -106,18 +108,16 @@ Rectangle {
             }
         }
 
-        // 内容区
         Rectangle {
             Layout.fillWidth: true
             Layout.fillHeight: true
-            color: root.editorBg
+            color: "transparent" // 背景由外层 Rectangle 提供
 
             Column {
                 visible: root.showWelcome
                 anchors.centerIn: parent
                 width: 460
                 spacing: 18
-
                 Repeater {
                     model: [ { t: "搜索全部内容", k: "Double Shift" }, { t: "刷新剪贴板", k: "F5" },
                              { t: "最近复制", k: "Ctrl+E" }, { t: "导航栏", k: "Alt+Home" } ]
@@ -129,103 +129,43 @@ Rectangle {
                         Label { text: modelData.k; color: root.hintKey; font.pixelSize: 13 }
                     }
                 }
-                Label {
-                    text: "复制任意内容自动采集，点击左侧条目回填剪贴板"
-                    color: root.textMuted
-                    font.pixelSize: 13
-                }
+                Label { text: "复制任意内容自动采集，点击左侧条目回填剪贴板"; color: root.textMuted; font.pixelSize: 13 }
             }
 
             Column {
                 visible: !root.showWelcome && item && item.type === "image"
-                anchors.fill: parent
-                anchors.margins: 20
-                spacing: 10
-
-                RowLayout {
-                    width: parent.width
-                    spacing: 8
+                anchors.fill: parent; anchors.margins: 20; spacing: 10
+                RowLayout { width: parent.width; spacing: 8
                     AppIcon { provider: icons; kind: "image"; tint: root.imageColor; size: 14 }
                     Label { text: item ? item.title : ""; color: root.textMain; font.pixelSize: 13; font.bold: true; Layout.fillWidth: true }
                 }
                 Label { text: item ? Time.displayTime(item.createdAt) : ""; color: root.textMuted; font.pixelSize: 12 }
                 Rectangle { width: parent.width; height: 1; color: root.borderColor }
-
-                Item {
-                    width: parent.width
-                    height: parent.height - 90
-                    Image {
-                        anchors.fill: parent
-                        source: item ? "file:///" + item.content.replace(/\\/g, "/") : ""
-                        fillMode: Image.PreserveAspectFit
-                        horizontalAlignment: Image.AlignHCenter
-                        verticalAlignment: Image.AlignVCenter
-                    }
+                Item { width: parent.width; height: parent.height - 90
+                    Image { anchors.fill: parent; source: item ? "file:///" + item.content.replace(/\\/g, "/") : ""
+                        fillMode: Image.PreserveAspectFit; horizontalAlignment: Image.AlignHCenter; verticalAlignment: Image.AlignVCenter }
                 }
             }
 
-            // 文本预览（带行号）
             RowLayout {
                 visible: !root.showWelcome && item && item.type === "text"
-                anchors.fill: parent
-                spacing: 0
-
-                // 行号区域
-                Rectangle {
-                    Layout.preferredWidth: 50
-                    Layout.fillHeight: true
-                    color: root.editorBg
-
-                    ListView {
-                        id: lineNumbers
-                        anchors.fill: parent
-                        anchors.topMargin: 18
-                        anchors.bottomMargin: 18
-                        anchors.leftMargin: 10
-                        anchors.rightMargin: 10
-                        clip: true
-                        interactive: false
+                anchors.fill: parent; spacing: 0
+                Rectangle { Layout.preferredWidth: 50; Layout.fillHeight: true; color: "transparent"
+                    ListView { id: lineNumbers; anchors.fill: parent; anchors.topMargin: 18; anchors.bottomMargin: 18
+                        anchors.leftMargin: 10; anchors.rightMargin: 10; clip: true; interactive: false
                         model: textArea.text.length > 0 ? textArea.text.split('\n').length : 1
-
-                        delegate: Label {
-                            required property int index
-                            text: (index + 1).toString()
-                            color: root.lineNumberColor
-                            font.family: "Consolas"
-                            font.pixelSize: 13
-                            horizontalAlignment: Text.AlignRight
-                            width: parent.width
-                            height: 20
-                        }
+                        delegate: Label { required property int index; text: (index + 1).toString()
+                            color: root.lineNumberColor; font.family: "Consolas"; font.pixelSize: 13
+                            horizontalAlignment: Text.AlignRight; width: parent.width; height: 20 }
                     }
                 }
-
-                Rectangle {
-                    Layout.preferredWidth: 1
-                    Layout.fillHeight: true
-                    color: root.borderColor
-                }
-
-                ScrollView {
-                    id: scrollView
-                    Layout.fillWidth: true
-                    Layout.fillHeight: true
-                    clip: true
+                Rectangle { Layout.preferredWidth: 1; Layout.fillHeight: true; color: root.borderColor }
+                ScrollView { id: scrollView; Layout.fillWidth: true; Layout.fillHeight: true; clip: true
                     ScrollBar.vertical: ThinScrollBar {}
-
-                    TextArea {
-                        id: textArea
-                        readOnly: true
-                        text: item ? item.content : ""
-                        color: root.codeColor
-                        font.family: "Consolas"
-                        font.pixelSize: 13
-                        wrapMode: TextEdit.Wrap
-                        selectByMouse: true
-                        topPadding: 18
-                        leftPadding: 12
-                        rightPadding: 22
-                        bottomPadding: 18
+                    TextArea { id: textArea; readOnly: true; text: item ? item.content : ""
+                        color: root.codeColor; font.family: "Consolas"; font.pixelSize: 13
+                        wrapMode: TextEdit.Wrap; selectByMouse: true
+                        topPadding: 18; leftPadding: 12; rightPadding: 22; bottomPadding: 18
                         background: Rectangle { color: root.editorBg }
                     }
                 }

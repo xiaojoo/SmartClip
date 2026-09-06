@@ -76,7 +76,7 @@ ApplicationWindow {
 
         RowLayout {
             Layout.fillWidth: true; Layout.fillHeight: true
-            spacing: 0  // 【修改】左边不留间隙，工具条和项目栏紧贴
+            spacing: 0
 
             // ---- 左侧工具窗口图标条（保持原样） ----
             Rectangle {
@@ -109,6 +109,8 @@ ApplicationWindow {
             FolderTree {
                 id: folderTree
                 Layout.fillHeight: true; Layout.preferredWidth: 300
+                Layout.topMargin: 8
+                Layout.bottomMargin: 8
                 rows: window.treeRows
                 activeKey: window.activeFolder
                 selected: window.selectedItem
@@ -119,7 +121,9 @@ ApplicationWindow {
             EditorArea {
                 id: editor
                 Layout.fillWidth: true; Layout.fillHeight: true
-                Layout.leftMargin: 8  // 【修改】和左边（项目栏）有个小间隙
+                Layout.leftMargin: 8
+                Layout.topMargin: 8
+                Layout.bottomMargin: 8
                 item: window.selectedItem
                 showWelcome: window.showWhatTab
             }
