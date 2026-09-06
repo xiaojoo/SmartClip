@@ -76,9 +76,9 @@ ApplicationWindow {
 
         RowLayout {
             Layout.fillWidth: true; Layout.fillHeight: true
-            spacing: 8  // 模块之间的间隙（项目栏和内容区之间）
+            spacing: 0  // 【修改】左边不留间隙，工具条和项目栏紧贴
 
-            // ---- 左侧工具窗口图标条（恢复原样：直角、原色、无间隙） ----
+            // ---- 左侧工具窗口图标条（保持原样） ----
             Rectangle {
                 Layout.fillHeight: true; Layout.preferredWidth: 34
                 color: "#3c3f41"; border.color: "#4b4d4f"; border.width: 1
@@ -119,12 +119,12 @@ ApplicationWindow {
             EditorArea {
                 id: editor
                 Layout.fillWidth: true; Layout.fillHeight: true
+                Layout.leftMargin: 8  // 【修改】和左边（项目栏）有个小间隙
                 item: window.selectedItem
                 showWelcome: window.showWhatTab
             }
         }
 
-        // 底部状态栏（恢复原样：无 margin）
         StatusBar {
             Layout.fillWidth: true
             title: window.selectedItem ? window.selectedItem.title : "README.md"

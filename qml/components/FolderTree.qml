@@ -8,11 +8,10 @@ import "../utils"
 
 Rectangle {
     id: root
-    color: "#2b2d30"  // 黑色背景
-    radius: 10        // 圆角
+    color: "#1e1f22"   // 【修改】黑色背景
+    radius: 10         // 模块圆角
     clip: true
-    border.color: "#43454a"
-    border.width: 1
+    border.width: 0    // 【修改】不要边框
 
     property var rows: []
     property string activeKey: "today"
@@ -29,7 +28,7 @@ Rectangle {
 
     ColumnLayout {
         anchors.fill: parent
-        anchors.margins: 1  // 留出边框空间
+        // anchors.margins: 1  // 去掉 margin，因为无边框
         spacing: 0
 
         Rectangle {
