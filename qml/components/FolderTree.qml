@@ -6,11 +6,13 @@ import QtQuick.Layouts
 import "../delegates"
 import "../utils"
 
-// Left "Project" panel: header + date-folder tree + 外部库/回收站 footer.
 Rectangle {
     id: root
-
-    color: "#3c3f41"; border.color: "#4b4d4f"; border.width: 1
+    color: "#2b2d30"  // 黑色背景
+    radius: 10        // 圆角
+    clip: true
+    border.color: "#43454a"
+    border.width: 1
 
     property var rows: []
     property string activeKey: "today"
@@ -19,32 +21,46 @@ Rectangle {
     signal folderClicked(string key)
     signal itemClicked(var item)
 
-    readonly property color borderColor: "#4b4d4f"
-    readonly property color headerColor:  "#3a3c3f"
-    readonly property color accentColor:  "#4c96d8"
-    readonly property color textColor:    "#bbbbbb"
-    readonly property color textMuted:    "#7d7d7d"
+    readonly property color borderColor: "#43454a"
+    readonly property color textBright:  "#ced0d6"
+    readonly property color textMuted:   "#6f737a"
 
     IconProvider { id: icons }
 
     ColumnLayout {
-        anchors.fill: parent; spacing: 0
+        anchors.fill: parent
+        anchors.margins: 1  // 留出边框空间
+        spacing: 0
 
-        // panel header
-        Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 30; color: headerColor; border.color: borderColor; border.width: 1
-            RowLayout { anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 8; spacing: 8
-                AppIcon { provider: icons; kind: "chevron-down"; tint: accentColor; size: 12 }
-                Label { text: "项目"; color: textColor; font.pixelSize: 12; font.bold: true }
+        Rectangle {
+            Layout.fillWidth: true
+            Layout.preferredHeight: 36
+            color: "transparent"
+            RowLayout {
+                anchors.fill: parent
+                anchors.leftMargin: 12
+                anchors.rightMargin: 8
+                spacing: 6
+                Label { text: "项目"; color: root.textBright; font.pixelSize: 12; font.bold: true }
+                AppIcon { provider: icons; kind: "chevron-down"; tint: root.textMuted; size: 10 }
                 Item { Layout.fillWidth: true }
-                AppIcon { provider: icons; kind: "grid"; tint: textMuted; size: 13 }
-                AppIcon { provider: icons; kind: "more"; tint: "#d4b652"; size: 14 }
+                AppIcon { provider: icons; kind: "grid"; tint: root.textMuted; size: 13 }
+                AppIcon { provider: icons; kind: "more"; tint: root.textMuted; size: 14 }
+            }
+            Rectangle {
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.bottom: parent.bottom
+                height: 1
+                color: root.borderColor
             }
         }
 
-        // tree
         ListView {
             id: view
-            Layout.fillWidth: true; Layout.fillHeight: true; clip: true
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            clip: true
             boundsBehavior: Flickable.StopAtBounds
             model: root.rows
             ScrollBar.vertical: ThinScrollBar {}
@@ -60,16 +76,28 @@ Rectangle {
         }
 
         Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: borderColor }
+
         Item { Layout.fillWidth: true; Layout.preferredHeight: 8 }
-        RowLayout { Layout.fillWidth: true; Layout.leftMargin: 12; Layout.rightMargin: 8; spacing: 8
-            AppIcon { provider: icons; kind: "chevron-down"; tint: accentColor; size: 11 }
-            Label { text: "外部库"; color: textColor; font.pixelSize: 12 }
-            Item { Layout.fillWidth: true }
+
+        RowLayout {
+            Layout.fillWidth: true
+            Layout.leftMargin: 12
+            Layout.rightMargin: 8
+            spacing: 6
+            Label { text: "外部库"; color: root.textMuted; font.pixelSize: 12; Layout.fillWidth: true }
+            AppIcon { provider: icons; kind: "chevron-down"; tint: root.textMuted; size: 10 }
         }
-        RowLayout { Layout.fillWidth: true; Layout.preferredHeight: 24; Layout.leftMargin: 34; Layout.rightMargin: 8; spacing: 8
-            AppIcon { provider: icons; kind: "trash"; tint: textMuted; size: 12 }
-            Label { text: "回收站"; color: textColor; font.pixelSize: 12; Layout.fillWidth: true }
+
+        RowLayout {
+            Layout.fillWidth: true
+            Layout.preferredHeight: 24
+            Layout.leftMargin: 34
+            Layout.rightMargin: 8
+            spacing: 6
+            AppIcon { provider: icons; kind: "trash"; tint: root.textMuted; size: 12 }
+            Label { text: "回收站"; color: root.textMuted; font.pixelSize: 12; Layout.fillWidth: true }
         }
+
         Item { Layout.fillWidth: true; Layout.preferredHeight: 8 }
     }
 }

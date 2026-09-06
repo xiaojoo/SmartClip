@@ -1,22 +1,18 @@
-pragma ComponentBehavior: Bound
-
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
-import "js/FolderManager.js" as Folders
-import "js/TimeUtils.js" as Time
-import "js/ClipboardManager.js" as Store
 import "qml/components"
 import "qml/models"
 import "qml/utils"
+import "js/FolderManager.js" as Folders
+import "js/TimeUtils.js" as Time
 
-// ===================== Main window: only assembles components =====================
 ApplicationWindow {
     id: window
     width: 1460; height: 900; minimumWidth: 1000; minimumHeight: 640; visible: true
     title: "SmartClip — 剪贴板"
+    color: "#2b2d30"
 
-    // ---- shared state ----
     property string searchText: ""
     property var selectedItem: null
     property string activeFolder: "today"
@@ -31,39 +27,26 @@ ApplicationWindow {
     ]
     property var expanded: ({ "today": true, "yesterday": false, "week": false, "older": false })
 
-    // ---- clipboard data model (context property clipboardStore comes from C++) ----
     ClipboardModel { id: cbm; onChanged: window.rebuild() }
 
-    // ---- logic ----
-    function rebuild() {
-        treeRows = Folders.buildTree(cbm.entries, folders, expanded, Time.periodFor)
-    }
-    function refresh() {
-        cbm.reload(searchText)
-    }
+    function rebuild() { treeRows = Folders.buildTree(cbm.entries, folders, expanded, Time.periodFor) }
+    function refresh() { cbm.reload(searchText) }
     function toggleFolder(key) {
         var e = ({})
         for (var k in expanded) e[k] = expanded[k]
         e[key] = !e[key]
-        expanded = e
-        activeFolder = key
-        selectedItem = null
-        showWhatTab = true
+        expanded = e; activeFolder = key; selectedItem = null; showWhatTab = true
         rebuild()
     }
     function activateFolder(key) {
         var e = ({})
         for (var k in expanded) e[k] = expanded[k]
         e[key] = true
-        expanded = e
-        activeFolder = key
-        selectedItem = null
-        showWhatTab = true
+        expanded = e; activeFolder = key; selectedItem = null; showWhatTab = true
         rebuild()
     }
     function selectItem(item) {
-        selectedItem = item
-        showWhatTab = false
+        selectedItem = item; showWhatTab = false
         if (item) Store.copyItem(item.id)
     }
     function handleCommand(act) {
@@ -72,28 +55,18 @@ ApplicationWindow {
         else if (act === "copy") { if (selectedItem) Store.copyItem(selectedItem.id) }
         else if (act === "clearsearch") { searchText = ""; toolBar.clearSearch() }
         else if (act.indexOf("folder:") === 0) activateFolder(act.substring(7))
+        else if (act.indexOf("menu:") === 0) toolBar.openGroup(act.substring(5))
     }
 
     Component.onCompleted: refresh()
     Connections { target: clipboardStore; function onChanged() { window.refresh() } }
 
-    // ---- shared dropdown overlay ----
-    DropdownMenu {
-        id: ddMenu
-        anchors.fill: parent
-        onSelected: (act) => window.handleCommand(act)
-    }
+    DropdownMenu { id: ddMenu; anchors.fill: parent; onSelected: (act) => window.handleCommand(act) }
 
-    // ==================== layout ====================
     ColumnLayout {
         anchors.fill: parent; spacing: 0
 
-        MenuBar {
-            id: menuBar
-            Layout.fillWidth: true
-            onOpenMenu: (anchor, items) => ddMenu.openFor(anchor, items)
-        }
-        ToolBar {
+        MainToolBar {
             id: toolBar
             Layout.fillWidth: true
             onOpenMenu: (anchor, items) => ddMenu.openFor(anchor, items)
@@ -102,30 +75,26 @@ ApplicationWindow {
         }
 
         RowLayout {
-            Layout.fillWidth: true; Layout.fillHeight: true; spacing: 0
+            Layout.fillWidth: true; Layout.fillHeight: true
+            spacing: 8  // 模块之间的间隙（项目栏和内容区之间）
 
-            // ---- left tool-window icon strip ----
+            // ---- 左侧工具窗口图标条（恢复原样：直角、原色、无间隙） ----
             Rectangle {
-                Layout.fillHeight: true; Layout.preferredWidth: 34; color: "#3c3f41"; border.color: "#4b4d4f"; border.width: 1
+                Layout.fillHeight: true; Layout.preferredWidth: 34
+                color: "#3c3f41"; border.color: "#4b4d4f"; border.width: 1
                 IconProvider { id: stripIcons }
                 Column {
                     anchors.fill: parent; anchors.topMargin: 8; anchors.bottomMargin: 8; spacing: 6
                     Repeater {
-                        model: [
-                            { k: "folder", active: true }, { k: "file", active: false }, { k: "search", active: false },
-                            { k: "play", active: false }, { k: "branch", active: false }
-                        ]
+                        model: [ { k: "folder", active: true }, { k: "file", active: false },
+                                 { k: "search", active: false }, { k: "play", active: false },
+                                 { k: "branch", active: false } ]
                         delegate: Rectangle {
                             required property var modelData
                             width: 26; height: 26; x: 4; radius: 5
                             color: modelData.active ? "#3a4a5a" : "transparent"
-                            AppIcon {
-                                anchors.centerIn: parent
-                                provider: stripIcons
-                                kind: modelData.k
-                                tint: modelData.active ? "#4c96d8" : "#9aa0a8"
-                                size: 16
-                            }
+                            AppIcon { anchors.centerIn: parent; provider: stripIcons; kind: modelData.k
+                                      tint: modelData.active ? "#4c96d8" : "#9aa0a8"; size: 16 }
                             MouseArea { anchors.fill: parent; hoverEnabled: true
                                 onEntered: if (!modelData.active) parent.color = "#454749"
                                 onExited: if (!modelData.active) parent.color = "transparent" }
@@ -155,6 +124,7 @@ ApplicationWindow {
             }
         }
 
+        // 底部状态栏（恢复原样：无 margin）
         StatusBar {
             Layout.fillWidth: true
             title: window.selectedItem ? window.selectedItem.title : "README.md"
