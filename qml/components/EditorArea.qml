@@ -110,14 +110,12 @@ Rectangle {
 
         // 内容区（始终保持底部圆角；如果标签栏隐藏则四个角都是圆角）
         Rectangle {
+            id: contentArea
             Layout.fillWidth: true
             Layout.fillHeight: true
             color: root.editorBg
             clip: true
-            bottomLeftRadius: 10
-            bottomRightRadius: 10
-            topLeftRadius: root.showWelcome ? 10 : 0
-            topRightRadius: root.showWelcome ? 10 : 0
+            radius: 10
 
             Column {
                 visible: root.showWelcome
@@ -187,27 +185,37 @@ Rectangle {
 
                 Rectangle { Layout.preferredWidth: 1; Layout.fillHeight: true; color: root.borderColor }
 
-                ScrollView {
-                    id: scrollView
+                Rectangle {
                     Layout.fillWidth: true
                     Layout.fillHeight: true
+                    color: root.editorBg
                     clip: true
-                    ScrollBar.vertical: ThinScrollBar {}
+                    radius: 10
 
-                    TextArea {
-                        id: textArea
-                        readOnly: true
-                        text: item ? item.content : ""
-                        color: root.codeColor
-                        font.family: "Consolas"
-                        font.pixelSize: 13
-                        wrapMode: TextEdit.Wrap
-                        selectByMouse: true
-                        topPadding: 18
-                        leftPadding: 12
-                        rightPadding: 22
-                        bottomPadding: 18
-                        background: Rectangle { color: root.editorBg }
+                    ScrollView {
+                        id: scrollView
+                        anchors.fill: parent
+                        clip: true
+                        ScrollBar.vertical: ThinScrollBar {}
+
+                        TextArea {
+                            id: textArea
+                            readOnly: true
+                            text: item ? item.content : ""
+                            color: root.codeColor
+                            font.family: "Consolas"
+                            font.pixelSize: 13
+                            wrapMode: TextEdit.Wrap
+                            selectByMouse: true
+                            topPadding: 18
+                            leftPadding: 12
+                            rightPadding: 22
+                            bottomPadding: 18
+                            background: Rectangle {
+                                color: root.editorBg
+                                radius: 10
+                            }
+                        }
                     }
                 }
             }
