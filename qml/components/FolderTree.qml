@@ -56,22 +56,41 @@ Rectangle {
             }
         }
 
-        ListView {
-            id: view
+        Item {
             Layout.fillWidth: true
             Layout.fillHeight: true
-            clip: true
-            boundsBehavior: Flickable.StopAtBounds
-            model: root.rows
-            ScrollBar.vertical: ThinScrollBar {}
+
+            ListView {
+                id: view
+
+                anchors.fill: parent
+
+                clip: true
+                boundsBehavior: Flickable.StopAtBounds
+                model: root.rows
+
+                leftMargin: 10
+                ScrollBar.vertical: ThinScrollBar {
+                    anchors.right: parent.right
+                    // anchors.rightMargin: 0
+                    // topPadding: 8
+                    // bottomPadding: 8
+                }
+
             delegate: TreeDelegate {
-                width: view.width
+                x: 12
+                width: view.width - 18
+
+
                 rowHighlight: modelData.kind === "folder"
                               ? root.activeKey === modelData.key
-                              : (root.selected && root.selected.id === modelData.item.id)
+                              : (root.selected &&
+                                 root.selected.id === modelData.item.id)
+
                 onRowClicked: modelData.kind === "folder"
                               ? root.folderClicked(modelData.key)
                               : root.itemClicked(modelData.item)
+                }
             }
         }
 
