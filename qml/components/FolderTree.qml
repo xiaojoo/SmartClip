@@ -70,6 +70,9 @@ Rectangle {
                 model: root.rows
 
                 leftMargin: 10
+                topMargin: 8
+                bottomMargin: 8
+
                 ScrollBar.vertical: ThinScrollBar {
                     anchors.right: parent.right
                     // anchors.rightMargin: 0
@@ -80,6 +83,8 @@ Rectangle {
             delegate: TreeDelegate {
                 x: 12
                 width: view.width - 18
+                // y: 4
+                // height: implicitHeight + 8
 
 
                 rowHighlight: modelData.kind === "folder"
