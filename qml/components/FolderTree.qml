@@ -12,6 +12,8 @@ Rectangle {
     radius: 10
     clip: true
     border.width: 0
+    anchors.leftMargin: 22
+    anchors.rightMargin: 6
 
     property var rows: []
     property string activeKey: "today"

@@ -121,7 +121,7 @@ ApplicationWindow {
             EditorArea {
                 id: editor
                 Layout.fillWidth: true; Layout.fillHeight: true
-                Layout.leftMargin: 8
+                Layout.leftMargin: 5
                 item: window.selectedItem
                 showWelcome: window.showWhatTab
             }

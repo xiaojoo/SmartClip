@@ -32,8 +32,8 @@ Rectangle {
 
     RowLayout {
         anchors.fill: parent; spacing: 4
-        anchors.leftMargin: isFolder ? 6 : 24
-        anchors.rightMargin: 8
+        anchors.leftMargin: isFolder ? 6 : 22
+        anchors.rightMargin: 6
         AppIcon {
             visible: isFolder
             provider: icons
