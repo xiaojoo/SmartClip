@@ -159,6 +159,10 @@ Rectangle {
                     Layout.preferredWidth: 50
                     Layout.fillHeight: true
                     color: root.editorBg
+                    clip: true
+                    radius: 10
+                    topLeftRadius: root.showWelcome ? 10 : 0
+                    topRightRadius: root.showWelcome ? 10 : 0
 
                     ListView {
                         id: lineNumbers
