@@ -108,11 +108,16 @@ Rectangle {
             }
         }
 
-        // 内容区（加上下部圆角，如果标签栏隐藏则四个角都是圆角）
+        // 内容区（始终保持底部圆角；如果标签栏隐藏则四个角都是圆角）
         Rectangle {
             Layout.fillWidth: true
             Layout.fillHeight: true
             color: root.editorBg
+            clip: true
+            bottomLeftRadius: 10
+            bottomRightRadius: 10
+            topLeftRadius: root.showWelcome ? 10 : 0
+            topRightRadius: root.showWelcome ? 10 : 0
 
             Column {
                 visible: root.showWelcome
