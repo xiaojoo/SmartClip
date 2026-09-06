@@ -34,7 +34,7 @@ Rectangle {
 
         Rectangle {
             Layout.fillWidth: true
-            Layout.preferredHeight: 36
+            Layout.preferredHeight: 35
             color: "transparent"
             RowLayout {
                 anchors.fill: parent
@@ -52,7 +52,10 @@ Rectangle {
                 anchors.right: parent.right
                 anchors.bottom: parent.bottom
                 height: 1
-                color: root.borderColor
+                color: Qt.rgba(root.borderColor.r,
+                               root.borderColor.g,
+                               root.borderColor.b,
+                               0.5)
             }
         }
 
@@ -99,29 +102,29 @@ Rectangle {
             }
         }
 
-        Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: borderColor }
+        // Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: borderColor }
 
-        Item { Layout.fillWidth: true; Layout.preferredHeight: 8 }
+        // Item { Layout.fillWidth: true; Layout.preferredHeight: 8 }
 
-        RowLayout {
-            Layout.fillWidth: true
-            Layout.leftMargin: 12
-            Layout.rightMargin: 8
-            spacing: 6
-            Label { text: "外部库"; color: root.textMuted; font.pixelSize: 12; Layout.fillWidth: true }
-            AppIcon { provider: icons; kind: "chevron-down"; tint: root.textMuted; size: 10 }
-        }
+        // RowLayout {
+        //     Layout.fillWidth: true
+        //     Layout.leftMargin: 12
+        //     Layout.rightMargin: 8
+        //     spacing: 6
+        //     Label { text: "外部库"; color: root.textMuted; font.pixelSize: 12; Layout.fillWidth: true }
+        //     AppIcon { provider: icons; kind: "chevron-down"; tint: root.textMuted; size: 10 }
+        // }
 
-        RowLayout {
-            Layout.fillWidth: true
-            Layout.preferredHeight: 24
-            Layout.leftMargin: 34
-            Layout.rightMargin: 8
-            spacing: 6
-            AppIcon { provider: icons; kind: "trash"; tint: root.textMuted; size: 12 }
-            Label { text: "回收站"; color: root.textMuted; font.pixelSize: 12; Layout.fillWidth: true }
-        }
+        // RowLayout {
+        //     Layout.fillWidth: true
+        //     Layout.preferredHeight: 24
+        //     Layout.leftMargin: 34
+        //     Layout.rightMargin: 8
+        //     spacing: 6
+        //     AppIcon { provider: icons; kind: "trash"; tint: root.textMuted; size: 12 }
+        //     Label { text: "回收站"; color: root.textMuted; font.pixelSize: 12; Layout.fillWidth: true }
+        // }
 
-        Item { Layout.fillWidth: true; Layout.preferredHeight: 8 }
+        // Item { Layout.fillWidth: true; Layout.preferredHeight: 8 }
     }
 }

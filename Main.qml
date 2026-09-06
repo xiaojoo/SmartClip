@@ -11,7 +11,7 @@ ApplicationWindow {
     id: window
     width: 1460; height: 900; minimumWidth: 1000; minimumHeight: 640; visible: true
     title: "SmartClip — 剪贴板"
-    color: "#2b2d30"
+    color: "#313335"
 
     property string searchText: ""
     property var selectedItem: null

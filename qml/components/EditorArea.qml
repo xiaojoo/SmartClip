@@ -113,9 +113,6 @@ Rectangle {
             Layout.fillWidth: true
             Layout.fillHeight: true
             color: root.editorBg
-            radius: root.showWelcome ? 10 : 0
-            bottomLeftRadius: 10
-            bottomRightRadius: 10
 
             Column {
                 visible: root.showWelcome
