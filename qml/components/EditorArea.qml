@@ -37,10 +37,13 @@ Rectangle {
         anchors.fill: parent
         spacing: 0
 
+        // 顶部标签栏（加上顶部圆角）
         Rectangle {
             Layout.fillWidth: true
             Layout.preferredHeight: 34
             color: root.barBg
+            topLeftRadius: 10
+            topRightRadius: 10
             visible: !root.showWelcome
 
             RowLayout {
@@ -102,10 +105,14 @@ Rectangle {
             }
         }
 
+        // 内容区（加上下部圆角，如果标签栏隐藏则四个角都是圆角）
         Rectangle {
             Layout.fillWidth: true
             Layout.fillHeight: true
             color: root.editorBg
+            radius: root.showWelcome ? 10 : 0
+            bottomLeftRadius: 10
+            bottomRightRadius: 10
 
             Column {
                 visible: root.showWelcome

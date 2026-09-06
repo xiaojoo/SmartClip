@@ -78,10 +78,12 @@ ApplicationWindow {
             Layout.fillWidth: true; Layout.fillHeight: true
             spacing: 0
 
-            // ---- 左侧工具窗口图标条 ----
+            // ---- 左侧工具窗口图标条（已取消边框） ----
             Rectangle {
                 Layout.fillHeight: true; Layout.preferredWidth: 34
-                color: "#3c3f41"; border.color: "#4b4d4f"; border.width: 1
+                color: "#3c3f41"
+                // 已删除 border.color 和 border.width
+
                 IconProvider { id: stripIcons }
                 Column {
                     anchors.fill: parent; anchors.topMargin: 8; anchors.bottomMargin: 8; spacing: 6
