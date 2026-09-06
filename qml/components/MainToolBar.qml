@@ -23,14 +23,9 @@ Rectangle {
     readonly property color fieldBg:     "#2b2d30"
     readonly property color green:       "#499c54"
     readonly property color red:         "#db5860"
-    readonly property color orange:      "#d7863a"
 
     IconProvider { id: icons }
 
-    function hasMenu(label) {
-        return label === "文件" || label === "编辑" || label === "视图" ||
-               label === "运行" || label === "工具" || label === "帮助"
-    }
     function folderItems() {
         return [ { label: "今天",  act: "folder:today" }, { label: "昨天", act: "folder:yesterday" },
                  { label: "近 7 天", act: "folder:week" }, { label: "更早", act: "folder:older" } ]

@@ -24,10 +24,8 @@ qt_add_qml_module(SmartClip
         qml/components/DropdownMenu.qml
         qml/components/EditorArea.qml
         qml/components/FolderTree.qml
-        # qml/components/MenuBar.qml
-        qml/components/StatusBar.qml
-        # qml/components/ToolBar.qml
         qml/components/MainToolBar.qml
+        qml/components/StatusBar.qml
         qml/delegates/TreeDelegate.qml
         qml/models/ClipboardModel.qml
         qml/utils/IconProvider.qml
@@ -36,7 +34,6 @@ qt_add_qml_module(SmartClip
         js/ClipboardManager.js
         js/FolderManager.js
         js/TimeUtils.js
-        QML_FILES qml/components/MainToolBar.qml
 )
 
 qt_add_resources(SmartClip "app_icons"

@@ -6,10 +6,12 @@ import QtQuick.Layouts
 import "../delegates"
 import "../utils"
 
-// 根改为 Item，避免 Layout 干扰 Rectangle 渲染
-Item {
+Rectangle {
     id: root
-    clip: true // 关键：裁剪超出圆角的内容
+    color: "#1e1f22"
+    radius: 10
+    clip: true
+    border.width: 0
 
     property var rows: []
     property string activeKey: "today"
@@ -23,13 +25,6 @@ Item {
     readonly property color textMuted:   "#6f737a"
 
     IconProvider { id: icons }
-
-    // 真正的圆角背景
-    Rectangle {
-        anchors.fill: parent
-        color: "#1e1f22"
-        radius: 10
-    }
 
     ColumnLayout {
         anchors.fill: parent

@@ -78,7 +78,7 @@ ApplicationWindow {
             Layout.fillWidth: true; Layout.fillHeight: true
             spacing: 0
 
-            // ---- 左侧工具窗口图标条（保持原样） ----
+            // ---- 左侧工具窗口图标条 ----
             Rectangle {
                 Layout.fillHeight: true; Layout.preferredWidth: 34
                 color: "#3c3f41"; border.color: "#4b4d4f"; border.width: 1
@@ -109,8 +109,6 @@ ApplicationWindow {
             FolderTree {
                 id: folderTree
                 Layout.fillHeight: true; Layout.preferredWidth: 300
-                Layout.topMargin: 8
-                Layout.bottomMargin: 8
                 rows: window.treeRows
                 activeKey: window.activeFolder
                 selected: window.selectedItem
@@ -122,8 +120,6 @@ ApplicationWindow {
                 id: editor
                 Layout.fillWidth: true; Layout.fillHeight: true
                 Layout.leftMargin: 8
-                Layout.topMargin: 8
-                Layout.bottomMargin: 8
                 item: window.selectedItem
                 showWelcome: window.showWhatTab
             }

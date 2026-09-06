@@ -6,10 +6,12 @@ import QtQuick.Layouts
 import "../../js/TimeUtils.js" as Time
 import "../utils"
 
-// 根改为 Item
-Item {
+Rectangle {
     id: root
-    clip: true // 关键：裁剪
+    color: "#1e1f22"
+    radius: 10
+    clip: true
+    border.width: 0
 
     property var item: null
     property bool showWelcome: true
@@ -31,18 +33,10 @@ Item {
 
     function tabTitle() { return item ? item.title : "README.md" }
 
-    // 真正的圆角背景
-    Rectangle {
-        anchors.fill: parent
-        color: "#1e1f22"
-        radius: 10
-    }
-
     ColumnLayout {
         anchors.fill: parent
         spacing: 0
 
-        // 顶部标签栏
         Rectangle {
             Layout.fillWidth: true
             Layout.preferredHeight: 34
@@ -111,7 +105,7 @@ Item {
         Rectangle {
             Layout.fillWidth: true
             Layout.fillHeight: true
-            color: "transparent" // 背景由外层 Rectangle 提供
+            color: root.editorBg
 
             Column {
                 visible: root.showWelcome
@@ -150,22 +144,57 @@ Item {
             RowLayout {
                 visible: !root.showWelcome && item && item.type === "text"
                 anchors.fill: parent; spacing: 0
-                Rectangle { Layout.preferredWidth: 50; Layout.fillHeight: true; color: "transparent"
-                    ListView { id: lineNumbers; anchors.fill: parent; anchors.topMargin: 18; anchors.bottomMargin: 18
-                        anchors.leftMargin: 10; anchors.rightMargin: 10; clip: true; interactive: false
+
+                Rectangle {
+                    Layout.preferredWidth: 50
+                    Layout.fillHeight: true
+                    color: root.editorBg
+
+                    ListView {
+                        id: lineNumbers
+                        anchors.fill: parent
+                        anchors.topMargin: 18
+                        anchors.bottomMargin: 18
+                        anchors.leftMargin: 10
+                        anchors.rightMargin: 10
+                        clip: true
+                        interactive: false
                         model: textArea.text.length > 0 ? textArea.text.split('\n').length : 1
-                        delegate: Label { required property int index; text: (index + 1).toString()
-                            color: root.lineNumberColor; font.family: "Consolas"; font.pixelSize: 13
-                            horizontalAlignment: Text.AlignRight; width: parent.width; height: 20 }
+                        delegate: Label {
+                            required property int index
+                            text: (index + 1).toString()
+                            color: root.lineNumberColor
+                            font.family: "Consolas"
+                            font.pixelSize: 13
+                            horizontalAlignment: Text.AlignRight
+                            width: parent.width
+                            height: 20
+                        }
                     }
                 }
+
                 Rectangle { Layout.preferredWidth: 1; Layout.fillHeight: true; color: root.borderColor }
-                ScrollView { id: scrollView; Layout.fillWidth: true; Layout.fillHeight: true; clip: true
+
+                ScrollView {
+                    id: scrollView
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    clip: true
                     ScrollBar.vertical: ThinScrollBar {}
-                    TextArea { id: textArea; readOnly: true; text: item ? item.content : ""
-                        color: root.codeColor; font.family: "Consolas"; font.pixelSize: 13
-                        wrapMode: TextEdit.Wrap; selectByMouse: true
-                        topPadding: 18; leftPadding: 12; rightPadding: 22; bottomPadding: 18
+
+                    TextArea {
+                        id: textArea
+                        readOnly: true
+                        text: item ? item.content : ""
+                        color: root.codeColor
+                        font.family: "Consolas"
+                        font.pixelSize: 13
+                        wrapMode: TextEdit.Wrap
+                        selectByMouse: true
+                        topPadding: 18
+                        leftPadding: 12
+                        rightPadding: 22
+                        bottomPadding: 18
                         background: Rectangle { color: root.editorBg }
                     }
                 }
