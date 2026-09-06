@@ -9,7 +9,8 @@ Rectangle {
     id: root
 
     implicitHeight: 26
-    color: "#313335"; border.color: "#4b4d4f"; border.width: 1
+    color: "#313335";
+    // border.color: "#4b4d4f"; border.width: 1
 
     property string title: ""
     property int count: 0

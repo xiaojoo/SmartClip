@@ -8,7 +8,7 @@ import "../utils"
 Rectangle {
     id: root
     implicitHeight: 40
-    color: "#3c3f41"
+    color: "#313335"
 
     signal searchChanged(string text)
     signal requestRefresh()
