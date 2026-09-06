@@ -16,7 +16,7 @@ Rectangle {
     property var item: null
     property bool showWelcome: true
 
-    readonly property color barBg:       "#313335"
+    readonly property color barBg:       "#1e1f22"
     readonly property color editorBg:    "#1e1f22"
     readonly property color borderColor: "#4b4d4f"
     readonly property color tabBg:       "#45484c"
@@ -40,7 +40,7 @@ Rectangle {
         // 顶部标签栏（加上顶部圆角）
         Rectangle {
             Layout.fillWidth: true
-            Layout.preferredHeight: 34
+            Layout.preferredHeight: 35
             color: root.barBg
             topLeftRadius: 10
             topRightRadius: 10
@@ -82,14 +82,14 @@ Rectangle {
                     MouseArea { anchors.fill: parent; hoverEnabled: true }
                 }
 
-                Rectangle {
-                    Layout.preferredWidth: 30
-                    Layout.preferredHeight: 28
-                    radius: 4
-                    color: "transparent"
-                    AppIcon { anchors.centerIn: parent; provider: icons; kind: "plus"; tint: root.textMuted; size: 15 }
-                    MouseArea { anchors.fill: parent; hoverEnabled: true }
-                }
+                // Rectangle {
+                //     Layout.preferredWidth: 30
+                //     Layout.preferredHeight: 28
+                //     radius: 4
+                //     color: "transparent"
+                //     AppIcon { anchors.centerIn: parent; provider: icons; kind: "plus"; tint: root.textMuted; size: 15 }
+                //     MouseArea { anchors.fill: parent; hoverEnabled: true }
+                // }
 
                 Item { Layout.fillWidth: true }
                 AppIcon { provider: icons; kind: "grid"; tint: root.accentColor; size: 12 }
@@ -101,7 +101,10 @@ Rectangle {
                 anchors.right: parent.right
                 anchors.bottom: parent.bottom
                 height: 1
-                color: root.borderColor
+                color: Qt.rgba(root.borderColor.r,
+                               root.borderColor.g,
+                               root.borderColor.b,
+                               0.5)
             }
         }
 

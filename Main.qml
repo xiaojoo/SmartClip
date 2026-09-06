@@ -81,7 +81,7 @@ ApplicationWindow {
             // ---- 左侧工具窗口图标条（已取消边框） ----
             Rectangle {
                 Layout.fillHeight: true; Layout.preferredWidth: 34
-                color: "#3c3f41"
+                color: "#313335"
                 // 已删除 border.color 和 border.width
 
                 IconProvider { id: stripIcons }
