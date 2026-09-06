@@ -128,7 +128,4 @@ Rectangle {
                 onEntered: parent.color = root.hoverColor; onExited: parent.color = "transparent"
                 onClicked: root.openMenu(parent, root.toolItems()) } }
     }
-
-    Rectangle { anchors.left: parent.left; anchors.right: parent.right; anchors.bottom: parent.bottom
-                height: 1; color: borderColor }
 }
