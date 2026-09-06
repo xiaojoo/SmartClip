@@ -200,7 +200,9 @@ Rectangle {
                         id: scrollView
                         anchors.fill: parent
                         clip: true
-                        ScrollBar.vertical: ThinScrollBar {}
+                        ScrollBar.vertical: ThinScrollBar {
+                            anchors.right: parent.right
+                        }
 
                         TextArea {
                             id: textArea
