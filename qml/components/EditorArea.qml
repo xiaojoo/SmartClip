@@ -33,6 +33,51 @@ Rectangle {
 
     function tabTitle() { return item ? item.title : "README.md" }
 
+    // 正文内容（content 优先，兼容 text 字段）
+    function editorText() {
+        if (!root.item)
+            return ""
+
+        if (root.item.content !== undefined && root.item.content !== null)
+            return String(root.item.content)
+
+        if (root.item.text !== undefined && root.item.text !== null)
+            return String(root.item.text)
+
+        return ""
+    }
+
+    // 图片地址：剪贴板里可能存的是整段文本（甚至源码），
+    // 直接拼成 file:// URL 会让 QQuickImage 拿一大段文本去加载并报错
+    function imageSource() {
+        if (!root.item || root.item.type !== "image")
+            return ""
+
+        var raw = root.item.content
+        if (raw === undefined || raw === null)
+            return ""
+
+        var path = String(raw).replace(/\\/g, "/")
+
+        if (path === "" || path.indexOf("\n") !== -1 || path.length > 512)
+            return ""
+
+        if (path.indexOf("file:") === 0)
+            return path
+
+        return "file:///" + path
+    }
+
+    // 行号文本：与正文同一个字体，行高自然一致
+    readonly property string lineNumbers: {
+        var content = textArea.text
+        var count = content.length > 0 ? content.split("\n").length : 1
+        var lines = []
+        for (var i = 1; i <= count; ++i)
+            lines.push(String(i))
+        return lines.join("\n")
+    }
+
     ColumnLayout {
         anchors.fill: parent
         spacing: 0
@@ -146,81 +191,102 @@ Rectangle {
                 Label { text: item ? Time.displayTime(item.createdAt) : ""; color: root.textMuted; font.pixelSize: 12 }
                 Rectangle { width: parent.width; height: 1; color: root.borderColor }
                 Item { width: parent.width; height: parent.height - 90
-                    Image { anchors.fill: parent; source: item ? "file:///" + item.content.replace(/\\/g, "/") : ""
+                    Image { anchors.fill: parent; source: root.imageSource()
                         fillMode: Image.PreserveAspectFit; horizontalAlignment: Image.AlignHCenter; verticalAlignment: Image.AlignVCenter }
                 }
             }
 
-            RowLayout {
-                visible: !root.showWelcome && item && item.type === "text"
-                anchors.fill: parent; spacing: 0
+            // -----------------------------------------------------------------
+            // 文本编辑器
+            //
+            // 行号栏与正文放在同一个 Flickable 的 contentItem 里，
+            // 天然共用同一个 contentY，滚动完全同步；
+            // contentHeight 由正文真实高度决定，ScrollBar 才有真实滚动范围。
+            // -----------------------------------------------------------------
+            Flickable {
+                id: editorFlick
+                visible: !root.showWelcome && root.item !== null && root.item !== undefined
+                         && root.item.type === "text"
+                anchors.fill: parent
+                clip: true
+                flickableDirection: Flickable.VerticalFlick
+                boundsBehavior: Flickable.StopAtBounds
 
-                Rectangle {
-                    Layout.preferredWidth: 50
-                    Layout.fillHeight: true
-                    color: root.editorBg
-                    clip: true
-                    radius: 10
-                    topLeftRadius: root.showWelcome ? 10 : 0
-                    topRightRadius: root.showWelcome ? 10 : 0
+                contentWidth: width
+                contentHeight: Math.max(editorRow.height, height)
 
-                    ListView {
-                        id: lineNumbers
-                        anchors.fill: parent
-                        anchors.topMargin: 18
-                        anchors.bottomMargin: 18
-                        anchors.leftMargin: 10
-                        anchors.rightMargin: 10
+                ScrollBar.vertical: ScrollBar {
+                    policy: ScrollBar.AlwaysOn
+                    width: 8
+                }
+
+                Row {
+                    id: editorRow
+                    width: editorFlick.width
+                    // 短文本至少占满视口，长文本取真实内容高度
+                    height: Math.max(textArea.implicitHeight, editorFlick.height)
+
+                    // 行号栏（随内容一起滚动）
+                    Item {
+                        id: gutter
+                        width: 50
+                        height: editorRow.height
                         clip: true
-                        interactive: false
-                        model: textArea.text.length > 0 ? textArea.text.split('\n').length : 1
-                        delegate: Label {
-                            required property int index
-                            text: (index + 1).toString()
+
+                        Text {
+                            id: lineNumbersText
+                            x: 10
+                            y: textArea.topPadding
+                            width: gutter.width - 20
+                            horizontalAlignment: Text.AlignRight
                             color: root.lineNumberColor
                             font.family: "Consolas"
                             font.pixelSize: 13
-                            horizontalAlignment: Text.AlignRight
-                            width: parent.width
-                            height: 20
+                            textFormat: Text.PlainText
+                            text: root.lineNumbers
                         }
                     }
-                }
 
-                Rectangle { Layout.preferredWidth: 1; Layout.fillHeight: true; color: root.borderColor }
+                    Rectangle {
+                        width: 1
+                        height: editorRow.height
+                        color: root.borderColor
+                        opacity: 0.6
+                    }
 
-                Rectangle {
-                    Layout.fillWidth: true
-                    Layout.fillHeight: true
-                    color: root.editorBg
-                    clip: true
-                    radius: 10
+                    TextArea {
+                        id: textArea
+                        width: Math.max(0, editorRow.width - gutter.width - 1)
+                        height: editorRow.height
 
-                    ScrollView {
-                        id: scrollView
-                        anchors.fill: parent
-                        clip: true
-                        ScrollBar.vertical: ThinScrollBar {
-                            anchors.right: parent.right
-                        }
+                        wrapMode: TextArea.Wrap
+                        selectByMouse: true
+                        color: "#d6d7da"
+                        font.family: "Consolas"
+                        font.pixelSize: 13
 
-                        TextArea {
-                            id: textArea
-                            readOnly: true
-                            text: item ? item.content : ""
-                            color: root.codeColor
-                            font.family: "Consolas"
-                            font.pixelSize: 13
-                            wrapMode: TextEdit.Wrap
-                            selectByMouse: true
-                            topPadding: 18
-                            leftPadding: 12
-                            rightPadding: 22
-                            bottomPadding: 18
-                            background: Rectangle {
-                                color: root.editorBg
-                                radius: 10
-                            }
+                        padding: 12
+                        rightPadding: 20
+
+                        placeholderText: qsTr("（内容为空）")
+
+                        // 去掉第二层背景，背景由 contentArea 提供
+                        background: null
+
+                        text: root.editorText()
+
+                        // 光标移出可视区域时跟随滚动
+                        onCursorRectangleChanged: {
+                            if (!activeFocus)
+                                return
+
+                            var y = textArea.y + cursorRectangle.y
+                            var maxY = Math.max(0, editorFlick.contentHeight - editorFlick.height)
+
+                            if (y < editorFlick.contentY)
+                                editorFlick.contentY = Math.max(0, y)
+                            else if (y + cursorRectangle.height > editorFlick.contentY + editorFlick.height)
+                                editorFlick.contentY = Math.min(maxY, y + cursorRectangle.height - editorFlick.height)
                         }
                     }
                 }
