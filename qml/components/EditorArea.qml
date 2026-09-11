@@ -36,6 +36,9 @@ Rectangle {
     readonly property int editorFontSize: 13
     readonly property int editorPadding: 12
 
+    // 行号栏宽度统一定义，避免正文和行号区域计算不一致
+    readonly property int gutterWidth: 50
+
     IconProvider {
         id: icons
     }
@@ -89,14 +92,10 @@ Rectangle {
     // =============================================================
     // 行号数据
     //
-    // 不再把整个行号字符串交给一个 Text。
+    // 只保存每个逻辑行的起始字符位置。
     //
-    // 每一个行号单独创建一个 Text，
-    // 它的 Y 坐标直接从 TextArea.positionToRectangle()
-    // 获取。
-    //
-    // 这样行号实际上跟随正文 TextArea 的真实排版结果，
-    // 而不是自己猜测 lineHeight。
+    // 实际 Y 坐标 / 高度完全交给 TextArea.positionToRectangle()
+    // 决定，避免自己计算 lineHeight。
     // =============================================================
     readonly property var lineStartPositions: {
         var content = textArea.text
@@ -405,15 +404,12 @@ Rectangle {
                 boundsBehavior: Flickable.StopAtBounds
 
                 // -----------------------------------------------------
-                // 横向不滚动。
-                // 正文宽度始终跟随视口。
+                // 不允许横向滚动。
                 // -----------------------------------------------------
                 contentWidth: width
 
                 // -----------------------------------------------------
-                // 内容高度取正文真实高度。
-                //
-                // 不再强制 AlwaysOn。
+                // 内容高度使用正文实际排版高度。
                 // -----------------------------------------------------
                 contentHeight: Math.max(
                     editorRow.height,
@@ -421,36 +417,13 @@ Rectangle {
                 )
 
                 // =====================================================
-                // 滚动条
-                //
-                // 重要：
-                //
-                // 不再使用：
-                //
-                //     AlwaysOn <-> AsNeeded
-                //
-                // 因为切换内容时会经历一次旧状态，
-                // 容易出现：
-                //
-                //     长页面
-                //       ↓
-                //     短页面
-                //       ↓
-                //     滚动条闪一下
-                //       ↓
-                //     消失
-                //
-                // 现在 ScrollBar 始终存在，
-                // 但视觉显示完全由是否真正存在滚动范围决定。
+                // 垂直滚动条
                 // =====================================================
                 ScrollBar.vertical: ScrollBar {
                     id: editorScrollBar
 
-                    // 保持 ScrollBar 自身的 geometry 稳定，
-                    // 避免 policy 切换造成闪烁。
                     policy: ScrollBar.AlwaysOn
 
-                    // 真正需要滚动时才显示。
                     visible: editorFlick.contentHeight
                              > editorFlick.height + 1
 
@@ -458,7 +431,6 @@ Rectangle {
 
                     interactive: true
 
-                    // 避免短页面时参与视觉显示。
                     opacity: visible ? 1.0 : 0.0
                 }
 
@@ -470,11 +442,6 @@ Rectangle {
 
                     width: editorFlick.width
 
-                    // -------------------------------------------------
-                    // TextArea 的 implicitHeight 是正文真实排版高度。
-                    //
-                    // 同时保证短文本至少占满整个视口。
-                    // -------------------------------------------------
                     height: Math.max(
                         textArea.implicitHeight,
                         editorFlick.height
@@ -486,17 +453,12 @@ Rectangle {
                     Item {
                         id: gutter
 
-                        width: 50
+                        width: root.gutterWidth
 
                         height: editorRow.height
 
                         clip: true
 
-                        // -------------------------------------------------
-                        // 行号 Repeater
-                        //
-                        // 每个数字单独定位。
-                        // -------------------------------------------------
                         Repeater {
                             model: root.lineStartPositions
 
@@ -505,58 +467,62 @@ Rectangle {
                                 required property int modelData
 
                                 width: gutter.width
-                                height: textMetrics.lineHeight
 
-                                // -------------------------------------------------
-                                // 关键：
-                                //
-                                // 直接询问 TextArea：
-                                //
-                                // “这个字符实际排版到了哪里？”
-                                //
-                                // 所以行号 Y 坐标和正文真正的 baseline /
-                                // line box 保持一致。
+                                // =================================================
+                                // 关键优化：
                                 //
                                 // 不再使用：
                                 //
-                                //     y = index * 18
+                                //     FontMetrics.height
                                 //
-                                // 也不再使用 Text.lineHeight。
-                                // -------------------------------------------------
-                                y: {
+                                // 因为它不一定等于 TextArea 当前实际
+                                // 使用的 line box。
+                                //
+                                // 现在直接使用 TextArea 的真实排版矩形。
+                                // =================================================
+                                property rect lineRect: {
                                     if (!textArea.text)
-                                        return root.editorPadding
+                                        return Qt.rect(
+                                            0,
+                                            root.editorPadding,
+                                            textArea.width,
+                                            textArea.font.pixelSize
+                                        )
 
-                                    var rect = textArea.positionToRectangle(
+                                    return textArea.positionToRectangle(
                                         modelData
                                     )
-
-                                    return rect.y
                                 }
 
-                                TextMetrics {
-                                    id: textMetrics
+                                // -------------------------------------------------
+                                // Y 坐标直接跟随正文真实行框
+                                // -------------------------------------------------
+                                y: lineRect.y
 
-                                    font.family: "Consolas"
-
-                                    font.pixelSize: root.editorFontSize
-
-                                    text: "Ag"
-                                }
+                                // -------------------------------------------------
+                                // 高度也直接使用正文真实行框高度
+                                //
+                                // 这样行号和代码共享同一个 line box。
+                                // -------------------------------------------------
+                                height: Math.max(
+                                    lineRect.height,
+                                    root.editorFontSize
+                                )
 
                                 Text {
-                                    anchors.right: parent.right
+                                    anchors.fill: parent
 
                                     anchors.rightMargin: 10
 
-                                    anchors.verticalCenter: parent.verticalCenter
-
-                                    width: parent.width - 20
-
-                                    height: parent.height
-
                                     horizontalAlignment: Text.AlignRight
 
+                                    // -------------------------------------------------
+                                    // 这里使用 Center 而不是自己计算 baseline。
+                                    //
+                                    // 因为 parent.height 已经来自正文的真实
+                                    // positionToRectangle()，因此数字会落在
+                                    // 同一个 line box 中。
+                                    // -------------------------------------------------
                                     verticalAlignment: Text.AlignVCenter
 
                                     color: root.lineNumberColor
@@ -570,6 +536,8 @@ Rectangle {
                                     textFormat: Text.PlainText
 
                                     renderType: Text.NativeRendering
+
+                                    antialiasing: true
                                 }
                             }
                         }
@@ -622,18 +590,17 @@ Rectangle {
 
                         leftPadding: root.editorPadding
 
-                        // 给滚动条预留空间。
+                        // 给右侧滚动条留出固定空间。
                         rightPadding: 20
 
                         placeholderText: qsTr("（内容为空）")
 
-                        // 背景由外层 Rectangle 提供。
                         background: null
 
                         text: root.editorText()
 
                         // -------------------------------------------------
-                        // 光标移出可视区域时自动跟随滚动
+                        // 光标自动跟随
                         // -------------------------------------------------
                         onCursorRectangleChanged: {
                             if (!activeFocus)
