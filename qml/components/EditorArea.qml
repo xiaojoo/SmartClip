@@ -138,7 +138,7 @@ Rectangle {
     readonly property string lineStartPositionsFor: textArea.text
 
     /*
-     * 行号栏只给“看得见的行”建 delegate，固定 80 个槽位循环用。
+     * 行号栏只给“看得见的行”建 delegate，固定 200 个槽位循环用。
      *
      * 以前是 Repeater 直接铺满全部行：
      * 3000 行的内容会建 3000 个 Item + 3000 个 Text，
@@ -146,8 +146,14 @@ Rectangle {
      * 实测打开一个 25 万字符的条目，整帧要 4 秒（其中约 3 秒耗在这里）。
      *
      * 现在开销从 O(总行数) 降到 O(可见行数)，滚动时只是换这几个槽位的内容。
+     *
+     * 为什么从 80 提到 200：槽位数是「一次最多能画多少行」的硬上限，
+     * 80 个槽 × 约 21px 行高 ≈ 1200px，也就是编辑器视口一超过
+     * 这个高度，下面就没有槽位可用了 —— 表现就是大屏 / 全屏时
+     * 行号画到一半就断掉（实测 2000px 高时只画到 y≈1197）。
+     * 200 × 21 ≈ 4200px，4K 全屏也够；代价只是多建 120 个小 Item。
      */
-    readonly property int gutterSlotCount: 80
+    readonly property int gutterSlotCount: 200
 
     /*
      * 每个槽位当前显示的行：{ line, y, height }，用不到的槽位就是 undefined。
