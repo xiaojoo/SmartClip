@@ -76,6 +76,15 @@ Rectangle {
                 topMargin: 8
                 bottomMargin: 8
 
+                /*
+                 * 行与行之间留 4px 间隙。
+                 *
+                 * 每行都有自己的圆角高亮块（选中 / 悬停），
+                 * 贴在一起时这些色块会连成一整片，
+                 * 看不出是独立条目；留一点缝之后层次才清楚。
+                 */
+                spacing: 4
+
                 ScrollBar.vertical: ThinScrollBar {
                     anchors.right: parent.right
                     // anchors.rightMargin: 0
@@ -86,9 +95,6 @@ Rectangle {
             delegate: TreeDelegate {
                 x: 12
                 width: view.width - 18
-                // y: 4
-                // height: implicitHeight + 8
-
 
                 rowHighlight: modelData.kind === "folder"
                               ? root.activeKey === modelData.key

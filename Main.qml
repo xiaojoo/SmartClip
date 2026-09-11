@@ -6,6 +6,16 @@ import "qml/models"
 import "qml/utils"
 import "js/FolderManager.js" as Folders
 import "js/TimeUtils.js" as Time
+/*
+ * 点击条目 / 菜单里的“复制”都要回填系统剪贴板，
+ * 走的是 js/ClipboardManager.js 里包了一层 clipboardStore 的 Store。
+ *
+ * QML 的 JS import 是按文件生效的：
+ * ClipboardModel.qml 里那份 `as Store` 不会外泄到这里，
+ * 所以这个文件必须自己 import 一次，否则 selectItem() 里
+ * 的 Store.copyItem() 会直接抛 ReferenceError（剪贴板也回填不了）。
+ */
+import "js/ClipboardManager.js" as Store
 
 ApplicationWindow {
     id: window
