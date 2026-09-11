@@ -123,6 +123,21 @@ Rectangle {
     }
 
     /*
+     * 上面那份行首位置数组是按哪份正文算出来的。
+     *
+     * textArea.text 和 lineStartPositions 是两个独立绑定，
+     * 切换文件时会先后重新求值，中间存在一帧「新正文 + 旧位置数组」。
+     * 那一帧里位置数组里的值远超当前正文长度，
+     * positionToRectangle() 内部拿它去 QTextCursor::setPosition，
+     * 就会刷 "Position ... out of range"，而且行号也会错位。
+     *
+     * 所以把「算这份数组时用的正文」一起记下来，用的时候先核对；
+     * 对不上就当场按当前正文重算（见 gutterSlots），
+     * 这样两个值永远同源，不存在中间态。
+     */
+    readonly property string lineStartPositionsFor: textArea.text
+
+    /*
      * 行号栏只给“看得见的行”建 delegate，固定 80 个槽位循环用。
      *
      * 以前是 Repeater 直接铺满全部行：
@@ -147,7 +162,34 @@ Rectangle {
         var viewTop = editorFlick.contentY
         var viewHeight = editorFlick.height
         var areaWidth = textArea.width
+
+        /*
+         * 行首位置数组必须和正文同源。
+         *
+         * textArea.text 与 lineStartPositions 是两个独立绑定，
+         * 切换文件时会出现一帧「新正文 + 旧位置数组」，
+         * 旧数组里的值（比如 4750）远超新正文字符数，
+         * positionToRectangle() 拿它去 setPosition 就会刷
+         * "QTextCursor::setPosition: Position ... out of range"。
+         *
+         * 所以这里先核对数组是按哪份正文算的：对不上就按当前正文
+         * 当场重算一遍（indexOf 扫一遍，代价可以忽略），
+         * 保证下面用到的位置一定落在当前正文里。
+         */
+        var content = textArea.text
         var positions = root.lineStartPositions
+
+        if (root.lineStartPositionsFor !== content) {
+            positions = [0]
+
+            var at = content.indexOf("\n")
+
+            while (at !== -1) {
+                positions.push(at + 1)
+                at = content.indexOf("\n", at + 1)
+            }
+        }
+
         var total = positions.length
 
         if (areaWidth <= 0 || total <= 0)

@@ -13,7 +13,6 @@ Rectangle {
     signal rowClicked()
 
     readonly property color selColor:    "#214283"
-    readonly property color hoverColor:  "#46484a"
     readonly property color textBright:  "#e8e8e8"
     readonly property color textColor:   "#bbbbbb"
     readonly property color textMuted:   "#7d7d7d"
@@ -28,7 +27,16 @@ Rectangle {
 
     implicitHeight: isFolder ? 28 : 24
     radius: 3
-    color: rowHighlight ? selColor : (mouse.containsMouse ? hoverColor : "transparent")
+
+    /*
+     * 只有当前选中项有蓝色高亮，鼠标悬停不再变色。
+     *
+     * 原来的 hoverColor 灰底有两个问题：
+     * 一是窗口被缩放 / 最小化 / 鼠标移出窗口时，containsMouse
+     * 有时不会被重置，灰色的悬停块就留在列表里好几个；
+     * 二是列表本身已经有蓝色选中条，再多一种底色反而乱。
+     */
+    color: rowHighlight ? selColor : "transparent"
 
     RowLayout {
         anchors.fill: parent; spacing: 4
@@ -63,7 +71,9 @@ Rectangle {
         }
     }
     MouseArea {
-        id: mouse; anchors.fill: parent; hoverEnabled: true
+        // hoverEnabled 关掉：这个委托已经没有悬停样式了，
+        // 留着它只会不断产生 containsMouse 变化通知
+        id: mouse; anchors.fill: parent
         onClicked: root.rowClicked()
     }
 }

@@ -144,7 +144,20 @@ ApplicationWindow {
 
             FolderTree {
                 id: folderTree
-                Layout.fillHeight: true; Layout.preferredWidth: window.folderTreeWidth
+                Layout.fillHeight: true
+                Layout.preferredWidth: window.folderTreeWidth
+
+                /*
+                 * 面板右边缘在窗口里的 x。
+                 *
+                 * 这里用实际几何反推，不手算常量：布局槽位的右边界
+                 * 正好就是那条 5px 间隙的左边界（实测 raw=334，
+                 * 间隙在 334..338），所以直接取它。
+                 * FolderTree 自己的 anchors 边距不算进槽位里，
+                 * 之前写 folderTreeWidth + 12 就是差了这一段。
+                 */
+                readonly property real panelRight: mapToItem(window.contentItem, width, 0).x
+
                 rows: window.treeRows
                 activeKey: window.activeFolder
                 selected: window.selectedItem
@@ -153,58 +166,18 @@ ApplicationWindow {
             }
 
             /*
-             * FolderTree / EditorArea 中间的透明拖动热区。
+             * FolderTree / EditorArea 中间的间隙。
              *
-             * 原先这里是 EditorArea 的 Layout.leftMargin: 5，
-             * 现在由这个完全透明的矩形占据同样的 5px；
-             * 该区域本来就是窗口背景色 #313335，
-             * 所以视觉样式没有任何改变。
+             * 拖动的热区不在这里：它挪到窗口级了（见文件末尾的
+             * splitterMouse）——放在布局里会被四边 resize 热区压住，
+             * 收不到 hover，光标也就一直是箭头。
+             * 这里只负责占住那 5px 的间隙。
              */
             Item {
-                id: splitterHandle
+                id: splitterGap
 
                 Layout.preferredWidth: 5
                 Layout.fillHeight: true
-
-                z: 100
-
-                MouseArea {
-                    id: splitterMouse
-
-                    // 比间隙略宽，方便抓取（左右各外扩 1px）
-                    x: -1
-                    width: 7
-                    height: parent.height
-
-                    hoverEnabled: true
-                    cursorShape: Qt.SplitHCursor
-                    acceptedButtons: Qt.LeftButton
-
-                    property real pressSceneX: 0
-                    property real pressWidth: 0
-
-                    onPressed: (mouse) => {
-                        pressSceneX = mapToItem(null, mouse.x, 0).x
-                        pressWidth = window.folderTreeWidth
-                        mouse.accepted = true
-                    }
-
-                    onPositionChanged: (mouse) => {
-                        if (!(mouse.buttons & Qt.LeftButton))
-                            return
-
-                        // 用场景坐标计算位移，热区自身随宽度移动也不受影响
-                        var delta = mapToItem(null, mouse.x, 0).x - pressSceneX
-
-                        window.folderTreeWidth =
-                            Math.max(window.folderTreeMinWidth,
-                                     Math.min(window.folderTreeMaxWidth,
-                                              pressWidth + delta))
-                        mouse.accepted = true
-                    }
-
-                    onReleased: (mouse) => { mouse.accepted = true }
-                }
             }
 
             EditorArea {
@@ -260,12 +233,18 @@ ApplicationWindow {
 
         hoverEnabled: true
         acceptedButtons: Qt.LeftButton
+
+        /*
+         * 光标只用「左右」和「上下」两种双向箭头，不用斜箭头。
+         *
+         * 原因是四角的光标会盖住旁边的东西：左右两条竖边正好从
+         * 中间那条可拖动的分隔线（splitter）两头经过，
+         * 顶到角落时如果显示斜箭头，那条分隔线上也会跟着变成斜的，
+         * 看着像在拖角。所以左右边缘一律优先给 SizeHorCursor。
+         * 功能不变，startSystemResize 里还是照旧带上角。
+         */
         cursorShape: {
             var x = mouseX, y = mouseY
-            var l = x <= corner, r = x >= width - corner
-            var t = y <= corner, b = y >= height - corner
-            if ((l && t) || (r && b)) return Qt.SizeFDiagCursor
-            if ((r && t) || (l && b)) return Qt.SizeBDiagCursor
             if (x <= edge || x >= width - edge) return Qt.SizeHorCursor
             if (y <= edge || y >= height - edge) return Qt.SizeVerCursor
             return Qt.ArrowCursor
@@ -288,5 +267,62 @@ ApplicationWindow {
             window.startSystemResize(e)
             mouse.accepted = true
         }
+    }
+
+    /*
+     * FolderTree / EditorArea 中间那条可拖动的分隔线。
+     *
+     * 原来是塞在布局里的一个 Item，问题是它会被上面这层
+     * 四边 resize 热区（anchors.fill + 更高的 z）压住：
+     * 鼠标移上去 hover 事件全被 resize 层吃掉，
+     * 分隔线自己的 cursorShape 根本不会生效，一直是箭头；
+     * 靠上/靠下时还会显示 resize 层的斜箭头。
+     *
+     * 所以改成窗口级的独立热区，z 比 resize 层更高，
+     * 位置跟着树面板的右边缘走。这样 hover 一定是它先收到，
+     * 光标稳定显示 Qt.SplitHCursor（左右两个箭头），
+     * 而且落点正好在那条 5px 的间隙上。
+     */
+    MouseArea {
+        id: splitterMouse
+
+        /*
+         * 位置直接取树面板的右边缘（= 间隙左边界），
+         * 往左外扩 4px、往右盖住 5px 的间隙，落点就是那条缝。
+         */
+        x: folderTree.panelRight - 4
+        width: 9
+        height: parent.height
+
+        z: 2000
+
+        hoverEnabled: true
+        cursorShape: Qt.SplitHCursor
+        acceptedButtons: Qt.LeftButton
+
+        property real pressSceneX: 0
+        property real pressWidth: 0
+
+        onPressed: (mouse) => {
+            pressSceneX = mapToItem(null, mouse.x, 0).x
+            pressWidth = window.folderTreeWidth
+            mouse.accepted = true
+        }
+
+        onPositionChanged: (mouse) => {
+            if (!(mouse.buttons & Qt.LeftButton))
+                return
+
+            // 用场景坐标算位移，热区自身随宽度移动也不受影响
+            var delta = mapToItem(null, mouse.x, 0).x - pressSceneX
+
+            window.folderTreeWidth =
+                Math.max(window.folderTreeMinWidth,
+                         Math.min(window.folderTreeMaxWidth,
+                                  pressWidth + delta))
+            mouse.accepted = true
+        }
+
+        onReleased: (mouse) => { mouse.accepted = true }
     }
 }
