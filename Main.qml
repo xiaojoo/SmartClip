@@ -19,6 +19,11 @@ ApplicationWindow {
     property var treeRows: []
     property bool showWhatTab: true
 
+    // ---- 左侧列表宽度（可由中间间隙拖动调整） ----
+    property real folderTreeWidth: 300
+    readonly property real folderTreeMinWidth: 180
+    readonly property real folderTreeMaxWidth: 600
+
     readonly property var folders: [
         { key: "today",     label: "今天" },
         { key: "yesterday", label: "昨天" },
@@ -110,7 +115,7 @@ ApplicationWindow {
 
             FolderTree {
                 id: folderTree
-                Layout.fillHeight: true; Layout.preferredWidth: 300
+                Layout.fillHeight: true; Layout.preferredWidth: window.folderTreeWidth
                 rows: window.treeRows
                 activeKey: window.activeFolder
                 selected: window.selectedItem
@@ -118,11 +123,66 @@ ApplicationWindow {
                 onItemClicked: (item) => window.selectItem(item)
             }
 
+            /*
+             * FolderTree / EditorArea 中间的透明拖动热区。
+             *
+             * 原先这里是 EditorArea 的 Layout.leftMargin: 5，
+             * 现在由这个完全透明的矩形占据同样的 5px；
+             * 该区域本来就是窗口背景色 #313335，
+             * 所以视觉样式没有任何改变。
+             */
+            Item {
+                id: splitterHandle
+
+                Layout.preferredWidth: 5
+                Layout.fillHeight: true
+
+                z: 100
+
+                MouseArea {
+                    id: splitterMouse
+
+                    // 比间隙略宽，方便抓取（左右各外扩 1px）
+                    x: -1
+                    width: 7
+                    height: parent.height
+
+                    hoverEnabled: true
+                    cursorShape: Qt.SplitHCursor
+                    acceptedButtons: Qt.LeftButton
+
+                    property real pressSceneX: 0
+                    property real pressWidth: 0
+
+                    onPressed: (mouse) => {
+                        pressSceneX = mapToItem(null, mouse.x, 0).x
+                        pressWidth = window.folderTreeWidth
+                        mouse.accepted = true
+                    }
+
+                    onPositionChanged: (mouse) => {
+                        if (!(mouse.buttons & Qt.LeftButton))
+                            return
+
+                        // 用场景坐标计算位移，热区自身随宽度移动也不受影响
+                        var delta = mapToItem(null, mouse.x, 0).x - pressSceneX
+
+                        window.folderTreeWidth =
+                            Math.max(window.folderTreeMinWidth,
+                                     Math.min(window.folderTreeMaxWidth,
+                                              pressWidth + delta))
+                        mouse.accepted = true
+                    }
+
+                    onReleased: (mouse) => { mouse.accepted = true }
+                }
+            }
+
             EditorArea {
                 id: editor
                 Layout.fillWidth: true;
                 Layout.fillHeight: true
-                Layout.leftMargin: 5
+                // 原来的 Layout.leftMargin: 5 已由上面的透明热区占据
                 item: window.selectedItem
                 showWelcome: window.showWhatTab
             }
