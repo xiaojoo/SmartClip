@@ -41,6 +41,14 @@ ApplicationWindow {
     readonly property real cornerRadius: 12
 
     /*
+     * 是否处于最大化状态。
+     *
+     * 只有这个状态为 false 时才允许拖四边改窗口大小
+     * （见文件末尾的 ResizeEdge），最大化时那四条热区整个关掉。
+     */
+    readonly property bool maximized: window.visibility === Window.Maximized
+
+    /*
      * 去掉系统原生标题栏（截图里顶上那条白底、带图标 / 标题 /
      * 最小化 / 最大化 / 关闭的栏）。
      *
@@ -362,6 +370,10 @@ ApplicationWindow {
      * 用 Qt 系统级的 startSystemResize 交给窗口管理器处理，
      * 比自己算增量更跟手。
      *
+     * 最大化时整条热区直接 enabled: false —— 铺满屏幕的窗口没有
+     * "拖大"这回事，留着只会让人误拖；顺带 enabled 关掉之后
+     * hover 也不再收，边缘不会再多显示一个调整大小的光标。
+     *
      * 为什么不再是原来那个 anchors.fill 的整窗热区：
      * 它 hoverEnabled: true，会把整个窗口的 hover 事件全吃掉 ——
      * 鼠标不管落在哪里，事件都先到它这一层（z:1000）并被 accept，
@@ -382,6 +394,9 @@ ApplicationWindow {
         // 四角 10px 内同时带上相邻的边
         readonly property int corner: 10
 
+        // 最大化时不许拖边改大小
+        enabled: !window.maximized
+
         hoverEnabled: true
         acceptedButtons: Qt.LeftButton
 
@@ -393,9 +408,23 @@ ApplicationWindow {
          * 顶到角落时如果显示斜箭头，那条分隔线上也会跟着变成斜的，
          * 看着像在拖角。所以左右边缘一律优先给 SizeHorCursor。
          * 功能不变，startSystemResize 里还是照旧带上角。
+         *
+         * 最大化时不给缩放光标，换成鼠标默认的箭头 —— 这里必须
+         * 直接把 cursorShape 换掉，不能只靠上面的 enabled: false。
+         *
+         * 实测（受控 A/B，同一个窗口里并排两个同构 MouseArea）：
+         *   enabled:false + cursorShape:SizeHorCursor -> 依然是 <-> 
+         *   enabled:true  + cursorShape:SizeHorCursor -> 依然是 <-> 
+         * 也就是说 enabled 只挡事件、不挡光标，光标提示照样生效。
+         * 所以最大化时窗口边缘一直有个拖不动的 <->。
+         * 另外单独验过一个什么自绘热区都没有的无边框窗口，
+         * 边缘全是 ARROW —— 排除了 Qt 平台层 / Windows 的可能，
+         * 这个 <-> 就是这两条热区自己刷出来的。
          */
-        cursorShape: (edge === Qt.LeftEdge || edge === Qt.RightEdge)
-                     ? Qt.SizeHorCursor : Qt.SizeVerCursor
+        cursorShape: window.maximized
+                     ? Qt.ArrowCursor
+                     : ((edge === Qt.LeftEdge || edge === Qt.RightEdge)
+                        ? Qt.SizeHorCursor : Qt.SizeVerCursor)
 
         onPressed: (mouse) => {
             // 热区自身坐标 -> 窗口坐标：四角的判定要按整窗尺寸来算
@@ -446,9 +475,17 @@ ApplicationWindow {
      * 位置跟着树面板的右边缘走。这样 hover 一定是它先收到，
      * 光标稳定显示 Qt.SplitHCursor（左右两个箭头），
      * 而且落点正好在那条 5px 的间隙上。
+     *
+     * 最大化时：拖动功能关掉（enabled: false），而且光标也要回到
+     * 鼠标默认的箭头 —— 注意 enabled 挡不住 cursorShape（见上面
+     * ResizeEdge 里的实测记录），所以这里把 cursorShape 也一起做成
+     * 条件绑定，否则全屏以后左侧列表右边那条缝上还会一直冒 <->。
      */
     MouseArea {
         id: splitterMouse
+
+        // 最大化时不给拖
+        enabled: !window.maximized
 
         /*
          * 位置直接取树面板的右边缘（= 间隙左边界），
@@ -461,7 +498,7 @@ ApplicationWindow {
         z: 2000
 
         hoverEnabled: true
-        cursorShape: Qt.SplitHCursor
+        cursorShape: window.maximized ? Qt.ArrowCursor : Qt.SplitHCursor
         acceptedButtons: Qt.LeftButton
 
         property real pressSceneX: 0
