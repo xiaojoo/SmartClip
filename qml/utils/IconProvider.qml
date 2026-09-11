@@ -18,6 +18,10 @@ QtObject {
         else if (kind === "chevron-up")    s = p('M4.4 9.6 L8 6 L11.6 9.6')
         else if (kind === "play")          s = f('M5.8 3.4 L13.4 8 L5.8 12.6 Z')
         else if (kind === "close")         s = p('M4.6 4.6 L11.4 11.4 M11.4 4.6 L4.6 11.4')
+        // 窗口按钮：缩小 / 放大 / 还原（Fluent 风格的 10px 方框）
+        else if (kind === "win-min")       s = p('M3.6 8 L12.4 8')
+        else if (kind === "win-max")       s = p('M4.2 4.2 H11.8 V11.8 H4.2 Z')
+        else if (kind === "win-restore")   s = p('M6.2 4.2 H11.8 V9.8') + p('M4.2 6.2 H9.8 V11.8 H4.2 Z')
         else if (kind === "plus")          s = p('M8 3.6 L8 12.4 M3.6 8 L12.4 8')
         else if (kind === "refresh")       s = p('M14.4 9.4 A6.4 6.4 0 1 1 12.9 4.6') + p('M15.2 3.4 L15.2 6.8 L11.7 6.3')
         else if (kind === "search")        s = '<circle cx="6.2" cy="6.2" r="4.1" fill="none" stroke="' + c + '" stroke-width="1.7"/>' + p('M9.4 9.4 L13.8 13.8')

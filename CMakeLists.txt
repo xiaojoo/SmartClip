@@ -24,8 +24,9 @@ qt_add_qml_module(SmartClip
         qml/components/DropdownMenu.qml
         qml/components/EditorArea.qml
         qml/components/FolderTree.qml
-        qml/components/MainToolBar.qml
         qml/components/StatusBar.qml
+        qml/components/TopBar.qml
+        qml/components/WindowControls.qml
         qml/delegates/TreeDelegate.qml
         qml/models/ClipboardModel.qml
         qml/utils/IconProvider.qml

@@ -23,6 +23,20 @@ ApplicationWindow {
     title: "SmartClip — 剪贴板"
     color: "#313335"
 
+    /*
+     * 去掉系统原生标题栏（截图里顶上那条白底、带图标 / 标题 /
+     * 最小化 / 最大化 / 关闭的栏）。
+     *
+     * 三个窗口按钮因此改由底部栏最右侧的 WindowControls 接管
+     * （见 qml/components/WindowControls.qml）。
+     * 没有边框了，四边和四角的拖动改变大小也要自己补
+     * （见文件末尾的 resizeHandles），否则窗口只能靠按钮最大化。
+     */
+    flags: Qt.Window | Qt.FramelessWindowHint
+
+    // 原生标题栏没了，Fusion 样式下窗口背景仍可能闪白，这里直接压成深灰
+    palette.window: "#313335"
+
     property string searchText: ""
     property var selectedItem: null
     property string activeFolder: "today"
@@ -68,9 +82,9 @@ ApplicationWindow {
         if (act === "refresh") refresh()
         else if (act === "quit") window.close()
         else if (act === "copy") { if (selectedItem) Store.copyItem(selectedItem.id) }
-        else if (act === "clearsearch") { searchText = ""; toolBar.clearSearch() }
+        else if (act === "clearsearch") { searchText = ""; topBar.clearSearch() }
         else if (act.indexOf("folder:") === 0) activateFolder(act.substring(7))
-        else if (act.indexOf("menu:") === 0) toolBar.openGroup(act.substring(5))
+        else if (act.indexOf("menu:") === 0) topBar.openGroup(act.substring(5))
     }
 
     Component.onCompleted: refresh()
@@ -81,11 +95,16 @@ ApplicationWindow {
     ColumnLayout {
         anchors.fill: parent; spacing: 0
 
-        MainToolBar {
-            id: toolBar
+        /*
+         * 顶部这一行（原生标题栏去掉后它就是窗口最顶上的一行）：
+         * 应用图标 / 分支 / 菜单 tab 在左，搜索框和
+         * 缩小 / 放大 / 关闭 三个窗口按钮在最右边。
+         */
+        TopBar {
+            id: topBar
             Layout.fillWidth: true
+            host: window
             onOpenMenu: (anchor, items) => ddMenu.openFor(anchor, items)
-            onRequestRefresh: () => window.refresh()
             onSearchChanged: (text) => { window.searchText = text; window.refresh() }
         }
 
@@ -209,11 +228,65 @@ ApplicationWindow {
             }
         }
 
+        /*
+         * 底部：原来的状态栏保持不变。
+         *
+         * 缩小 / 放大 / 关闭 不放这里 —— 它们和搜索框一起
+         * 在顶部那一行的最右边（见 TopBar.qml 末尾的 WindowControls）。
+         */
         StatusBar {
             Layout.fillWidth: true
             title: window.selectedItem ? window.selectedItem.title : "README.md"
             count: cbm.entries.length
             copied: window.selectedItem !== null
+        }
+    }
+
+    /*
+     * 无边框窗口的四边 / 四角拖动改变大小。
+     *
+     * 热区贴在窗口最外圈、盖在内容之上（z 调高），
+     * 用 Qt 系统级的 startSystemResize 交给窗口管理器处理，
+     * 比自己算增量更跟手，也不会和中间的 splitter 抢事件。
+     */
+    MouseArea {
+        id: resizeHandles
+        anchors.fill: parent
+        z: 1000
+
+        // 四边 6px、四角 10px：够抓，又不至于挡住底栏的按钮
+        property int edge: 6
+        property int corner: 10
+
+        hoverEnabled: true
+        acceptedButtons: Qt.LeftButton
+        cursorShape: {
+            var x = mouseX, y = mouseY
+            var l = x <= corner, r = x >= width - corner
+            var t = y <= corner, b = y >= height - corner
+            if ((l && t) || (r && b)) return Qt.SizeFDiagCursor
+            if ((r && t) || (l && b)) return Qt.SizeBDiagCursor
+            if (x <= edge || x >= width - edge) return Qt.SizeHorCursor
+            if (y <= edge || y >= height - edge) return Qt.SizeVerCursor
+            return Qt.ArrowCursor
+        }
+
+        onPressed: (mouse) => {
+            var x = mouse.x, y = mouse.y
+            var l = x <= corner, r = x >= width - corner
+            var t = y <= corner, b = y >= height - corner
+            var e = 0
+            if (t) e |= Qt.TopEdge
+            if (b) e |= Qt.BottomEdge
+            if (l) e |= Qt.LeftEdge
+            if (r) e |= Qt.RightEdge
+            if (e === 0) {
+                // 窗口内部：不接管，交给下面的按钮 / 列表
+                mouse.accepted = false
+                return
+            }
+            window.startSystemResize(e)
+            mouse.accepted = true
         }
     }
 }
