@@ -1,2 +1,5 @@
 # Ignore everything inside build_verify/
 build_verify/
+/build/
+/.qtcreator
+/.review-sc
