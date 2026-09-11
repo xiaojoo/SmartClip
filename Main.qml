@@ -401,13 +401,16 @@ ApplicationWindow {
         acceptedButtons: Qt.LeftButton
 
         /*
-         * 光标只用「左右」和「上下」两种双向箭头，不用斜箭头。
+         * 光标：边上给「左右 / 上下」双箭头，四角给「↖↘」斜双箭头。
          *
-         * 原因是四角的光标会盖住旁边的东西：左右两条竖边正好从
-         * 中间那条可拖动的分隔线（splitter）两头经过，
-         * 顶到角落时如果显示斜箭头，那条分隔线上也会跟着变成斜的，
-         * 看着像在拖角。所以左右边缘一律优先给 SizeHorCursor。
-         * 功能不变，startSystemResize 里还是照旧带上角。
+         * 斜箭头只出现在四个角那一小块（corner × corner），边上一律
+         * 还是横 / 竖箭头。这么分是因为左右两条竖边正好从中间那条
+         * 可拖动的分隔线（splitter）两头经过，如果整条边都给斜箭头，
+         * 顶到角落时分隔线上看着也像在拖角。现在斜箭头被夹在角里，
+         * 不会再串到分隔线那一段。
+         *
+         * 光标要跟着鼠标在角里 / 不在角里切换，所以不能用静态表达式，
+         * 而是在 onPositionChanged 里算出当前落在哪个角。
          *
          * 最大化时不给缩放光标，换成鼠标默认的箭头 —— 这里必须
          * 直接把 cursorShape 换掉，不能只靠上面的 enabled: false。
@@ -423,8 +426,52 @@ ApplicationWindow {
          */
         cursorShape: window.maximized
                      ? Qt.ArrowCursor
-                     : ((edge === Qt.LeftEdge || edge === Qt.RightEdge)
-                        ? Qt.SizeHorCursor : Qt.SizeVerCursor)
+                     : cursorFor(activeCorner, edge)
+
+        // 鼠标当前压在哪个角上（不在角上就是 0）
+        property int activeCorner: 0
+
+        /*
+         * 这个点落在哪个角里。
+         *
+         * 入参用窗口坐标（和 onPressed 里的判定同一套口径），
+         * 兼容外面直接喂 (x, y) 进来单独验证。
+         */
+        function cornerAt(px, py) {
+            var nearTop = py <= corner
+            var nearBottom = py >= parent.height - corner
+            var nearLeft = px <= corner
+            var nearRight = px >= parent.width - corner
+
+            if (nearTop && nearLeft)    return Qt.TopEdge | Qt.LeftEdge
+            if (nearTop && nearRight)   return Qt.TopEdge | Qt.RightEdge
+            if (nearBottom && nearLeft) return Qt.BottomEdge | Qt.LeftEdge
+            if (nearBottom && nearRight) return Qt.BottomEdge | Qt.RightEdge
+            return 0
+        }
+
+        // 角 → 斜箭头；不在角上就退回这条边原来的横 / 竖箭头
+        function cursorFor(c, e) {
+            if (c === (Qt.TopEdge | Qt.LeftEdge) ||
+                c === (Qt.BottomEdge | Qt.RightEdge))
+                return Qt.SizeFDiagCursor      // ↖↘
+            if (c === (Qt.TopEdge | Qt.RightEdge) ||
+                c === (Qt.BottomEdge | Qt.LeftEdge))
+                return Qt.SizeBDiagCursor      // ↗↙
+
+            return (e === Qt.LeftEdge || e === Qt.RightEdge)
+                   ? Qt.SizeHorCursor : Qt.SizeVerCursor
+        }
+
+        onPositionChanged: (mouse) => {
+            // 和 onPressed / cornerAt 统一用窗口坐标
+            var p = mapToItem(parent, mouse.x, mouse.y)
+            activeCorner = cornerAt(p.x, p.y)
+        }
+
+        onExited: activeCorner = 0
+
+        onReleased: (mouse) => { activeCorner = 0 }
 
         onPressed: (mouse) => {
             // 热区自身坐标 -> 窗口坐标：四角的判定要按整窗尺寸来算
