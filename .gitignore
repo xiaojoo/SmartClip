@@ -1,25 +1,2 @@
-# Build output
-/build/
-cmake-build-*/
-*.o
-*.obj
-*.exe
-*.lib
-*.dll
-
-# Qt Creator / IDE
-/.qtcreator/
-CMakeLists.txt.user
-*.user
-.vscode/
-.idea/
-*.swp
-
-# OS
-Thumbs.db
-.DS_Store
-
-# QML caches
-*.qmlc
-*.qml.js
-*.jsc
+# Ignore everything inside build_verify/
+build_verify/
