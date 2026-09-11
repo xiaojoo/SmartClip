@@ -107,6 +107,8 @@ Rectangle {
 
             // ---- 菜单 tab ----
             Repeater {
+                id: tabRepeater
+
                 model: root.tabLabels()
 
                 delegate: Rectangle {
@@ -159,6 +161,8 @@ Rectangle {
              * 在 fillHeight 的组里会被拉伸，边框就变成整行高了）。
              */
             Item {
+                id: searchSlot
+
                 Layout.preferredWidth: 300
                 Layout.fillHeight: true
                 Layout.rightMargin: 6
@@ -188,10 +192,160 @@ Rectangle {
              * 高度撑满整行，鼠标滑到最右边就是关闭。
              */
             WindowControls {
+                id: controls
+
                 host: root.host
                 Layout.fillHeight: true
                 Layout.alignment: Qt.AlignRight | Qt.AlignVCenter
             }
+        }
+    }
+
+    /*
+     * 顶栏空白处的拖动移动窗口。
+     *
+     * 原生标题栏去掉以后，窗口只能靠边缘拉伸或者窗口按钮动，
+     * 想挪个位置没地方下手。这里把顶栏的空白当标题栏用：
+     * 按住拖动就带动整个窗口（和原生标题栏的手感一致）。
+     *
+     * 两个关键点：
+     *
+     * 1) 命中判断在 onPressed 里做。压在应用图标 / 菜单 tab /
+     *    搜索框 / 窗口按钮上的按下，直接不接受，事件继续往下走，
+     *    该开菜单开菜单、该打字打字；只有落在真正的空白处才开始拖窗。
+     *    菜单 tab 自己是 MouseArea，会先把 pressed 吃掉，所以这里
+     *    只需要额外避开图标、搜索框和右边那三个窗口按钮。
+     *
+     * 2) 移动交给系统的 startSystemMove()，不是自己算增量改
+     *    window.x/y。这样贴边吸附、多屏 DPI 切换、最大化状态下
+     *    拖动还原都归窗口管理器管，跟手程度和原生标题栏一样。
+     *    它是阻塞调用，接管鼠标后由系统接管整个拖动过程，
+     *    期间不会再给我们事件，所以用 started 兜一下重复进入。
+     */
+    MouseArea {
+        id: dragArea
+
+        anchors.fill: parent
+        acceptedButtons: Qt.LeftButton
+
+        /*
+         * 千万不要开 hoverEnabled。
+         *
+         * 这一层铺满整行，一旦开了 hover，顶栏里所有控件的
+         * hover 都会被它截住：菜单 tab 的高亮不再亮，左侧图标条
+         * 和窗口按钮的底色点过一次之后就卡住不变 —— 因为它们的
+         * containsMouse 收不到"鼠标离开"的事件了。
+         *
+         * 这里只要 pressed / released / doubleClicked 三个信号，
+         * hover 一律让给下面的控件自己去接。
+         *
+         * preventStealing: 拖窗期间别让父级 Flickable 之类的容器
+         * 把这次按下抢走（顶栏目前没有这种父级，留着是防御性的）。
+         */
+        preventStealing: true
+
+        // startSystemMove() 已经发起过（同一个按下不重复发起）
+        property bool started: false
+
+        /*
+         * 顶栏里需要让开鼠标的区域（要拖动时先避开它们）。
+         *
+         * 关键：it.x / it.y 是**相对各自父项**的坐标，不是顶栏坐标！
+         * 实测（qmltestrunner 里量过）：
+         *   appBadge   在顶栏里 x=10，但 it.x 报 0（父行有 leftMargin）
+         *   searchSlot 在顶栏里 x≈1110，但 it.x 报 0（父行是右对齐的）
+         *   controls   在顶栏里 x≈1322，但 it.x 报 312
+         *   tab 的父行原点恰好就是顶栏原点，所以 tab 的 x 是对的
+         * 之前直接拿 it.x / it.y 去比，算出来全是错的：搜索框和三个
+         * 窗口按钮被判成"空白"，第一次按下就被拖窗吃掉，于是要点两次；
+         * 点 tab 左边时又被 appBadge 那个假矩形（0..20）误判。
+         * 所以必须用 mapToItem 换算到拖动层自己的坐标系 ——
+         * mouse.x / mouse.y 正好就是拖动层坐标，两边就统一了。
+         *
+         * 原来这里写的是 mapToItem(null, 0, 0)，运行时报
+         * "Cannot read property 'x' of undefined"，异常抛在 onPressed
+         * 里直接把整个拖动打断，所以换成 mapToItem(dragArea, 0, 0)
+         * 并且对返回值做判空。
+         */
+        function hitRect(it) {
+            var tl = it.mapToItem(dragArea, 0, 0)
+            if (!tl || tl.x === undefined)
+                return null
+            return { x: tl.x, y: tl.y, w: it.width, h: it.height }
+        }
+
+        // 只在"按下"时要判断：压在交互控件上的按下必须放行
+        function overInteractive(mouse) {
+            // 和 hitRect 一样，统一用拖动层自己的局部坐标
+            var px = mouse.x
+            var py = mouse.y
+
+            var hits = [appBadge, searchSlot, controls]
+            for (var i = 0; i < hits.length; ++i) {
+                var it = hits[i]
+                if (!it || !it.visible)
+                    continue
+                var r = hitRect(it)
+                if (r && px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h)
+                    return true
+            }
+
+            // 菜单 tab 是 Repeater 生成的，逐个比
+            for (var j = 0; j < tabRepeater.count; ++j) {
+                var tab = tabRepeater.itemAt(j)
+                if (!tab || !tab.visible)
+                    continue
+                var tr = hitRect(tab)
+                if (tr && px >= tr.x && px <= tr.x + tr.w && py >= tr.y && py <= tr.y + tr.h)
+                    return true
+            }
+
+            return false
+        }
+
+        onPressed: (mouse) => {
+            started = false
+
+            if (!root.host || overInteractive(mouse)) {
+                // 压在交互控件上：放行，让下面的控件处理
+                mouse.accepted = false
+                return
+            }
+
+            /*
+             * 空白处：把拖动交给窗口管理器。
+             *
+             * 先 accepted 再调 startSystemMove()：后者是阻塞的，
+             * 进去以后要等这次拖动结束才返回，写在它后面的赋值
+             * 这一轮根本执行不到。
+             */
+            mouse.accepted = true
+            started = true
+
+            /*
+             * startSystemMove() 不是所有平台 / 窗口类型都支持
+             * （不支持时 Qt 会告警或直接抛错）。这里兜一层，
+             * 免得一个异常把整个 onPressed 打断 —— 之前
+             * overInteractive 抛 "Cannot read property 'x' of undefined"
+             * 就是这个下场：报错刷屏，而且窗口完全拖不动。
+             */
+            try {
+                root.host.startSystemMove()
+            } catch (e) {
+                console.warn("TopBar: startSystemMove 不可用：", e)
+            }
+        }
+
+        onReleased: (mouse) => { started = false }
+
+        // 双击空白处 = 放大 / 还原，和原生标题栏的习惯一致
+        onDoubleClicked: (mouse) => {
+            if (!root.host || overInteractive(mouse))
+                return
+            if (root.host.visibility === Window.Maximized)
+                root.host.showNormal()
+            else
+                root.host.showMaximized()
         }
     }
 }
