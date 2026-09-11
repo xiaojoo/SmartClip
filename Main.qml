@@ -183,6 +183,17 @@ ApplicationWindow {
                 Layout.fillWidth: true;
                 Layout.fillHeight: true
                 // 原来的 Layout.leftMargin: 5 已由上面的透明热区占据
+
+                /*
+                 * 右侧留出和左侧热区等宽的 5px。
+                 *
+                 * 不留的话卡片右边缘会紧贴窗口边框：
+                 * 右上 / 右下的圆角虽然画出来了，
+                 * 但紧挨着窗口那圈浅色边框，看着就像被切掉的方角，
+                 * 和左边（splitter 5px 背景间隙）不是一套。
+                 */
+                Layout.rightMargin: 5
+
                 item: window.selectedItem
                 showWelcome: window.showWhatTab
             }

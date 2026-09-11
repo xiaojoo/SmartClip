@@ -129,6 +129,19 @@ Rectangle {
 
             color: root.barBg
 
+            /*
+             * 顶部两个圆角只能由标签栏自己画。
+             *
+             * Qt Quick 的 clip 只按矩形裁剪，radius 不参与裁剪，
+             * 所以 root 的 radius: 10 挡不住这个铺满顶部的直角矩形：
+             * 标签栏的方角会把卡片上沿的圆角整个盖掉。
+             *
+             * 这里只圆上面两个角，下面两个角在卡片内部，
+             * 与内容区同色，圆不圆都看不出来。
+             */
+            topLeftRadius: 10
+            topRightRadius: 10
+
             RowLayout {
                 anchors.fill: parent
 
@@ -574,7 +587,20 @@ Rectangle {
 
                         height: editorRow.height
 
-                        color: root.editorBg
+                        /*
+                         * 行号栏不自己涂底色。
+                         *
+                         * 它和内容区同色（#1e1f22），一旦自己上色，
+                         * 这个直角矩形就会把内容区左下角的圆角盖成方角。
+                         *
+                         * 而且它在 Flickable 内部、随内容一起滚动，
+                         * 高度又至少和视口一样高，
+                         * 所以不管滚到哪里，视口左下角都被它压住。
+                         *
+                         * 留空让父级 contentArea 的圆角直接透出来，
+                         * 任何滚动位置都不会再丢角。
+                         */
+                        color: "transparent"
 
                         clip: true
 
