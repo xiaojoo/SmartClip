@@ -529,9 +529,6 @@ Rectangle {
 
                     /*
                      * 只有真正超出视口时才显示。
-                     *
-                     * 不使用 AlwaysOn，
-                     * 避免页面切换时出现闪一下的滚动条。
                      */
                     policy: ScrollBar.AsNeeded
 
@@ -589,13 +586,6 @@ Rectangle {
 
                                 width: gutter.width
 
-                                /*
-                                 * 使用 TextArea 的实际字符坐标，
-                                 * 而不是固定 lineHeight。
-                                 *
-                                 * 这样换行后的代码也能保持行号
-                                 * 与第一行文字顶部严格对应。
-                                 */
                                 property rect lineRect: {
                                     if (!textArea.text) {
                                         return Qt.rect(
@@ -683,10 +673,6 @@ Rectangle {
 
                         color: "#d6d7da"
 
-                        /*
-                         * 选中文字：
-                         * 蓝色背景 + 白色文字
-                         */
                         selectionColor:
                             root.selectionBg
 
@@ -730,18 +716,15 @@ Rectangle {
                          * =================================================
                          * 右键菜单
                          * =================================================
-                         *
-                         * 不再使用 Menu.delegate + 自定义 shortcutText。
-                         *
-                         * 每个 MenuItem 自己直接绘制快捷键，
-                         * 避免 Qt 6 Menu delegate 属性传递问题。
                          */
                         Menu {
                             id: editorContextMenu
 
                             /*
-                             * 挂到 Overlay，
-                             * 避免被 TextArea / Flickable clip。
+                             * 必须挂到 Overlay。
+                             *
+                             * 如果直接挂到 TextArea / Flickable，
+                             * 菜单会受到父级 clip 影响。
                              */
                             parent: Overlay.overlay
 
@@ -767,9 +750,6 @@ Rectangle {
                                     root.contextMenuBorder
                             }
 
-                            /*
-                             * 撤销
-                             */
                             MenuItem {
                                 id: undoItem
 
@@ -812,10 +792,10 @@ Rectangle {
                                               )
                                             : root.contextMenuDisabled
 
-                                        font.pixelSize: 13
-
                                         verticalAlignment:
                                             Text.AlignVCenter
+
+                                        elide: Text.ElideRight
                                     }
 
                                     Text {
@@ -823,20 +803,11 @@ Rectangle {
 
                                         color:
                                             undoItem.enabled
-                                            ? (
-                                                undoItem.highlighted
-                                                ? "#ffffff"
-                                                : root.contextMenuShortcut
-                                              )
+                                            ? root.contextMenuShortcut
                                             : root.contextMenuShortcutDisabled
-
-                                        font.pixelSize: 11
 
                                         verticalAlignment:
                                             Text.AlignVCenter
-
-                                        horizontalAlignment:
-                                            Text.AlignRight
                                     }
                                 }
 
@@ -844,15 +815,13 @@ Rectangle {
                                     radius: 4
 
                                     color:
-                                        undoItem.highlighted
+                                        (undoItem.highlighted
+                                         && undoItem.enabled)
                                         ? root.contextMenuHover
                                         : "transparent"
                                 }
                             }
 
-                            /*
-                             * 重做
-                             */
                             MenuItem {
                                 id: redoItem
 
@@ -895,10 +864,10 @@ Rectangle {
                                               )
                                             : root.contextMenuDisabled
 
-                                        font.pixelSize: 13
-
                                         verticalAlignment:
                                             Text.AlignVCenter
+
+                                        elide: Text.ElideRight
                                     }
 
                                     Text {
@@ -906,20 +875,11 @@ Rectangle {
 
                                         color:
                                             redoItem.enabled
-                                            ? (
-                                                redoItem.highlighted
-                                                ? "#ffffff"
-                                                : root.contextMenuShortcut
-                                              )
+                                            ? root.contextMenuShortcut
                                             : root.contextMenuShortcutDisabled
-
-                                        font.pixelSize: 11
 
                                         verticalAlignment:
                                             Text.AlignVCenter
-
-                                        horizontalAlignment:
-                                            Text.AlignRight
                                     }
                                 }
 
@@ -927,20 +887,24 @@ Rectangle {
                                     radius: 4
 
                                     color:
-                                        redoItem.highlighted
+                                        (redoItem.highlighted
+                                         && redoItem.enabled)
                                         ? root.contextMenuHover
                                         : "transparent"
                                 }
                             }
 
                             MenuSeparator {
-                                topPadding: 3
-                                bottomPadding: 3
+                                contentItem: Rectangle {
+                                    implicitWidth:
+                                        editorContextMenu.width - 8
+
+                                    implicitHeight: 1
+
+                                    color: root.contextMenuBorder
+                                }
                             }
 
-                            /*
-                             * 剪切
-                             */
                             MenuItem {
                                 id: cutItem
 
@@ -983,10 +947,10 @@ Rectangle {
                                               )
                                             : root.contextMenuDisabled
 
-                                        font.pixelSize: 13
-
                                         verticalAlignment:
                                             Text.AlignVCenter
+
+                                        elide: Text.ElideRight
                                     }
 
                                     Text {
@@ -994,20 +958,11 @@ Rectangle {
 
                                         color:
                                             cutItem.enabled
-                                            ? (
-                                                cutItem.highlighted
-                                                ? "#ffffff"
-                                                : root.contextMenuShortcut
-                                              )
+                                            ? root.contextMenuShortcut
                                             : root.contextMenuShortcutDisabled
-
-                                        font.pixelSize: 11
 
                                         verticalAlignment:
                                             Text.AlignVCenter
-
-                                        horizontalAlignment:
-                                            Text.AlignRight
                                     }
                                 }
 
@@ -1015,15 +970,13 @@ Rectangle {
                                     radius: 4
 
                                     color:
-                                        cutItem.highlighted
+                                        (cutItem.highlighted
+                                         && cutItem.enabled)
                                         ? root.contextMenuHover
                                         : "transparent"
                                 }
                             }
 
-                            /*
-                             * 复制
-                             */
                             MenuItem {
                                 id: copyItem
 
@@ -1066,10 +1019,10 @@ Rectangle {
                                               )
                                             : root.contextMenuDisabled
 
-                                        font.pixelSize: 13
-
                                         verticalAlignment:
                                             Text.AlignVCenter
+
+                                        elide: Text.ElideRight
                                     }
 
                                     Text {
@@ -1077,20 +1030,11 @@ Rectangle {
 
                                         color:
                                             copyItem.enabled
-                                            ? (
-                                                copyItem.highlighted
-                                                ? "#ffffff"
-                                                : root.contextMenuShortcut
-                                              )
+                                            ? root.contextMenuShortcut
                                             : root.contextMenuShortcutDisabled
-
-                                        font.pixelSize: 11
 
                                         verticalAlignment:
                                             Text.AlignVCenter
-
-                                        horizontalAlignment:
-                                            Text.AlignRight
                                     }
                                 }
 
@@ -1098,15 +1042,13 @@ Rectangle {
                                     radius: 4
 
                                     color:
-                                        copyItem.highlighted
+                                        (copyItem.highlighted
+                                         && copyItem.enabled)
                                         ? root.contextMenuHover
                                         : "transparent"
                                 }
                             }
 
-                            /*
-                             * 粘贴
-                             */
                             MenuItem {
                                 id: pasteItem
 
@@ -1149,10 +1091,10 @@ Rectangle {
                                               )
                                             : root.contextMenuDisabled
 
-                                        font.pixelSize: 13
-
                                         verticalAlignment:
                                             Text.AlignVCenter
+
+                                        elide: Text.ElideRight
                                     }
 
                                     Text {
@@ -1160,20 +1102,11 @@ Rectangle {
 
                                         color:
                                             pasteItem.enabled
-                                            ? (
-                                                pasteItem.highlighted
-                                                ? "#ffffff"
-                                                : root.contextMenuShortcut
-                                              )
+                                            ? root.contextMenuShortcut
                                             : root.contextMenuShortcutDisabled
-
-                                        font.pixelSize: 11
 
                                         verticalAlignment:
                                             Text.AlignVCenter
-
-                                        horizontalAlignment:
-                                            Text.AlignRight
                                     }
                                 }
 
@@ -1181,15 +1114,13 @@ Rectangle {
                                     radius: 4
 
                                     color:
-                                        pasteItem.highlighted
+                                        (pasteItem.highlighted
+                                         && pasteItem.enabled)
                                         ? root.contextMenuHover
                                         : "transparent"
                                 }
                             }
 
-                            /*
-                             * 删除
-                             */
                             MenuItem {
                                 id: deleteItem
 
@@ -1206,10 +1137,11 @@ Rectangle {
                                 padding: 0
 
                                 onTriggered: {
-                                    textArea.remove(
-                                        textArea.selectionStart,
-                                        textArea.selectionEnd
-                                    )
+                                    if (textArea.selectedText.length > 0)
+                                        textArea.remove(
+                                            textArea.selectionStart,
+                                            textArea.selectionEnd
+                                        )
                                 }
 
                                 contentItem: RowLayout {
@@ -1235,31 +1167,22 @@ Rectangle {
                                               )
                                             : root.contextMenuDisabled
 
-                                        font.pixelSize: 13
-
                                         verticalAlignment:
                                             Text.AlignVCenter
+
+                                        elide: Text.ElideRight
                                     }
 
                                     Text {
-                                        text: "Delete"
+                                        text: "Del"
 
                                         color:
                                             deleteItem.enabled
-                                            ? (
-                                                deleteItem.highlighted
-                                                ? "#ffffff"
-                                                : root.contextMenuShortcut
-                                              )
+                                            ? root.contextMenuShortcut
                                             : root.contextMenuShortcutDisabled
-
-                                        font.pixelSize: 11
 
                                         verticalAlignment:
                                             Text.AlignVCenter
-
-                                        horizontalAlignment:
-                                            Text.AlignRight
                                     }
                                 }
 
@@ -1267,20 +1190,24 @@ Rectangle {
                                     radius: 4
 
                                     color:
-                                        deleteItem.highlighted
+                                        (deleteItem.highlighted
+                                         && deleteItem.enabled)
                                         ? root.contextMenuHover
                                         : "transparent"
                                 }
                             }
 
                             MenuSeparator {
-                                topPadding: 3
-                                bottomPadding: 3
+                                contentItem: Rectangle {
+                                    implicitWidth:
+                                        editorContextMenu.width - 8
+
+                                    implicitHeight: 1
+
+                                    color: root.contextMenuBorder
+                                }
                             }
 
-                            /*
-                             * 全选
-                             */
                             MenuItem {
                                 id: selectAllItem
 
@@ -1323,10 +1250,10 @@ Rectangle {
                                               )
                                             : root.contextMenuDisabled
 
-                                        font.pixelSize: 13
-
                                         verticalAlignment:
                                             Text.AlignVCenter
+
+                                        elide: Text.ElideRight
                                     }
 
                                     Text {
@@ -1334,20 +1261,11 @@ Rectangle {
 
                                         color:
                                             selectAllItem.enabled
-                                            ? (
-                                                selectAllItem.highlighted
-                                                ? "#ffffff"
-                                                : root.contextMenuShortcut
-                                              )
+                                            ? root.contextMenuShortcut
                                             : root.contextMenuShortcutDisabled
-
-                                        font.pixelSize: 11
 
                                         verticalAlignment:
                                             Text.AlignVCenter
-
-                                        horizontalAlignment:
-                                            Text.AlignRight
                                     }
                                 }
 
@@ -1355,7 +1273,8 @@ Rectangle {
                                     radius: 4
 
                                     color:
-                                        selectAllItem.highlighted
+                                        (selectAllItem.highlighted
+                                         && selectAllItem.enabled)
                                         ? root.contextMenuHover
                                         : "transparent"
                                 }
@@ -1363,13 +1282,26 @@ Rectangle {
                         }
 
                         /*
-                         * 右键捕获区域
+                         * =================================================
+                         * 右键点击
+                         * =================================================
                          *
-                         * 只接收右键，不影响 TextArea
-                         * 正常的左键选择、拖动和编辑。
+                         * 这里不再使用：
+                         *
+                         *     editorContextMenu.popup(root, x, y)
+                         *
+                         * 因为 Popup.open/popup 会参与一次额外的位置
+                         * 计算，之后直接修改 x/y 在 Qt 6.11 下并不稳定。
+                         *
+                         * 改为：
+                         *
+                         *     1. 计算鼠标相对于 Overlay 的坐标
+                         *     2. 保存为 menuOpenX/menuOpenY
+                         *     3. open()
+                         *     4. Menu 完成布局后再进行边界修正
                          */
                         MouseArea {
-                            id: contextMouseArea
+                            id: rightClickArea
 
                             anchors.fill: parent
 
@@ -1379,150 +1311,147 @@ Rectangle {
                             cursorShape:
                                 Qt.IBeamCursor
 
+                            property real menuOpenX: 0
+                            property real menuOpenY: 0
+
                             onPressed: function(mouse) {
-                                if (mouse.button !== Qt.RightButton)
+                                mouse.accepted = true
+
+                                var overlay =
+                                    Overlay.overlay
+
+                                if (!overlay)
                                     return
 
                                 /*
-                                 * 没有选区时：
-                                 * 把光标放到右键位置。
+                                 * 鼠标位置：
                                  *
-                                 * 有选区时：
-                                 * 保留当前选区。
-                                 */
-                                if (textArea.selectedText.length === 0) {
-                                    var position =
-                                        textArea.positionAt(
-                                            mouse.x,
-                                            mouse.y
-                                        )
-
-                                    textArea.cursorPosition =
-                                        position
-                                }
-
-                                /*
-                                 * TextArea 坐标 -> Overlay 坐标
+                                 * TextArea
+                                 *     ↓
+                                 * EditorArea
+                                 *     ↓
+                                 * Overlay
+                                 *
+                                 * 直接转换到 Overlay，
+                                 * 后面的 Menu 也使用 Overlay 坐标。
                                  */
                                 var p =
-                                    textArea.mapToItem(
-                                        Overlay.overlay,
+                                    rightClickArea.mapToItem(
+                                        overlay,
                                         mouse.x,
                                         mouse.y
                                     )
 
-                                editorContextMenu.x =
-                                    p.x
-
-                                editorContextMenu.y =
-                                    p.y
+                                menuOpenX = p.x
+                                menuOpenY = p.y
 
                                 /*
-                                 * 打开菜单。
+                                 * 先打开。
+                                 *
+                                 * 此时 Menu 的最终 width / height
+                                 * 才能可靠获得。
                                  */
                                 editorContextMenu.open()
 
                                 /*
-                                 * 等 Menu 完成布局后，
-                                 * 再检查窗口边界。
+                                 * 等待 Qt 完成 Popup 布局。
                                  */
                                 Qt.callLater(function() {
                                     if (!editorContextMenu.visible)
                                         return
 
-                                    var overlay =
-                                        Overlay.overlay
-
                                     if (!overlay)
                                         return
 
-                                    var maxX =
-                                        Math.max(
-                                            6,
-                                            overlay.width
-                                            - editorContextMenu.width
-                                            - 6
+                                    /*
+                                     * =================================================
+                                     * EditorArea 内容区域
+                                     * 转换成 Overlay 坐标
+                                     * =================================================
+                                     */
+                                    var areaTopLeft =
+                                        contentArea.mapToItem(
+                                            overlay,
+                                            0,
+                                            0
                                         )
+
+                                    var areaBottomRight =
+                                        contentArea.mapToItem(
+                                            overlay,
+                                            contentArea.width,
+                                            contentArea.height
+                                        )
+
+                                    /*
+                                     * 内容区域边界。
+                                     *
+                                     * 留 6px 内边距，
+                                     * 保持原来的视觉效果。
+                                     */
+                                    var minX =
+                                        areaTopLeft.x + 6
+
+                                    var minY =
+                                        areaTopLeft.y + 6
+
+                                    var maxX =
+                                        areaBottomRight.x
+                                        - editorContextMenu.width
+                                        - 6
 
                                     var maxY =
-                                        Math.max(
-                                            6,
-                                            overlay.height
-                                            - editorContextMenu.height
-                                            - 6
-                                        )
+                                        areaBottomRight.y
+                                        - editorContextMenu.height
+                                        - 6
 
-                                    editorContextMenu.x =
+                                    /*
+                                     * 如果菜单比内容区域还大，
+                                     * 不允许出现反向范围。
+                                     */
+                                    if (maxX < minX)
+                                        maxX = minX
+
+                                    if (maxY < minY)
+                                        maxY = minY
+
+                                    /*
+                                     * =================================================
+                                     * 计算最终位置
+                                     * =================================================
+                                     *
+                                     * 优先使用鼠标位置。
+                                     *
+                                     * 如果右下方放不下，
+                                     * 自动向左 / 向上移动。
+                                     */
+                                    var finalX =
                                         Math.max(
-                                            6,
+                                            minX,
                                             Math.min(
-                                                editorContextMenu.x,
+                                                menuOpenX,
                                                 maxX
                                             )
                                         )
 
-                                    editorContextMenu.y =
+                                    var finalY =
                                         Math.max(
-                                            6,
+                                            minY,
                                             Math.min(
-                                                editorContextMenu.y,
+                                                menuOpenY,
                                                 maxY
                                             )
                                         )
+
+                                    /*
+                                     * 最终直接设置 Overlay 坐标。
+                                     */
+                                    editorContextMenu.x =
+                                        finalX
+
+                                    editorContextMenu.y =
+                                        finalY
                                 })
-
-                                mouse.accepted = true
-                            }
-
-                            onReleased: function(mouse) {
-                                mouse.accepted = true
-                            }
-                        }
-
-                        /*
-                         * 光标自动跟随。
-                         *
-                         * 编辑较长文本时，
-                         * 光标进入视口外自动滚动。
-                         */
-                        onCursorRectangleChanged: {
-                            if (!activeFocus)
-                                return
-
-                            var y =
-                                textArea.y
-                                + cursorRectangle.y
-
-                            var maxY =
-                                Math.max(
-                                    0,
-                                    editorFlick.contentHeight
-                                    - editorFlick.height
-                                )
-
-                            if (
-                                y
-                                < editorFlick.contentY
-                            ) {
-                                editorFlick.contentY =
-                                    Math.max(
-                                        0,
-                                        y
-                                    )
-                            } else if (
-                                y
-                                + cursorRectangle.height
-                                >
-                                editorFlick.contentY
-                                + editorFlick.height
-                            ) {
-                                editorFlick.contentY =
-                                    Math.min(
-                                        maxY,
-                                        y
-                                        + cursorRectangle.height
-                                        - editorFlick.height
-                                    )
                             }
                         }
                     }
