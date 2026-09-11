@@ -40,9 +40,12 @@ RowLayout {
     IconProvider { id: icons }
 
     /*
-     * 每个按钮等宽等高（Windows 11 是 46x32），
-     * 高度撑满整条 bar，这样鼠标滑到最右边就是关闭，
-     * 和原生标题栏的手感一致。
+     * 每个按钮等宽（Windows 11 是 46x32），高度撑满整条 bar，
+     * 这样鼠标滑到最右边就是关闭，和原生标题栏的手感一致。
+     *
+     * 现在这一组不再带右边距（见 TopBar.qml 的说明），
+     * 所以最右边的关闭键是真正贴着窗口右上角的：
+     * 顶到角上按下去就是关闭，右上角那点圆角由整窗遮罩统一修掉。
      *
      * 悬停态直接用 color 绑定表达（原来是 states/PropertyChanges，
      * 三个按钮的规则一样，写成绑定少一层状态机）：
@@ -55,13 +58,21 @@ RowLayout {
         color: mouse.containsMouse ? root.hoverColor : "transparent"
 
         property string kind: "win-min"
+        property int iconSize: 14
 
         AppIcon {
             anchors.centerIn: parent
             provider: icons
             kind: btn.kind
             tint: mouse.containsMouse ? root.textColor : root.idleColor
-            size: 14
+            /*
+             * 关闭键的图标给得比另外两个大一点。
+             *
+             * 三个按钮一样大，但 − 和 □ 是横向铺开的，
+             * × 是斜着的一撇一捺，同样尺寸下看着明显偏小、
+             * 右边空出一块。放大到 16 才和另外两个视觉等重。
+             */
+            size: btn.iconSize
         }
 
         MouseArea {
@@ -80,5 +91,5 @@ RowLayout {
 
     WinButton { kind: "win-min" }
     WinButton { kind: root.maximized ? "win-restore" : "win-max" }
-    WinButton { kind: "close" }
+    WinButton { kind: "close"; iconSize: 16 }
 }

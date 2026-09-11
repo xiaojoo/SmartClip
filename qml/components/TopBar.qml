@@ -72,54 +72,68 @@ Rectangle {
 
     RowLayout {
         anchors.fill: parent
-        anchors.leftMargin: 10
-        anchors.rightMargin: 10
         spacing: 8
 
-        // ---- 左：应用图标 / 标题 ----
-        Rectangle { id: appBadge
-            Layout.preferredWidth: 20; Layout.preferredHeight: 20; radius: 4
-            gradient: Gradient {
-                GradientStop { position: 0.0; color: "#f7971e" }
-                GradientStop { position: 1.0; color: "#ff6b6b" }
-            }
-            Text { anchors.centerIn: parent; text: "S"; color: "#ffffff"; font.pixelSize: 12; font.bold: true }
-        }
+        /*
+         * 左边这一组（应用图标 / 标题 / 菜单 tab）自带左内边距。
+         *
+         * 原来的写法是整行 RowLayout 加 anchors.leftMargin: 10 /
+         * rightMargin: 10，简单，但右边那 10px 会一起把窗口按钮
+         * 从窗口右边缘推开 —— 关闭键右边就会留出一条缝，
+         * 鼠标滑到窗口最右上角点不到关闭（原生标题栏里是能点到的）。
+         * 所以改成左右两组各自带边距：左边这组留 10，右边那组不留。
+         */
+        RowLayout {
+            Layout.fillHeight: true
+            Layout.alignment: Qt.AlignLeft | Qt.AlignVCenter
+            Layout.leftMargin: 10
+            spacing: 8
 
-        Label { text: "SmartClip"; color: root.textBright; font.pixelSize: 12; font.bold: true }
-
-        // 竖分隔线
-        Rectangle { Layout.preferredWidth: 1; Layout.preferredHeight: 16; color: root.borderColor
-                    Layout.leftMargin: 2; Layout.rightMargin: 2 }
-
-        // ---- 菜单 tab ----
-        Repeater {
-            model: root.tabLabels()
-
-            delegate: Rectangle {
-                required property string modelData
-
-                Layout.alignment: Qt.AlignVCenter
-                Layout.preferredHeight: 22
-                Layout.preferredWidth: tabLabel.implicitWidth + 14
-                radius: 4
-                color: tabHover.containsMouse && root.hasMenu(modelData) ? "#3a3d41" : "transparent"
-
-                Label {
-                    id: tabLabel
-                    anchors.centerIn: parent
-                    text: modelData
-                    font.pixelSize: 12
-                    color: tabHover.containsMouse && root.hasMenu(modelData)
-                           ? "#e8e8e8" : root.textColor
+            // ---- 左：应用图标 / 标题 ----
+            Rectangle { id: appBadge
+                Layout.preferredWidth: 20; Layout.preferredHeight: 20; radius: 4
+                gradient: Gradient {
+                    GradientStop { position: 0.0; color: "#f7971e" }
+                    GradientStop { position: 1.0; color: "#ff6b6b" }
                 }
+                Text { anchors.centerIn: parent; text: "S"; color: "#ffffff"; font.pixelSize: 12; font.bold: true }
+            }
 
-                MouseArea {
-                    id: tabHover
-                    anchors.fill: parent
-                    hoverEnabled: true
-                    onClicked: if (root.hasMenu(modelData))
-                                   root.openMenu(parent, root.menuItems(modelData))
+            Label { text: "SmartClip"; color: root.textBright; font.pixelSize: 12; font.bold: true }
+
+            // 竖分隔线
+            Rectangle { Layout.preferredWidth: 1; Layout.preferredHeight: 16; color: root.borderColor
+                        Layout.leftMargin: 2; Layout.rightMargin: 2 }
+
+            // ---- 菜单 tab ----
+            Repeater {
+                model: root.tabLabels()
+
+                delegate: Rectangle {
+                    required property string modelData
+
+                    Layout.alignment: Qt.AlignVCenter
+                    Layout.preferredHeight: 22
+                    Layout.preferredWidth: tabLabel.implicitWidth + 14
+                    radius: 4
+                    color: tabHover.containsMouse && root.hasMenu(modelData) ? "#3a3d41" : "transparent"
+
+                    Label {
+                        id: tabLabel
+                        anchors.centerIn: parent
+                        text: modelData
+                        font.pixelSize: 12
+                        color: tabHover.containsMouse && root.hasMenu(modelData)
+                               ? "#e8e8e8" : root.textColor
+                    }
+
+                    MouseArea {
+                        id: tabHover
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        onClicked: if (root.hasMenu(modelData))
+                                       root.openMenu(parent, root.menuItems(modelData))
+                    }
                 }
             }
         }
@@ -127,36 +141,57 @@ Rectangle {
         Item { Layout.fillWidth: true }
 
         /*
-         * 搜索框：在这一行的最右边，菜单 tab 的右侧。
-         * 后面紧挨着缩小 / 放大 / 关闭 三个窗口按钮。
-         */
-        Rectangle {
-            Layout.preferredWidth: 300; Layout.preferredHeight: 24; radius: 5
-            Layout.alignment: Qt.AlignVCenter
-            Layout.rightMargin: 6
-            color: root.fieldBg; border.color: root.borderColor
-            RowLayout { anchors.fill: parent; anchors.leftMargin: 9; anchors.rightMargin: 9; spacing: 6
-                AppIcon { provider: icons; kind: "search"; tint: root.iconColor; size: 13 }
-                TextField {
-                    id: field
-                    Layout.fillWidth: true; Layout.fillHeight: true
-                    placeholderText: "搜索剪贴内容"; placeholderTextColor: root.textMuted; color: root.textColor
-                    font.pixelSize: 12; background: Item {}
-                    verticalAlignment: TextInput.AlignVCenter
-                    onTextChanged: root.searchChanged(text)
-                } }
-        }
-
-        /*
-         * 窗口按钮：缩小 / 放大(还原) / 关闭。
+         * 右边这一组：搜索框 + 缩小 / 放大 / 关闭。
          *
-         * 原生标题栏去掉后由这里接管，贴在这一行最右边，
-         * 高度撑满整行，鼠标滑到最右边就是关闭。
+         * 整组不带右边距，且高度撑满这一行，所以最右边的关闭键
+         * 能一路顶到窗口的右上角（和原生标题栏一致），
+         * 整窗圆角那一刀会把它右上角跟着修圆。
          */
-        WindowControls {
-            host: root.host
+        RowLayout {
             Layout.fillHeight: true
             Layout.alignment: Qt.AlignRight | Qt.AlignVCenter
+            Layout.rightMargin: 0
+            spacing: 6
+
+            /*
+             * 搜索框：宽度固定，高度自己定，所以外面再套一层
+             * 撑满高度的 Item 让它垂直居中（直接给 Layout.preferredHeight
+             * 在 fillHeight 的组里会被拉伸，边框就变成整行高了）。
+             */
+            Item {
+                Layout.preferredWidth: 300
+                Layout.fillHeight: true
+                Layout.rightMargin: 6
+
+                Rectangle {
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: parent.width
+                    height: 24; radius: 5
+                    color: root.fieldBg; border.color: root.borderColor
+                    RowLayout { anchors.fill: parent; anchors.leftMargin: 9; anchors.rightMargin: 9; spacing: 6
+                        AppIcon { provider: icons; kind: "search"; tint: root.iconColor; size: 13 }
+                        TextField {
+                            id: field
+                            Layout.fillWidth: true; Layout.fillHeight: true
+                            placeholderText: "搜索剪贴内容"; placeholderTextColor: root.textMuted; color: root.textColor
+                            font.pixelSize: 12; background: Item {}
+                            verticalAlignment: TextInput.AlignVCenter
+                            onTextChanged: root.searchChanged(text)
+                        } }
+                }
+            }
+
+            /*
+             * 窗口按钮：缩小 / 放大(还原) / 关闭。
+             *
+             * 原生标题栏去掉后由这里接管，贴在这一行最右边，
+             * 高度撑满整行，鼠标滑到最右边就是关闭。
+             */
+            WindowControls {
+                host: root.host
+                Layout.fillHeight: true
+                Layout.alignment: Qt.AlignRight | Qt.AlignVCenter
+            }
         }
     }
 }

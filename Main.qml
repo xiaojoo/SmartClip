@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Controls
+import QtQuick.Effects
 import QtQuick.Layouts
 import "qml/components"
 import "qml/models"
@@ -21,7 +22,23 @@ ApplicationWindow {
     id: window
     width: 1460; height: 900; minimumWidth: 1000; minimumHeight: 640; visible: true
     title: "SmartClip — 剪贴板"
-    color: "#313335"
+
+    /*
+     * 窗口本身必须透明，整窗的圆角才画得出来。
+     *
+     * 无边框（FramelessWindowHint）之后四角就是方角，
+     * 所以要自己圆：真正负责裁剪的是下面 interfaceMask 那一层
+     * （白底圆角矩形只当 alpha 遮罩，不参与显示）。
+     * 窗口这一层留透明，遮罩裁掉的四角才会露出桌面，
+     * 而不是露出一块方形的底色。
+     *
+     * 注意 palette.window 一并删掉：Fusion 样式会照着它刷一层
+     * 不透明窗口底，那样四角又会被这块底色填回方形。
+     */
+    color: "transparent"
+
+    // 整窗圆角半径（和 FolderTree / EditorArea 卡片的 radius: 10 同一套观感）
+    readonly property real cornerRadius: 12
 
     /*
      * 去掉系统原生标题栏（截图里顶上那条白底、带图标 / 标题 /
@@ -33,9 +50,6 @@ ApplicationWindow {
      * （见文件末尾的 resizeHandles），否则窗口只能靠按钮最大化。
      */
     flags: Qt.Window | Qt.FramelessWindowHint
-
-    // 原生标题栏没了，Fusion 样式下窗口背景仍可能闪白，这里直接压成深灰
-    palette.window: "#313335"
 
     property string searchText: ""
     property var selectedItem: null
@@ -100,8 +114,81 @@ ApplicationWindow {
 
     DropdownMenu { id: ddMenu; anchors.fill: parent; onSelected: (act) => window.handleCommand(act) }
 
-    ColumnLayout {
-        anchors.fill: parent; spacing: 0
+    /*
+     * 圆角遮罩的形状（白 = 保留，透明 = 挖掉）。
+     *
+     * 白色本身不会被画到屏幕上：visible: false 只是让它不参与正常显示，
+     * 下面 maskSource 会单独把它渲染成一张纹理当蒙版用。
+     */
+    Rectangle {
+        id: maskShape
+
+        visible: false
+        width: window.width; height: window.height
+        radius: window.cornerRadius
+        color: "#ffffff"
+    }
+
+    /*
+     * 把遮罩形状渲染成纹理。
+     *
+     * MultiEffect 的 maskSource 必须是一个能提供纹理的源
+     * （ShaderEffectSource），直接塞一个普通 Item 进去
+     * 会拿不到纹理，结果整个窗口被乘成黑色 —— 实测就是这样。
+     */
+    ShaderEffectSource {
+        id: maskTexture
+
+        sourceItem: maskShape
+        hideSource: true
+        live: true
+        smooth: true
+        width: window.width; height: window.height
+    }
+
+    /*
+     * 整个界面套一层圆角容器。
+     *
+     * 为什么不直接把 ApplicationWindow 自己的 color 设成圆角矩形：
+     * 窗口的 color 只画在窗口最底层，上层任何铺满的矩形
+     * （顶栏、状态栏、编辑区）都会把四角重新盖成方角出来。
+     * 所以改成“先正常画完整个界面，再按圆角形状裁一刀”。
+     *
+     * 做法是 MultiEffect 的蒙版：它把 contentRoot 整棵子树
+     * 渲染成一张纹理，再用 maskTexture 的 alpha 通道去裁。
+     * 白 = 保留，透明 = 挖掉，于是四角被啃掉、露出透明窗口，
+     * 圆角才真正成立（clip: true 做不到这件事 —— Qt Quick 的
+     * clip 只认矩形，radius 不参与裁剪）。
+     */
+    Item {
+        id: interfaceRoot
+
+        anchors.fill: parent
+
+        Rectangle {
+            id: contentRoot
+
+            anchors.fill: parent
+
+            // 卡片之外那圈底（编辑区右侧 5px 间隙、左树面板左侧的留白）
+            color: "#313335"
+
+            layer.enabled: true
+            layer.effect: MultiEffect {
+
+                /*
+                 * 蒙版纹理和 contentRoot 位置一致（同为 0,0 且同尺寸），
+                 * 否则这条圆角裁剪会整体错位。
+                 */
+                maskEnabled: true
+                maskSource: maskTexture
+
+                // 圆角边缘抗锯齿，否则斜边会有台阶
+                antialiasing: true
+            }
+
+            ColumnLayout {
+                anchors.fill: parent; spacing: 0
 
         /*
          * 顶部这一行（原生标题栏去掉后它就是窗口最顶上的一行）：
@@ -248,6 +335,24 @@ ApplicationWindow {
             count: cbm.entries.length
             copied: window.selectedItem !== null
         }
+            }
+        }
+    }
+
+    /*
+     * 圆角外侧那一圈描边。
+     *
+     * 窗口底色已经是透明的，深灰界面直接贴到桌面上会显得“糊”，
+     * 压一条比底色亮一点点的细线，边界才立得住。
+     * 它和遮罩用同一个半径，所以描边是贴着裁剪边缘走的。
+     */
+    Rectangle {
+        anchors.fill: parent
+        z: 10
+        color: "transparent"
+        radius: window.cornerRadius
+        border.width: 1
+        border.color: "#4b4d4f"
     }
 
     /*
