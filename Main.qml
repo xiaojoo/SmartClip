@@ -48,6 +48,14 @@ ApplicationWindow {
     readonly property real folderTreeMinWidth: 180
     readonly property real folderTreeMaxWidth: 600
 
+    /*
+     * 全局强调色（#4c96d8）。
+     *
+     * 顶栏右侧的窗口按钮和左侧导航条的 hover 底色都用它，
+     * 和编辑区 / 选中态本来就是同一个蓝，只在这里写一次值。
+     */
+    readonly property color accentColor: "#4c96d8"
+
     readonly property var folders: [
         { key: "today",     label: "今天" },
         { key: "yesterday", label: "昨天" },
@@ -97,8 +105,11 @@ ApplicationWindow {
 
         /*
          * 顶部这一行（原生标题栏去掉后它就是窗口最顶上的一行）：
-         * 应用图标 / 分支 / 菜单 tab 在左，搜索框和
+         * 应用图标 / 应用名 / 菜单 tab 在左，搜索框和
          * 缩小 / 放大 / 关闭 三个窗口按钮在最右边。
+         *
+         * 原来左边还有 ☰ 和「main」分支选择器，已经去掉，
+         * 详见 qml/components/TopBar.qml 开头。
          */
         TopBar {
             id: topBar
@@ -126,19 +137,43 @@ ApplicationWindow {
                                  { k: "search", active: false }, { k: "play", active: false },
                                  { k: "branch", active: false } ]
                         delegate: Rectangle {
+                            id: navCell
                             required property var modelData
                             width: 26; height: 26; x: 4; radius: 5
-                            color: modelData.active ? "#3a4a5a" : "transparent"
+
+                            /*
+                             * 悬停态：整格填强调蓝 + 图标转白。
+                             *
+                             * 选中那一格原本是 #3a4a5a 的浅蓝底，
+                             * 鼠标压上去时也让位给同一片蓝色 ——
+                             * 否则 hover 在选中的格子上完全没反馈。
+                             *
+                             * 这里用绑定而不是 onEntered/onExited 手动改色：
+                             * 绑定是幂等的，鼠标快速划过多格也不会串色。
+                             */
+                            readonly property bool hot: navHit.containsMouse
+                            color: hot ? window.accentColor
+                                       : (modelData.active ? "#3a4a5a" : "transparent")
+
                             AppIcon { anchors.centerIn: parent; provider: stripIcons; kind: modelData.k
-                                      tint: modelData.active ? "#4c96d8" : "#9aa0a8"; size: 16 }
-                            MouseArea { anchors.fill: parent; hoverEnabled: true
-                                onEntered: if (!modelData.active) parent.color = "#454749"
-                                onExited: if (!modelData.active) parent.color = "transparent" }
+                                      tint: navCell.hot ? "#ffffff"
+                                                        : (modelData.active ? window.accentColor : "#9aa0a8")
+                                      size: 16 }
+                            MouseArea { id: navHit; anchors.fill: parent; hoverEnabled: true }
                         }
                     }
                     Item { width: 1; height: Math.max(1, parent.height - 300) }
-                    Rectangle { width: 26; height: 26; x: 4; radius: 5; color: "transparent"
-                        AppIcon { anchors.centerIn: parent; provider: stripIcons; kind: "gear"; tint: "#9aa0a8"; size: 16 } }
+
+                    // 底部齿轮：导航条的收尾格子，同样给 hover（它不接点击）
+                    Rectangle {
+                        id: gearCell
+                        width: 26; height: 26; x: 4; radius: 5
+                        readonly property bool hot: gearHit.containsMouse
+                        color: hot ? window.accentColor : "transparent"
+                        AppIcon { anchors.centerIn: parent; provider: stripIcons; kind: "gear"
+                                  tint: gearCell.hot ? "#ffffff" : "#9aa0a8"; size: 16 }
+                        MouseArea { id: gearHit; anchors.fill: parent; hoverEnabled: true }
+                    }
                 }
             }
 
@@ -218,18 +253,29 @@ ApplicationWindow {
     /*
      * 无边框窗口的四边 / 四角拖动改变大小。
      *
-     * 热区贴在窗口最外圈、盖在内容之上（z 调高），
+     * 拆成四条贴着窗口外沿的长条热区（上下各 6px 高、左右各 6px 宽），
      * 用 Qt 系统级的 startSystemResize 交给窗口管理器处理，
-     * 比自己算增量更跟手，也不会和中间的 splitter 抢事件。
+     * 比自己算增量更跟手。
+     *
+     * 为什么不再是原来那个 anchors.fill 的整窗热区：
+     * 它 hoverEnabled: true，会把整个窗口的 hover 事件全吃掉 ——
+     * 鼠标不管落在哪里，事件都先到它这一层（z:1000）并被 accept，
+     * 下层的顶栏菜单 tab、左侧图标条、右上角三个窗口按钮
+     * 就永远收不到 hover，hover 底色也就永远不亮。
+     * （同一个原因，中间那条分隔线的光标以前也被压成箭头，
+     *   当时是把分隔线单独抬到 z:2000 绕过去的，见下面 splitterMouse。）
+     *
+     * 只贴四条边，窗口内部就还给下面的控件；
+     * 四角的行为和以前一致：按下时把相邻的那条边一起带进 startSystemResize。
      */
-    MouseArea {
-        id: resizeHandles
-        anchors.fill: parent
-        z: 1000
+    component ResizeEdge: MouseArea {
+        // 这条热区代表哪条边（Qt.LeftEdge / Qt.TopEdge / …）
+        required property int edge
+        // 要操作的窗口
+        property var host: null
 
-        // 四边 6px、四角 10px：够抓，又不至于挡住底栏的按钮
-        property int edge: 6
-        property int corner: 10
+        // 四角 10px 内同时带上相邻的边
+        readonly property int corner: 10
 
         hoverEnabled: true
         acceptedButtons: Qt.LeftButton
@@ -243,37 +289,50 @@ ApplicationWindow {
          * 看着像在拖角。所以左右边缘一律优先给 SizeHorCursor。
          * 功能不变，startSystemResize 里还是照旧带上角。
          */
-        cursorShape: {
-            var x = mouseX, y = mouseY
-            if (x <= edge || x >= width - edge) return Qt.SizeHorCursor
-            if (y <= edge || y >= height - edge) return Qt.SizeVerCursor
-            return Qt.ArrowCursor
-        }
+        cursorShape: (edge === Qt.LeftEdge || edge === Qt.RightEdge)
+                     ? Qt.SizeHorCursor : Qt.SizeVerCursor
 
         onPressed: (mouse) => {
-            var x = mouse.x, y = mouse.y
-            var l = x <= corner, r = x >= width - corner
-            var t = y <= corner, b = y >= height - corner
-            var e = 0
-            if (t) e |= Qt.TopEdge
-            if (b) e |= Qt.BottomEdge
-            if (l) e |= Qt.LeftEdge
-            if (r) e |= Qt.RightEdge
-            if (e === 0) {
-                // 窗口内部：不接管，交给下面的按钮 / 列表
-                mouse.accepted = false
-                return
-            }
-            window.startSystemResize(e)
+            // 热区自身坐标 -> 窗口坐标：四角的判定要按整窗尺寸来算
+            var p = mapToItem(parent, mouse.x, mouse.y)
+
+            var e = edge
+            if (p.y <= corner) e |= Qt.TopEdge
+            if (p.y >= parent.height - corner) e |= Qt.BottomEdge
+            if (p.x <= corner) e |= Qt.LeftEdge
+            if (p.x >= parent.width - corner) e |= Qt.RightEdge
+
+            host.startSystemResize(e)
             mouse.accepted = true
         }
+    }
+
+    ResizeEdge {
+        edge: Qt.LeftEdge; host: window; z: 1000
+        width: 6
+        anchors.left: parent.left; anchors.top: parent.top; anchors.bottom: parent.bottom
+    }
+    ResizeEdge {
+        edge: Qt.RightEdge; host: window; z: 1000
+        width: 6
+        anchors.right: parent.right; anchors.top: parent.top; anchors.bottom: parent.bottom
+    }
+    ResizeEdge {
+        edge: Qt.TopEdge; host: window; z: 1000
+        height: 6
+        anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
+    }
+    ResizeEdge {
+        edge: Qt.BottomEdge; host: window; z: 1000
+        height: 6
+        anchors.left: parent.left; anchors.right: parent.right; anchors.bottom: parent.bottom
     }
 
     /*
      * FolderTree / EditorArea 中间那条可拖动的分隔线。
      *
-     * 原来是塞在布局里的一个 Item，问题是它会被上面这层
-     * 四边 resize 热区（anchors.fill + 更高的 z）压住：
+     * 原来是塞在布局里的一个 Item，问题是它会被当时那层
+     * 整窗 resize 热区（anchors.fill + 更高的 z）压住：
      * 鼠标移上去 hover 事件全被 resize 层吃掉，
      * 分隔线自己的 cursorShape 根本不会生效，一直是箭头；
      * 靠上/靠下时还会显示 resize 层的斜箭头。

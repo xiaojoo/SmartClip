@@ -8,7 +8,11 @@ import "../utils"
 /*
  * 顶部这一行（原生标题栏去掉后它就是窗口最顶上的一行）：
  *
- *   [☰] [S] SmartClip › main │ 文件 编辑 视图 … 帮助        [🔍 搜索剪贴内容]
+ *   [S] SmartClip │ 文件 编辑 视图 … 帮助        [🔍 搜索剪贴内容]  [− □ ×]
+ *
+ * 最左边的 ☰ 汉堡键和「main」分支选择器已经去掉：
+ * 汉堡键弹出的那组菜单和菜单栏 tab 是同一份东西，重复；
+ * 分支名是从 IDE 抄来的装饰，这个应用不做版本控制。
  *
  * 搜索框在这一行的最右边（菜单右边）。
  * 最小化 / 最大化(还原) / 关闭 三个按钮在搜索框右边，也在这同一行。
@@ -30,7 +34,6 @@ Rectangle {
     readonly property color textColor:   "#b4b8bf"
     readonly property color textBright:  "#ced0d6"
     readonly property color textMuted:   "#6f737a"
-    readonly property color hoverColor:  "#34363a"
     readonly property color fieldBg:     "#2b2d30"
 
     function folderItems() {
@@ -50,15 +53,16 @@ Rectangle {
         if (label === "帮助") return [{ label: "使用说明", act: "none" }, { label: "关于", act: "none" }]
         return [{ label: "（暂无）", act: "none" }]
     }
-    function menuGroups() {
-        return [ { label: "文件", act: "menu:文件" }, { label: "编辑", act: "menu:编辑" },
-                 { label: "视图", act: "menu:视图" }, { label: "导航", act: "menu:导航" },
-                 { label: "代码", act: "menu:代码" }, { label: "运行", act: "menu:运行" },
-                 { label: "工具", act: "menu:工具" }, { label: "VCS", act: "menu:VCS" },
-                 { label: "窗口", act: "menu:窗口" }, { label: "帮助", act: "menu:帮助" } ]
-    }
     function toolItems() { return [{ label: "设置", act: "none" }, { label: "关于 SmartClip", act: "none" }] }
-    function openGroup(label) { root.openMenu(burger, root.menuItems(label)) }
+
+    /*
+     * 锚点用左边的应用图标。
+     *
+     * 原来锚在 ☰ 汉堡键上，那个键已经删掉；
+     * 现在唯一还会调到这里的是 Main.qml 的 "menu:" 命令，
+     * 用它当锚点菜单会从这一行最左边弹出，位置仍然合理。
+     */
+    function openGroup(label) { root.openMenu(appBadge, root.menuItems(label)) }
     function clearSearch() { field.text = "" }
     function tabLabels() {
         return ["文件", "编辑", "视图", "导航", "代码", "运行", "工具", "VCS", "窗口", "帮助"]
@@ -72,19 +76,9 @@ Rectangle {
         anchors.rightMargin: 10
         spacing: 8
 
-        // ---- 左：汉堡键 / 应用图标 / 标题 / 分支 ----
-        Rectangle {
-            id: burger
-            Layout.preferredWidth: 26; Layout.preferredHeight: 26; radius: 5; color: "transparent"
-            Column { anchors.centerIn: parent; spacing: 3
-                Repeater { model: 3; delegate: Rectangle { width: 14; height: 2; radius: 1; color: root.iconColor } } }
-            MouseArea { anchors.fill: parent; hoverEnabled: true
-                onEntered: burger.color = root.hoverColor
-                onExited: burger.color = "transparent"
-                onClicked: root.openMenu(burger, root.menuGroups()) }
-        }
-
-        Rectangle { Layout.preferredWidth: 20; Layout.preferredHeight: 20; radius: 4
+        // ---- 左：应用图标 / 标题 ----
+        Rectangle { id: appBadge
+            Layout.preferredWidth: 20; Layout.preferredHeight: 20; radius: 4
             gradient: Gradient {
                 GradientStop { position: 0.0; color: "#f7971e" }
                 GradientStop { position: 1.0; color: "#ff6b6b" }
@@ -93,21 +87,6 @@ Rectangle {
         }
 
         Label { text: "SmartClip"; color: root.textBright; font.pixelSize: 12; font.bold: true }
-        AppIcon { provider: icons; kind: "chevron-right"; tint: root.textMuted; size: 10 }
-
-        Rectangle {
-            id: branchBox
-            Layout.preferredHeight: 24; Layout.preferredWidth: branchRow.implicitWidth + 16
-            radius: 5; color: "transparent"
-            RowLayout { id: branchRow; anchors.centerIn: parent; spacing: 5
-                AppIcon { provider: icons; kind: "branch"; tint: root.iconColor; size: 13 }
-                Label { text: "main"; color: root.textColor; font.pixelSize: 12 }
-                AppIcon { provider: icons; kind: "chevron-down"; tint: root.textMuted; size: 10 } }
-            MouseArea { anchors.fill: parent; hoverEnabled: true
-                onEntered: branchBox.color = root.hoverColor
-                onExited: branchBox.color = "transparent"
-                onClicked: root.openMenu(branchBox, root.folderItems()) }
-        }
 
         // 竖分隔线
         Rectangle { Layout.preferredWidth: 1; Layout.preferredHeight: 16; color: root.borderColor
@@ -161,7 +140,7 @@ Rectangle {
                 TextField {
                     id: field
                     Layout.fillWidth: true; Layout.fillHeight: true
-                    placeholderText: "搜索剪贴内容"; placeholderTextColor: "#6f737a"; color: root.textColor
+                    placeholderText: "搜索剪贴内容"; placeholderTextColor: root.textMuted; color: root.textColor
                     font.pixelSize: 12; background: Item {}
                     verticalAlignment: TextInput.AlignVCenter
                     onTextChanged: root.searchChanged(text)
