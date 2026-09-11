@@ -529,6 +529,9 @@ Rectangle {
 
                     /*
                      * 只有真正超出视口时才显示。
+                     *
+                     * 不使用 AlwaysOn，
+                     * 避免页面切换时出现闪一下的滚动条。
                      */
                     policy: ScrollBar.AsNeeded
 
@@ -586,6 +589,13 @@ Rectangle {
 
                                 width: gutter.width
 
+                                /*
+                                 * 使用 TextArea 的实际字符坐标，
+                                 * 而不是固定 lineHeight。
+                                 *
+                                 * 这样换行后的代码也能保持行号
+                                 * 与第一行文字顶部严格对应。
+                                 */
                                 property rect lineRect: {
                                     if (!textArea.text) {
                                         return Qt.rect(
@@ -653,8 +663,8 @@ Rectangle {
                     /*
                      * 正文
                      */
-                    TextArea {
-                        id: textArea
+                    Item {
+                        id: editorSurface
 
                         width:
                             Math.max(
@@ -666,73 +676,239 @@ Rectangle {
 
                         height: editorRow.height
 
-                        wrapMode:
-                            TextArea.Wrap
-
-                        selectByMouse: true
-
-                        color: "#d6d7da"
-
-                        selectionColor:
-                            root.selectionBg
-
-                        selectedTextColor:
-                            root.selectionText
-
-                        font.family: "Consolas"
-
-                        font.pixelSize:
-                            root.editorFontSize
-
-                        topPadding:
-                            root.editorPadding
-
-                        bottomPadding:
-                            root.editorPadding
-
-                        leftPadding:
-                            root.editorPadding
-
                         /*
-                         * 给右侧滚动条留空间。
+                         * 正文编辑器。
+                         *
+                         * 这里特意用 Item 包一层：
+                         * 右键拦截层必须是 TextArea 的“兄弟层”，
+                         * 而不是 TextArea 的子 MouseArea。
+                         *
+                         * 这样 Qt Quick Controls 的 TextArea 内部
+                         * 默认右键菜单就不会再收到这个右键事件，
+                         * 从根源上消除白色默认菜单偶发闪现。
                          */
-                        rightPadding: 20
+                        TextArea {
+                            id: textArea
 
-                        placeholderText:
-                            qsTr("（内容为空）")
+                            // 分隔线到正文第一个字符严格保持 10px。
+                            x: 10
+                            y: 0
+                            width: Math.max(0, parent.width - 10)
+                            height: parent.height
 
-                        background: null
+                            wrapMode:
+                                TextArea.Wrap
 
-                        text: root.editorText()
+                            selectByMouse: true
 
-                        onTextChanged: {
-                            if (root.item) {
-                                if (root.item.content !== undefined)
-                                    root.item.content = text
+                            // Qt 6.9+：彻底关闭 TextArea 自带的默认右键菜单。
+                            // 自绘 Popup 是唯一的右键菜单。
+                            ContextMenu.menu: null
+
+                            color: "#d6d7da"
+
+                            selectionColor:
+                                root.selectionBg
+
+                            selectedTextColor:
+                                root.selectionText
+
+                            font.family: "Consolas"
+
+                            font.pixelSize:
+                                root.editorFontSize
+
+                            topPadding:
+                                root.editorPadding
+
+                            bottomPadding:
+                                root.editorPadding
+
+                            leftPadding: 0
+
+                            rightPadding: 20
+
+                            placeholderText:
+                                qsTr("（内容为空）")
+
+                            background: null
+
+                            text: root.editorText()
+
+                            onTextChanged: {
+                                if (root.item) {
+                                    if (root.item.content !== undefined)
+                                        root.item.content = text
+                                }
+                            }
+
+                            /*
+                             * 光标自动跟随。
+                             *
+                             * 编辑较长文本时，
+                             * 光标进入视口外自动滚动。
+                             */
+                            onCursorRectangleChanged: {
+                                if (!activeFocus)
+                                    return
+
+                                var y =
+                                    textArea.y
+                                    + cursorRectangle.y
+
+                                var maxY =
+                                    Math.max(
+                                        0,
+                                        editorFlick.contentHeight
+                                        - editorFlick.height
+                                    )
+
+                                if (
+                                    y
+                                    < editorFlick.contentY
+                                ) {
+                                    editorFlick.contentY =
+                                        Math.max(
+                                            0,
+                                            y
+                                        )
+                                } else if (
+                                    y
+                                    + cursorRectangle.height
+                                    >
+                                    editorFlick.contentY
+                                    + editorFlick.height
+                                ) {
+                                    editorFlick.contentY =
+                                        Math.min(
+                                            maxY,
+                                            y
+                                            + cursorRectangle.height
+                                            - editorFlick.height
+                                        )
+                                }
                             }
                         }
 
                         /*
-                         * =================================================
-                         * 右键菜单
-                         * =================================================
+                         * =====================================================
+                         * 右键专用拦截层
+                         * =====================================================
+                         *
+                         * 关键点：
+                         *
+                         * 1. 它是 TextArea 的兄弟 Item；
+                         * 2. z = 100，保证右键先被这里拿到；
+                         * 3. acceptedButtons 只有 RightButton，
+                         *    所以左键仍然完全交给 TextArea；
+                         * 4. 不使用 Qt.callLater；
+                         * 5. 菜单在 open() 之前就已经计算好最终位置。
+                         *
+                         * 因此不会出现：
+                         * “先显示白色/初始菜单 -> 再移动到正确位置”的闪现。
                          */
-                        Menu {
+                        MouseArea {
+                            id: contextMouseArea
+
+                            anchors.fill: parent
+
+                            z: 100
+
+                            acceptedButtons:
+                                Qt.RightButton
+
+                            preventStealing: true
+
+                            propagateComposedEvents: false
+
+                            cursorShape:
+                                Qt.IBeamCursor
+
+                            onPressed: function(mouse) {
+                                if (mouse.button !== Qt.RightButton)
+                                    return
+
+                                mouse.accepted = true
+
+                                /*
+                                 * 保持和普通编辑器一致：
+                                 * 没有选区时，右键位置成为光标位置；
+                                 * 已有选区时，不破坏当前选区。
+                                 */
+                                if (textArea.selectedText.length === 0) {
+                                    var position =
+                                        textArea.positionAt(
+                                            mouse.x,
+                                            mouse.y
+                                        )
+
+                                    textArea.cursorPosition =
+                                        position
+                                }
+
+                                textArea.forceActiveFocus()
+
+                                var p =
+                                    contextMouseArea.mapToItem(
+                                        contentArea,
+                                        mouse.x,
+                                        mouse.y
+                                    )
+
+                                editorSurface.openEditorContextMenu(
+                                    p.x,
+                                    p.y
+                                )
+                            }
+
+                            onReleased: function(mouse) {
+                                if (mouse.button === Qt.RightButton)
+                                    mouse.accepted = true
+                            }
+                        }
+
+                        /*
+                         * =====================================================
+                         * 自绘右键菜单
+                         * =====================================================
+                         *
+                         * 这里不用 Menu。
+                         *
+                         * 原来的 Menu 会经过 Qt Quick Controls 的
+                         * Menu/Popup 默认布局和样式流程，在 TextArea
+                         * 右键事件与 Popup 打开时序叠加后，可能短暂出现
+                         * 默认白色菜单。
+                         *
+                         * 改成纯 Popup + 手工 Column 后：
+                         * - 背景永远是自定义深色；
+                         * - 菜单尺寸固定；
+                         * - padding 固定为 6px；
+                         * - 每个菜单项高度固定 30px；
+                         * - 左右内容边距严格 10px；
+                         * - 菜单外边距上下左右统一 6px。
+                         */
+                        Popup {
                             id: editorContextMenu
 
-                            /*
-                             * 必须挂到 Overlay。
-                             *
-                             * 如果直接挂到 TextArea / Flickable，
-                             * 菜单会受到父级 clip 影响。
-                             */
-                            parent: Overlay.overlay
+                            parent: contentArea
 
                             popupType: Popup.Item
 
                             width: 210
 
-                            padding: 4
+                            /*
+                             * 7 个菜单项 × 30px
+                             * + 2 条分隔线 × 1px
+                             * + 上下 padding 6px
+                             * = 224px。
+                             *
+                             * 必须在 open() 前就有确定的高度，
+                             * 否则第一次右键时可能拿到 height=0，
+                             * 导致菜单先出现在错误位置再跳动。
+                             */
+                            height: 224
+
+                            padding: 6
 
                             closePolicy:
                                 Popup.CloseOnEscape
@@ -750,710 +926,649 @@ Rectangle {
                                     root.contextMenuBorder
                             }
 
-                            MenuItem {
-                                id: undoItem
-
+                            contentItem: Column {
                                 width:
-                                    editorContextMenu.width - 8
+                                    editorContextMenu.availableWidth
 
-                                height: 30
+                                spacing: 0
 
-                                text: qsTr("撤销")
+                                MenuItem {
+                                    id: undoItem
 
-                                enabled:
-                                    textArea.canUndo
+                                    width: parent.width
+                                    height: 30
 
-                                padding: 0
+                                    text: qsTr("撤销")
 
-                                onTriggered: {
-                                    textArea.undo()
-                                }
+                                    enabled:
+                                        textArea.canUndo
 
-                                contentItem: RowLayout {
-                                    anchors.fill: parent
+                                    padding: 0
 
-                                    anchors.leftMargin: 12
-                                    anchors.rightMargin: 10
+                                    onTriggered: {
+                                        textArea.undo()
+                                        editorContextMenu.close()
+                                    }
 
-                                    spacing: 12
+                                    contentItem: RowLayout {
+                                        anchors.fill: parent
 
-                                    Text {
-                                        Layout.fillWidth: true
+                                        anchors.leftMargin: 10
+                                        anchors.rightMargin: 10
 
-                                        text:
-                                            undoItem.text
+                                        spacing: 12
+
+                                        Text {
+                                            Layout.fillWidth: true
+
+                                            text: undoItem.text
+
+                                            color:
+                                                !undoItem.enabled
+                                                ? root.contextMenuDisabled
+                                                : undoItem.hovered
+                                                  ? "#ffffff"
+                                                  : root.contextMenuText
+
+                                            font.pixelSize: 13
+
+                                            verticalAlignment:
+                                                Text.AlignVCenter
+                                        }
+
+                                        Text {
+                                            text: "Ctrl+Z"
+
+                                            color:
+                                                !undoItem.enabled
+                                                ? root.contextMenuShortcutDisabled
+                                                : undoItem.hovered
+                                                  ? "#ffffff"
+                                                  : root.contextMenuShortcut
+
+                                            font.pixelSize: 11
+
+                                            verticalAlignment:
+                                                Text.AlignVCenter
+
+                                            horizontalAlignment:
+                                                Text.AlignRight
+                                        }
+                                    }
+
+                                    background: Rectangle {
+                                        radius: 4
 
                                         color:
                                             undoItem.enabled
-                                            ? (
-                                                undoItem.highlighted
-                                                ? "#ffffff"
-                                                : root.contextMenuText
-                                              )
-                                            : root.contextMenuDisabled
-
-                                        verticalAlignment:
-                                            Text.AlignVCenter
-
-                                        elide: Text.ElideRight
-                                    }
-
-                                    Text {
-                                        text: "Ctrl+Z"
-
-                                        color:
-                                            undoItem.enabled
-                                            ? root.contextMenuShortcut
-                                            : root.contextMenuShortcutDisabled
-
-                                        verticalAlignment:
-                                            Text.AlignVCenter
+                                            && undoItem.hovered
+                                            ? root.contextMenuHover
+                                            : "transparent"
                                     }
                                 }
 
-                                background: Rectangle {
-                                    radius: 4
+                                MenuItem {
+                                    id: redoItem
 
-                                    color:
-                                        (undoItem.highlighted
-                                         && undoItem.enabled)
-                                        ? root.contextMenuHover
-                                        : "transparent"
-                                }
-                            }
+                                    width: parent.width
+                                    height: 30
 
-                            MenuItem {
-                                id: redoItem
+                                    text: qsTr("重做")
 
-                                width:
-                                    editorContextMenu.width - 8
+                                    enabled:
+                                        textArea.canRedo
 
-                                height: 30
+                                    padding: 0
 
-                                text: qsTr("重做")
-
-                                enabled:
-                                    textArea.canRedo
-
-                                padding: 0
-
-                                onTriggered: {
-                                    textArea.redo()
-                                }
-
-                                contentItem: RowLayout {
-                                    anchors.fill: parent
-
-                                    anchors.leftMargin: 12
-                                    anchors.rightMargin: 10
-
-                                    spacing: 12
-
-                                    Text {
-                                        Layout.fillWidth: true
-
-                                        text:
-                                            redoItem.text
-
-                                        color:
-                                            redoItem.enabled
-                                            ? (
-                                                redoItem.highlighted
-                                                ? "#ffffff"
-                                                : root.contextMenuText
-                                              )
-                                            : root.contextMenuDisabled
-
-                                        verticalAlignment:
-                                            Text.AlignVCenter
-
-                                        elide: Text.ElideRight
+                                    onTriggered: {
+                                        textArea.redo()
+                                        editorContextMenu.close()
                                     }
 
-                                    Text {
-                                        text: "Ctrl+Y"
+                                    contentItem: RowLayout {
+                                        anchors.fill: parent
+
+                                        anchors.leftMargin: 10
+                                        anchors.rightMargin: 10
+
+                                        spacing: 12
+
+                                        Text {
+                                            Layout.fillWidth: true
+
+                                            text: redoItem.text
+
+                                            color:
+                                                !redoItem.enabled
+                                                ? root.contextMenuDisabled
+                                                : redoItem.hovered
+                                                  ? "#ffffff"
+                                                  : root.contextMenuText
+
+                                            font.pixelSize: 13
+
+                                            verticalAlignment:
+                                                Text.AlignVCenter
+                                        }
+
+                                        Text {
+                                            text: "Ctrl+Y"
+
+                                            color:
+                                                !redoItem.enabled
+                                                ? root.contextMenuShortcutDisabled
+                                                : redoItem.hovered
+                                                  ? "#ffffff"
+                                                  : root.contextMenuShortcut
+
+                                            font.pixelSize: 11
+
+                                            verticalAlignment:
+                                                Text.AlignVCenter
+
+                                            horizontalAlignment:
+                                                Text.AlignRight
+                                        }
+                                    }
+
+                                    background: Rectangle {
+                                        radius: 4
 
                                         color:
                                             redoItem.enabled
-                                            ? root.contextMenuShortcut
-                                            : root.contextMenuShortcutDisabled
-
-                                        verticalAlignment:
-                                            Text.AlignVCenter
+                                            && redoItem.hovered
+                                            ? root.contextMenuHover
+                                            : "transparent"
                                     }
                                 }
 
-                                background: Rectangle {
-                                    radius: 4
+                                Rectangle {
+                                    width: parent.width - 20
+                                    height: 1
+
+                                    x: 10
 
                                     color:
-                                        (redoItem.highlighted
-                                         && redoItem.enabled)
-                                        ? root.contextMenuHover
-                                        : "transparent"
-                                }
-                            }
+                                        root.contextMenuBorder
 
-                            MenuSeparator {
-                                contentItem: Rectangle {
-                                    implicitWidth:
-                                        editorContextMenu.width - 8
-
-                                    implicitHeight: 1
-
-                                    color: root.contextMenuBorder
-                                }
-                            }
-
-                            MenuItem {
-                                id: cutItem
-
-                                width:
-                                    editorContextMenu.width - 8
-
-                                height: 30
-
-                                text: qsTr("剪切")
-
-                                enabled:
-                                    textArea.selectedText.length > 0
-
-                                padding: 0
-
-                                onTriggered: {
-                                    textArea.cut()
+                                    opacity: 0.75
                                 }
 
-                                contentItem: RowLayout {
-                                    anchors.fill: parent
+                                MenuItem {
+                                    id: cutItem
 
-                                    anchors.leftMargin: 12
-                                    anchors.rightMargin: 10
+                                    width: parent.width
+                                    height: 30
 
-                                    spacing: 12
+                                    text: qsTr("剪切")
 
-                                    Text {
-                                        Layout.fillWidth: true
+                                    enabled:
+                                        textArea.selectedText.length > 0
 
-                                        text:
-                                            cutItem.text
+                                    padding: 0
+
+                                    onTriggered: {
+                                        textArea.cut()
+                                        editorContextMenu.close()
+                                    }
+
+                                    contentItem: RowLayout {
+                                        anchors.fill: parent
+
+                                        anchors.leftMargin: 10
+                                        anchors.rightMargin: 10
+
+                                        spacing: 12
+
+                                        Text {
+                                            Layout.fillWidth: true
+
+                                            text: cutItem.text
+
+                                            color:
+                                                !cutItem.enabled
+                                                ? root.contextMenuDisabled
+                                                : cutItem.hovered
+                                                  ? "#ffffff"
+                                                  : root.contextMenuText
+
+                                            font.pixelSize: 13
+
+                                            verticalAlignment:
+                                                Text.AlignVCenter
+                                        }
+
+                                        Text {
+                                            text: "Ctrl+X"
+
+                                            color:
+                                                !cutItem.enabled
+                                                ? root.contextMenuShortcutDisabled
+                                                : cutItem.hovered
+                                                  ? "#ffffff"
+                                                  : root.contextMenuShortcut
+
+                                            font.pixelSize: 11
+
+                                            verticalAlignment:
+                                                Text.AlignVCenter
+
+                                            horizontalAlignment:
+                                                Text.AlignRight
+                                        }
+                                    }
+
+                                    background: Rectangle {
+                                        radius: 4
 
                                         color:
                                             cutItem.enabled
-                                            ? (
-                                                cutItem.highlighted
-                                                ? "#ffffff"
-                                                : root.contextMenuText
-                                              )
-                                            : root.contextMenuDisabled
-
-                                        verticalAlignment:
-                                            Text.AlignVCenter
-
-                                        elide: Text.ElideRight
-                                    }
-
-                                    Text {
-                                        text: "Ctrl+X"
-
-                                        color:
-                                            cutItem.enabled
-                                            ? root.contextMenuShortcut
-                                            : root.contextMenuShortcutDisabled
-
-                                        verticalAlignment:
-                                            Text.AlignVCenter
+                                            && cutItem.hovered
+                                            ? root.contextMenuHover
+                                            : "transparent"
                                     }
                                 }
 
-                                background: Rectangle {
-                                    radius: 4
+                                MenuItem {
+                                    id: copyItem
 
-                                    color:
-                                        (cutItem.highlighted
-                                         && cutItem.enabled)
-                                        ? root.contextMenuHover
-                                        : "transparent"
-                                }
-                            }
+                                    width: parent.width
+                                    height: 30
 
-                            MenuItem {
-                                id: copyItem
+                                    text: qsTr("复制")
 
-                                width:
-                                    editorContextMenu.width - 8
+                                    enabled:
+                                        textArea.selectedText.length > 0
 
-                                height: 30
+                                    padding: 0
 
-                                text: qsTr("复制")
-
-                                enabled:
-                                    textArea.selectedText.length > 0
-
-                                padding: 0
-
-                                onTriggered: {
-                                    textArea.copy()
-                                }
-
-                                contentItem: RowLayout {
-                                    anchors.fill: parent
-
-                                    anchors.leftMargin: 12
-                                    anchors.rightMargin: 10
-
-                                    spacing: 12
-
-                                    Text {
-                                        Layout.fillWidth: true
-
-                                        text:
-                                            copyItem.text
-
-                                        color:
-                                            copyItem.enabled
-                                            ? (
-                                                copyItem.highlighted
-                                                ? "#ffffff"
-                                                : root.contextMenuText
-                                              )
-                                            : root.contextMenuDisabled
-
-                                        verticalAlignment:
-                                            Text.AlignVCenter
-
-                                        elide: Text.ElideRight
+                                    onTriggered: {
+                                        textArea.copy()
+                                        editorContextMenu.close()
                                     }
 
-                                    Text {
-                                        text: "Ctrl+C"
+                                    contentItem: RowLayout {
+                                        anchors.fill: parent
+
+                                        anchors.leftMargin: 10
+                                        anchors.rightMargin: 10
+
+                                        spacing: 12
+
+                                        Text {
+                                            Layout.fillWidth: true
+
+                                            text: copyItem.text
+
+                                            color:
+                                                !copyItem.enabled
+                                                ? root.contextMenuDisabled
+                                                : copyItem.hovered
+                                                  ? "#ffffff"
+                                                  : root.contextMenuText
+
+                                            font.pixelSize: 13
+
+                                            verticalAlignment:
+                                                Text.AlignVCenter
+                                        }
+
+                                        Text {
+                                            text: "Ctrl+C"
+
+                                            color:
+                                                !copyItem.enabled
+                                                ? root.contextMenuShortcutDisabled
+                                                : copyItem.hovered
+                                                  ? "#ffffff"
+                                                  : root.contextMenuShortcut
+
+                                            font.pixelSize: 11
+
+                                            verticalAlignment:
+                                                Text.AlignVCenter
+
+                                            horizontalAlignment:
+                                                Text.AlignRight
+                                        }
+                                    }
+
+                                    background: Rectangle {
+                                        radius: 4
 
                                         color:
                                             copyItem.enabled
-                                            ? root.contextMenuShortcut
-                                            : root.contextMenuShortcutDisabled
-
-                                        verticalAlignment:
-                                            Text.AlignVCenter
+                                            && copyItem.hovered
+                                            ? root.contextMenuHover
+                                            : "transparent"
                                     }
                                 }
 
-                                background: Rectangle {
-                                    radius: 4
+                                MenuItem {
+                                    id: pasteItem
 
-                                    color:
-                                        (copyItem.highlighted
-                                         && copyItem.enabled)
-                                        ? root.contextMenuHover
-                                        : "transparent"
-                                }
-                            }
+                                    width: parent.width
+                                    height: 30
 
-                            MenuItem {
-                                id: pasteItem
+                                    text: qsTr("粘贴")
 
-                                width:
-                                    editorContextMenu.width - 8
+                                    enabled:
+                                        textArea.canPaste
 
-                                height: 30
+                                    padding: 0
 
-                                text: qsTr("粘贴")
+                                    onTriggered: {
+                                        textArea.paste()
+                                        editorContextMenu.close()
+                                    }
 
-                                enabled:
-                                    textArea.canPaste
+                                    contentItem: RowLayout {
+                                        anchors.fill: parent
 
-                                padding: 0
+                                        anchors.leftMargin: 10
+                                        anchors.rightMargin: 10
 
-                                onTriggered: {
-                                    textArea.paste()
-                                }
+                                        spacing: 12
 
-                                contentItem: RowLayout {
-                                    anchors.fill: parent
+                                        Text {
+                                            Layout.fillWidth: true
 
-                                    anchors.leftMargin: 12
-                                    anchors.rightMargin: 10
+                                            text: pasteItem.text
 
-                                    spacing: 12
+                                            color:
+                                                !pasteItem.enabled
+                                                ? root.contextMenuDisabled
+                                                : pasteItem.hovered
+                                                  ? "#ffffff"
+                                                  : root.contextMenuText
 
-                                    Text {
-                                        Layout.fillWidth: true
+                                            font.pixelSize: 13
 
-                                        text:
-                                            pasteItem.text
+                                            verticalAlignment:
+                                                Text.AlignVCenter
+                                        }
+
+                                        Text {
+                                            text: "Ctrl+V"
+
+                                            color:
+                                                !pasteItem.enabled
+                                                ? root.contextMenuShortcutDisabled
+                                                : pasteItem.hovered
+                                                  ? "#ffffff"
+                                                  : root.contextMenuShortcut
+
+                                            font.pixelSize: 11
+
+                                            verticalAlignment:
+                                                Text.AlignVCenter
+
+                                            horizontalAlignment:
+                                                Text.AlignRight
+                                        }
+                                    }
+
+                                    background: Rectangle {
+                                        radius: 4
 
                                         color:
                                             pasteItem.enabled
-                                            ? (
-                                                pasteItem.highlighted
-                                                ? "#ffffff"
-                                                : root.contextMenuText
-                                              )
-                                            : root.contextMenuDisabled
-
-                                        verticalAlignment:
-                                            Text.AlignVCenter
-
-                                        elide: Text.ElideRight
-                                    }
-
-                                    Text {
-                                        text: "Ctrl+V"
-
-                                        color:
-                                            pasteItem.enabled
-                                            ? root.contextMenuShortcut
-                                            : root.contextMenuShortcutDisabled
-
-                                        verticalAlignment:
-                                            Text.AlignVCenter
+                                            && pasteItem.hovered
+                                            ? root.contextMenuHover
+                                            : "transparent"
                                     }
                                 }
 
-                                background: Rectangle {
-                                    radius: 4
+                                MenuItem {
+                                    id: deleteItem
 
-                                    color:
-                                        (pasteItem.highlighted
-                                         && pasteItem.enabled)
-                                        ? root.contextMenuHover
-                                        : "transparent"
-                                }
-                            }
+                                    width: parent.width
+                                    height: 30
 
-                            MenuItem {
-                                id: deleteItem
+                                    text: qsTr("删除")
 
-                                width:
-                                    editorContextMenu.width - 8
+                                    enabled:
+                                        textArea.selectedText.length > 0
 
-                                height: 30
+                                    padding: 0
 
-                                text: qsTr("删除")
-
-                                enabled:
-                                    textArea.selectedText.length > 0
-
-                                padding: 0
-
-                                onTriggered: {
-                                    if (textArea.selectedText.length > 0)
+                                    onTriggered: {
                                         textArea.remove(
                                             textArea.selectionStart,
                                             textArea.selectionEnd
                                         )
-                                }
+                                        editorContextMenu.close()
+                                    }
 
-                                contentItem: RowLayout {
-                                    anchors.fill: parent
+                                    contentItem: RowLayout {
+                                        anchors.fill: parent
 
-                                    anchors.leftMargin: 12
-                                    anchors.rightMargin: 10
+                                        anchors.leftMargin: 10
+                                        anchors.rightMargin: 10
 
-                                    spacing: 12
+                                        spacing: 12
 
-                                    Text {
-                                        Layout.fillWidth: true
+                                        Text {
+                                            Layout.fillWidth: true
 
-                                        text:
-                                            deleteItem.text
+                                            text: deleteItem.text
+
+                                            color:
+                                                !deleteItem.enabled
+                                                ? root.contextMenuDisabled
+                                                : deleteItem.hovered
+                                                  ? "#ffffff"
+                                                  : root.contextMenuText
+
+                                            font.pixelSize: 13
+
+                                            verticalAlignment:
+                                                Text.AlignVCenter
+                                        }
+
+                                        Text {
+                                            text: "Delete"
+
+                                            color:
+                                                !deleteItem.enabled
+                                                ? root.contextMenuShortcutDisabled
+                                                : deleteItem.hovered
+                                                  ? "#ffffff"
+                                                  : root.contextMenuShortcut
+
+                                            font.pixelSize: 11
+
+                                            verticalAlignment:
+                                                Text.AlignVCenter
+
+                                            horizontalAlignment:
+                                                Text.AlignRight
+                                        }
+                                    }
+
+                                    background: Rectangle {
+                                        radius: 4
 
                                         color:
                                             deleteItem.enabled
-                                            ? (
-                                                deleteItem.highlighted
-                                                ? "#ffffff"
-                                                : root.contextMenuText
-                                              )
-                                            : root.contextMenuDisabled
-
-                                        verticalAlignment:
-                                            Text.AlignVCenter
-
-                                        elide: Text.ElideRight
-                                    }
-
-                                    Text {
-                                        text: "Del"
-
-                                        color:
-                                            deleteItem.enabled
-                                            ? root.contextMenuShortcut
-                                            : root.contextMenuShortcutDisabled
-
-                                        verticalAlignment:
-                                            Text.AlignVCenter
+                                            && deleteItem.hovered
+                                            ? root.contextMenuHover
+                                            : "transparent"
                                     }
                                 }
 
-                                background: Rectangle {
-                                    radius: 4
+                                Rectangle {
+                                    width: parent.width - 20
+                                    height: 1
+
+                                    x: 10
 
                                     color:
-                                        (deleteItem.highlighted
-                                         && deleteItem.enabled)
-                                        ? root.contextMenuHover
-                                        : "transparent"
-                                }
-                            }
+                                        root.contextMenuBorder
 
-                            MenuSeparator {
-                                contentItem: Rectangle {
-                                    implicitWidth:
-                                        editorContextMenu.width - 8
-
-                                    implicitHeight: 1
-
-                                    color: root.contextMenuBorder
-                                }
-                            }
-
-                            MenuItem {
-                                id: selectAllItem
-
-                                width:
-                                    editorContextMenu.width - 8
-
-                                height: 30
-
-                                text: qsTr("全选")
-
-                                enabled:
-                                    textArea.length > 0
-
-                                padding: 0
-
-                                onTriggered: {
-                                    textArea.selectAll()
+                                    opacity: 0.75
                                 }
 
-                                contentItem: RowLayout {
-                                    anchors.fill: parent
+                                MenuItem {
+                                    id: selectAllItem
 
-                                    anchors.leftMargin: 12
-                                    anchors.rightMargin: 10
+                                    width: parent.width
+                                    height: 30
 
-                                    spacing: 12
+                                    text: qsTr("全选")
 
-                                    Text {
-                                        Layout.fillWidth: true
+                                    enabled:
+                                        textArea.length > 0
 
-                                        text:
-                                            selectAllItem.text
+                                    padding: 0
+
+                                    onTriggered: {
+                                        textArea.selectAll()
+                                        editorContextMenu.close()
+                                    }
+
+                                    contentItem: RowLayout {
+                                        anchors.fill: parent
+
+                                        anchors.leftMargin: 10
+                                        anchors.rightMargin: 10
+
+                                        spacing: 12
+
+                                        Text {
+                                            Layout.fillWidth: true
+
+                                            text: selectAllItem.text
+
+                                            color:
+                                                !selectAllItem.enabled
+                                                ? root.contextMenuDisabled
+                                                : selectAllItem.hovered
+                                                  ? "#ffffff"
+                                                  : root.contextMenuText
+
+                                            font.pixelSize: 13
+
+                                            verticalAlignment:
+                                                Text.AlignVCenter
+                                        }
+
+                                        Text {
+                                            text: "Ctrl+A"
+
+                                            color:
+                                                !selectAllItem.enabled
+                                                ? root.contextMenuShortcutDisabled
+                                                : selectAllItem.hovered
+                                                  ? "#ffffff"
+                                                  : root.contextMenuShortcut
+
+                                            font.pixelSize: 11
+
+                                            verticalAlignment:
+                                                Text.AlignVCenter
+
+                                            horizontalAlignment:
+                                                Text.AlignRight
+                                        }
+                                    }
+
+                                    background: Rectangle {
+                                        radius: 4
 
                                         color:
                                             selectAllItem.enabled
-                                            ? (
-                                                selectAllItem.highlighted
-                                                ? "#ffffff"
-                                                : root.contextMenuText
-                                              )
-                                            : root.contextMenuDisabled
-
-                                        verticalAlignment:
-                                            Text.AlignVCenter
-
-                                        elide: Text.ElideRight
+                                            && selectAllItem.hovered
+                                            ? root.contextMenuHover
+                                            : "transparent"
                                     }
-
-                                    Text {
-                                        text: "Ctrl+A"
-
-                                        color:
-                                            selectAllItem.enabled
-                                            ? root.contextMenuShortcut
-                                            : root.contextMenuShortcutDisabled
-
-                                        verticalAlignment:
-                                            Text.AlignVCenter
-                                    }
-                                }
-
-                                background: Rectangle {
-                                    radius: 4
-
-                                    color:
-                                        (selectAllItem.highlighted
-                                         && selectAllItem.enabled)
-                                        ? root.contextMenuHover
-                                        : "transparent"
                                 }
                             }
                         }
 
                         /*
-                         * =================================================
-                         * 右键点击
-                         * =================================================
-                         *
-                         * 这里不再使用：
-                         *
-                         *     editorContextMenu.popup(root, x, y)
-                         *
-                         * 因为 Popup.open/popup 会参与一次额外的位置
-                         * 计算，之后直接修改 x/y 在 Qt 6.11 下并不稳定。
-                         *
-                         * 改为：
-                         *
-                         *     1. 计算鼠标相对于 Overlay 的坐标
-                         *     2. 保存为 menuOpenX/menuOpenY
-                         *     3. open()
-                         *     4. Menu 完成布局后再进行边界修正
+                         * 在 Popup 打开前计算最终坐标。
+                         * 不延迟，不二次修正，因此不会闪现初始位置。
                          */
-                        MouseArea {
-                            id: rightClickArea
+                        function openEditorContextMenu(mouseX, mouseY) {
+                            /*
+                             * 菜单和 contentArea 使用同一个坐标系。
+                             *
+                             * 这里的 10px 有两个作用：
+                             *
+                             * 1. 上 / 右 / 下：距离 contentArea 边缘 10px；
+                             * 2. 左：距离编辑器中间那根竖线 10px。
+                             *
+                             * 注意左侧不能直接使用 contentArea.left，
+                             * 因为 contentArea 最左边还有 50px 行号栏。
+                             */
+                            var margin = 10
 
-                            anchors.fill: parent
+                            /*
+                             * Popup 已经固定为最终尺寸，
+                             * 因此这里不会出现第一次打开时 height=0。
+                             */
+                            var menuWidth = editorContextMenu.width
+                            var menuHeight = editorContextMenu.height
 
-                            acceptedButtons:
-                                Qt.RightButton
+                            /*
+                             * 竖线位置：
+                             * gutter.width + 1px separator。
+                             * 菜单再向右留 10px。
+                             */
+                            var minX =
+                                gutter.width
+                                + 1
+                                + margin
 
-                            cursorShape:
-                                Qt.IBeamCursor
+                            var minY = margin
 
-                            property real menuOpenX: 0
-                            property real menuOpenY: 0
+                            /*
+                             * 右边和下边同样保留 10px。
+                             */
+                            var maxX = Math.max(
+                                minX,
+                                contentArea.width
+                                - menuWidth
+                                - margin
+                            )
 
-                            onPressed: function(mouse) {
-                                mouse.accepted = true
+                            var maxY = Math.max(
+                                minY,
+                                contentArea.height
+                                - menuHeight
+                                - margin
+                            )
 
-                                var overlay =
-                                    Overlay.overlay
+                            var finalX = Math.max(
+                                minX,
+                                Math.min(mouseX, maxX)
+                            )
 
-                                if (!overlay)
-                                    return
+                            var finalY = Math.max(
+                                minY,
+                                Math.min(mouseY, maxY)
+                            )
 
-                                /*
-                                 * 鼠标位置：
-                                 *
-                                 * TextArea
-                                 *     ↓
-                                 * EditorArea
-                                 *     ↓
-                                 * Overlay
-                                 *
-                                 * 直接转换到 Overlay，
-                                 * 后面的 Menu 也使用 Overlay 坐标。
-                                 */
-                                var p =
-                                    rightClickArea.mapToItem(
-                                        overlay,
-                                        mouse.x,
-                                        mouse.y
-                                    )
+                            /*
+                             * 先关闭旧菜单，再设置最终位置，
+                             * 最后才 open()。
+                             *
+                             * 整个过程不使用 Qt.callLater，
+                             * 不进行第二次移动，因此不会闪出
+                             * 一个“初始位置”的菜单。
+                             */
+                            editorContextMenu.close()
 
-                                menuOpenX = p.x
-                                menuOpenY = p.y
+                            editorContextMenu.x =
+                                Math.round(finalX)
 
-                                /*
-                                 * 先打开。
-                                 *
-                                 * 此时 Menu 的最终 width / height
-                                 * 才能可靠获得。
-                                 */
-                                editorContextMenu.open()
+                            editorContextMenu.y =
+                                Math.round(finalY)
 
-                                /*
-                                 * 等待 Qt 完成 Popup 布局。
-                                 */
-                                Qt.callLater(function() {
-                                    if (!editorContextMenu.visible)
-                                        return
-
-                                    if (!overlay)
-                                        return
-
-                                    /*
-                                     * =================================================
-                                     * EditorArea 内容区域
-                                     * 转换成 Overlay 坐标
-                                     * =================================================
-                                     */
-                                    var areaTopLeft =
-                                        contentArea.mapToItem(
-                                            overlay,
-                                            0,
-                                            0
-                                        )
-
-                                    var areaBottomRight =
-                                        contentArea.mapToItem(
-                                            overlay,
-                                            contentArea.width,
-                                            contentArea.height
-                                        )
-
-                                    /*
-                                     * 内容区域边界。
-                                     *
-                                     * 留 6px 内边距，
-                                     * 保持原来的视觉效果。
-                                     */
-                                    var minX =
-                                        areaTopLeft.x + 6
-
-                                    var minY =
-                                        areaTopLeft.y + 6
-
-                                    var maxX =
-                                        areaBottomRight.x
-                                        - editorContextMenu.width
-                                        - 6
-
-                                    var maxY =
-                                        areaBottomRight.y
-                                        - editorContextMenu.height
-                                        - 6
-
-                                    /*
-                                     * 如果菜单比内容区域还大，
-                                     * 不允许出现反向范围。
-                                     */
-                                    if (maxX < minX)
-                                        maxX = minX
-
-                                    if (maxY < minY)
-                                        maxY = minY
-
-                                    /*
-                                     * =================================================
-                                     * 计算最终位置
-                                     * =================================================
-                                     *
-                                     * 优先使用鼠标位置。
-                                     *
-                                     * 如果右下方放不下，
-                                     * 自动向左 / 向上移动。
-                                     */
-                                    var finalX =
-                                        Math.max(
-                                            minX,
-                                            Math.min(
-                                                menuOpenX,
-                                                maxX
-                                            )
-                                        )
-
-                                    var finalY =
-                                        Math.max(
-                                            minY,
-                                            Math.min(
-                                                menuOpenY,
-                                                maxY
-                                            )
-                                        )
-
-                                    /*
-                                     * 最终直接设置 Overlay 坐标。
-                                     */
-                                    editorContextMenu.x =
-                                        finalX
-
-                                    editorContextMenu.y =
-                                        finalY
-                                })
-                            }
+                            editorContextMenu.open()
                         }
+
                     }
                 }
             }
