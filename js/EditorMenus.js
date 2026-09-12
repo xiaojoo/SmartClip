@@ -437,6 +437,42 @@ function tabMenu(view, index, ov) {
     ]
 }
 
+/*
+ * 左侧项目树标题栏的"更多"菜单（也挂在标题"项目 ∨"上，见 FolderTree.qml）。
+ *
+ * state 由 Main.qml 的 treeMenuState() 给：
+ *   { folderCount, openCount, itemCount, newestFirst, locateEnabled }
+ * 用它把"已经全展开 / 已经全折叠"的两条置灰 —— 和 PyCharm 一样，
+ * 点下去没事发生的那两条就不该是可点的样子。
+ *
+ * 动作名同样由 Main.qml 的 dispatch 解析（treeNew / treeLocate / treeExpandAll /
+ * treeCollapseAll / treeSortNewest / treeSortOldest / treeHide），
+ * 刷新复用已有的 refresh。
+ */
+function treeMenu(state, ov) {
+    var s = state || {}
+    var folders = Number(s.folderCount || 0)
+    var open = Number(s.openCount || 0)
+    var allOpen = folders > 0 && open >= folders
+    var allClosed = open <= 0
+    var newest = s.newestFirst !== false
+    return applyOverrides([
+        { label: "新建条目", act: "treeNew", icon: "plus" },
+        { label: "刷新列表", act: "refresh", shortcut: "F5", icon: "refresh" },
+        /* 当前标签不在列表里（磁盘文件 / 未命名空白文档）时没什么可定位的 */
+        { label: "定位当前文件", act: "treeLocate", icon: "locate",
+          disabled: s.locateEnabled === false },
+        { separator: true },
+        { label: "全部展开", act: "treeExpandAll", icon: "expand-all", disabled: allOpen },
+        { label: "全部折叠", act: "treeCollapseAll", icon: "collapse-all", disabled: allClosed },
+        { separator: true },
+        { label: "最新在前", act: "treeSortNewest", checked: newest },
+        { label: "最早在前", act: "treeSortOldest", checked: !newest },
+        { separator: true },
+        { label: "收起面板", act: "treeHide", icon: "minus" }
+    ], ov)
+}
+
 /* 菜单栏 tab */
 function tabLabels() {
     return ["文件", "编辑", "搜索", "视图", "语言", "编码", "换行", "设置", "帮助"]

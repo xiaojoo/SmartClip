@@ -13,6 +13,37 @@ public:
     bool open();
     bool addText(const QString &text);
     bool addImage(const QImage &image);
+
+    /*
+     * 手工新建一条文本条目（左侧树标题栏那个"+"，见 Main.qml 的 newEntry）。
+     *
+     * 和 addText() 的差别只在去重：
+     *   addText()  剪贴板采集那条路，hash 列有唯一约束（同一段文本不会存第二遍）；
+     *   createTextEntry()  用户自己新建的，故意不写 hash（留 NULL），
+     *              否则第二、第三条空白条目会被 INSERT OR IGNORE 静默丢掉。
+     * 返回新条目的 id，失败返回 -1。
+     */
+    Q_INVOKABLE qint64 createTextEntry(const QString &text);
+
+    /*
+     * 把编辑器里改过的正文写回某个文本条目。
+     *
+     * 剪贴板条目没有磁盘文件，Ctrl+S 走的就是这条（见
+     * EditorViewItem::saveCurrent 的剪贴板分支）。标题跟着正文首行走。
+     * 条目不存在 / 不是文本条目返回 false。
+     */
+    Q_INVOKABLE bool updateTextEntry(qint64 id, const QString &text);
+
+    /* 条目标题（写回之后标签上的名字要跟着变） */
+    Q_INVOKABLE QString titleOf(qint64 id) const;
+
+    /*
+     * 删掉一条条目（图片条目连文件一起删）。
+     *
+     * 界面上还没有入口：只有自检用它清掉自己造的那条测试数据 ——
+     * 自检跑在**真实的库**上，造出来的东西不能留在用户列表里。
+     */
+    Q_INVOKABLE bool removeItem(qint64 id);
     /*
      * 列表数据。
      *

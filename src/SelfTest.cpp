@@ -5,6 +5,7 @@
 
 #include <QApplication>
 #include <QColor>
+#include <QEventLoop>
 #include <QPalette>
 #include <QCoreApplication>
 #include <QDir>
@@ -12,6 +13,7 @@
 #include <QFileInfo>
 #include <QMetaObject>
 #include <QTextStream>
+#include <QThread>
 #include <QVariant>
 #include <QWidget>
 #include <cstdio>
@@ -137,6 +139,34 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store) {
     auto viewMenuActs = [qmlRoot]() {
         QVariant result;
         QMetaObject::invokeMethod(qmlRoot, "viewMenuActs", Q_RETURN_ARG(QVariant, result));
+        return result.toList();
+    };
+
+    /* 读左侧项目树的状态（见 Main.qml 的 treeState） */
+    auto treeState = [qmlRoot]() {
+        QVariant result;
+        QMetaObject::invokeMethod(qmlRoot, "treeState", Q_RETURN_ARG(QVariant, result));
+        return result.toMap();
+    };
+
+    /*
+     * 等布局算完。
+     *
+     * 布局是**下一帧**才做的：dispatch 改完标志位立刻读 folderTree.width，
+     * 拿到的还是上一帧那个槽位宽度（实测"收起面板"后读出 300）。
+     * 所以量几何之前先把事件跑一轮 —— 只给标志位做断言是量不出这种毛病的。
+     */
+    auto settle = []() {
+        for (int i = 0; i < 5; ++i) {
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+            QThread::msleep(10);
+        }
+    };
+
+    /* 读左树"更多"菜单的条目清单（见 Main.qml 的 treeMenuActs，和弹出的是同一份构造） */
+    auto treeMenuActs = [qmlRoot]() {
+        QVariant result;
+        QMetaObject::invokeMethod(qmlRoot, "treeMenuActs", Q_RETURN_ARG(QVariant, result));
         return result.toList();
     };
 
@@ -1674,6 +1704,200 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store) {
         check(qAbs(contentH - 92.0) < 0.5,
               QStringLiteral("菜单里就是 tab 那三条（3×28 + 8 内边距）"),
               QStringLiteral("内容高 %1").arg(contentH));
+    }
+
+    /*
+     * ================= 左侧项目树标题栏那排按钮 =================
+     *
+     * 标题栏现在是 PyCharm 项目面板那六件事：新建条目 / 刷新 / 全部折叠 /
+     * 全部展开 / 更多 / 收起面板。这里钉三件事：
+     *
+     *  1) 六个按钮真的摆在标题栏里（个数是从标题栏那排 RowLayout 里数出来的，
+     *     不是写死的常量，见 FolderTree.toolbarButtonCount）；
+     *  2) 全部折叠 / 全部展开真的把四个日期分组收拢 / 铺开（量的是 treeRows
+     *     的行数，不是只看那个布尔量）；
+     *  3) 收起面板把**布局槽位**收成 0，再点一次原样回来 ——
+     *     只改标志位、宽度没跟着走，从界面上是一眼能看出来的。
+     *
+     * 菜单那几条走 treeMenuActs()（和"更多"弹出的是同一份构造）。
+     */
+    {
+        QString acts;
+        for (const QVariant &a : treeMenuActs())
+            acts += (acts.isEmpty() ? QString() : QStringLiteral(" | ")) + a.toString();
+        check(acts == QStringLiteral("treeNew | refresh | treeLocate | treeExpandAll"
+                                     " | treeCollapseAll | treeSortNewest | treeSortOldest"
+                                     " | treeHide"),
+              QStringLiteral("左树\"更多\"菜单 = 新建 / 刷新 / 定位 / 全展开 / 全折叠 / 排序 / 收起面板"),
+              acts);
+
+        const QVariantMap ui = uiState();
+        check(ui.value(QStringLiteral("treeToolbarButtons")).toInt() == 7,
+              QStringLiteral("标题栏摆着七个工具按钮（新建 / 刷新 / 定位 / 全折 / 全展 / 更多 / 收起）"),
+              QStringLiteral("实际 %1 个")
+                  .arg(ui.value(QStringLiteral("treeToolbarButtons")).toInt()));
+
+        const QVariantMap before = treeState();
+        const int folders = before.value(QStringLiteral("folderCount")).toInt();
+        check(folders == 4, QStringLiteral("左树是四个日期分组"),
+              QStringLiteral("实际 %1 个").arg(folders));
+
+        dispatch(QStringLiteral("treeCollapseAll"));
+        {
+            const QVariantMap s = treeState();
+            check(s.value(QStringLiteral("openFolders")).toInt() == 0,
+                  QStringLiteral("全部折叠：四个分组都收起来了"));
+            check(s.value(QStringLiteral("rows")).toInt() == folders,
+                  QStringLiteral("折叠后树里只剩分组那几行"),
+                  QStringLiteral("实际 %1 行").arg(s.value(QStringLiteral("rows")).toInt()));
+        }
+
+        dispatch(QStringLiteral("treeExpandAll"));
+        {
+            const QVariantMap s = treeState();
+            check(s.value(QStringLiteral("openFolders")).toInt() == folders,
+                  QStringLiteral("全部展开：四个分组都开了"));
+            check(s.value(QStringLiteral("rows")).toInt() >= folders,
+                  QStringLiteral("展开后行数不少于分组数"),
+                  QStringLiteral("实际 %1 行").arg(s.value(QStringLiteral("rows")).toInt()));
+        }
+
+        dispatch(QStringLiteral("treeHide"));
+        settle();
+        {
+            const QVariantMap s = treeState();
+            check(s.value(QStringLiteral("hidden")).toBool(),
+                  QStringLiteral("收起面板：标志位置上了"));
+            check(s.value(QStringLiteral("panelWidth")).toDouble() < 0.5,
+                  QStringLiteral("收起面板：布局里的槽位宽度归 0"),
+                  QStringLiteral("实际 %1").arg(s.value(QStringLiteral("panelWidth")).toDouble()));
+        }
+
+        dispatch(QStringLiteral("treeHide"));
+        settle();
+        {
+            const QVariantMap s = treeState();
+            check(!s.value(QStringLiteral("hidden")).toBool()
+                  && s.value(QStringLiteral("panelWidth")).toDouble() > 100.0,
+                  QStringLiteral("再点一次面板回来（宽度还是收起前那个）"),
+                  QStringLiteral("实际 %1").arg(s.value(QStringLiteral("panelWidth")).toDouble()));
+        }
+    }
+
+    /*
+     * ================= 新建条目 / Ctrl+S 写回库 =================
+     *
+     * 走路：ClipboardStore::createTextEntry（左侧树 "+" 那条路）
+     *       -> 编辑器标签 -> 改一笔 -> saveCurrent()
+     *       -> 库里的正文和标题都跟着变。
+     *
+     * 跑在**真实的库**上，所以收尾必须把它造的那条删掉
+     * （ClipboardStore::removeItem 就是为这个留的），
+     * 否则自检跑一次用户列表里就多一条"自检新建的条目"。
+     */
+    if (store) {
+        const qint64 id = store->createTextEntry(QStringLiteral("自检新建的条目"));
+        check(id > 0, QStringLiteral("新建条目写进库里（左侧树 \"+\" 那条路）"));
+        check(store->titleOf(id) == QStringLiteral("自检新建的条目"),
+              QStringLiteral("标题按正文首行起"), store->titleOf(id));
+
+        if (id > 0) {
+            view->openClipboardItem(id, store->titleOf(id));
+            check(view->hasDocument(), QStringLiteral("新建的条目能打开成标签"));
+
+            /* 改一笔：复制一行，正文变成两行 */
+            view->duplicateLine();
+            check(view->modified(), QStringLiteral("改一笔 -> 已修改状态"));
+
+            check(view->saveCurrent(), QStringLiteral("剪贴板条目 Ctrl+S 写回库里"),
+                  view->lastError());
+            check(!view->modified(), QStringLiteral("写回之后修改标记清掉"));
+            check(store->contentOf(id) == view->currentText(),
+                  QStringLiteral("库里那一条的正文 = 编辑器里的正文"),
+                  QStringLiteral("库里 %1 字符 / 编辑器 %2 字符")
+                      .arg(store->contentOf(id).size()).arg(view->currentText().size()));
+            check(view->displayName() == store->titleOf(id),
+                  QStringLiteral("标签标题跟着库里的新标题变"),
+                  QStringLiteral("标签 %1 / 库里 %2")
+                      .arg(view->displayName(), store->titleOf(id)));
+            check(!store->updateTextEntry(id + 1000000, QStringLiteral("x")),
+                  QStringLiteral("写回不存在的条目会失败（不会悄悄新建一条）"));
+
+            /*
+             * 准星按钮（定位当前文件）：当前标签是列表里的条目，
+             * 按一下要"展开它所在的那一组 + 选中这一条"。
+             *
+             * 先全部折叠：不然它所在的那组本来开着，展不展开根本看不出来。
+             */
+            dispatch(QStringLiteral("treeCollapseAll"));
+            check(treeState().value(QStringLiteral("openFolders")).toInt() == 0,
+                  QStringLiteral("定位用例：先全部折叠，看它会不会自己展开"));
+
+            dispatch(QStringLiteral("treeLocate"));
+            {
+                const QVariantMap s = treeState();
+                check(s.value(QStringLiteral("currentClipId")).toLongLong() == id,
+                      QStringLiteral("定位用例：当前标签认得出是哪一条（按 id，不按标题）"),
+                      QStringLiteral("认出来的 id %1（应为 %2）")
+                          .arg(s.value(QStringLiteral("currentClipId")).toLongLong()).arg(id));
+                check(s.value(QStringLiteral("selectedId")).toLongLong() == id,
+                      QStringLiteral("定位用例：列表里选中的就是当前标签那一条"),
+                      QStringLiteral("选中的 id %1").arg(s.value(QStringLiteral("selectedId")).toLongLong()));
+                check(s.value(QStringLiteral("openFolders")).toInt() >= 1,
+                      QStringLiteral("定位用例：它所在的那一组被展开了"));
+            }
+
+            /*
+             * 滚动的意义在于"目标在屏幕外"。
+             *
+             * 上面那条是**最新**的一条，本来就在列表顶上；这里换一条最老的
+             * （列表最下面，列表有两百来条），定位之后它必须出现在可视区里 ——
+             * 只展开、只高亮而不滚动，用户还是看不见它在哪。
+             */
+            const QVariantList history = store->items(QString());
+            if (!history.isEmpty()) {
+                const QVariantMap oldest = history.last().toMap();
+                if (oldest.value(QStringLiteral("type")).toString() == QLatin1String("text")) {
+                    view->openClipboardItem(oldest.value(QStringLiteral("id")).toLongLong(),
+                                            oldest.value(QStringLiteral("title")).toString());
+                    dispatch(QStringLiteral("treeLocate"));
+                    settle();
+                    {
+                        const QVariantMap s = treeState();
+                        check(s.value(QStringLiteral("selectedId")).toLongLong()
+                              == oldest.value(QStringLiteral("id")).toLongLong(),
+                              QStringLiteral("定位用例：列表里最老的那条也能定位上"));
+                        check(s.value(QStringLiteral("locatedVisible")).toBool(),
+                              QStringLiteral("定位用例：在屏幕外的目标被滚进了可视区"),
+                              QStringLiteral("选中 id %1 / 当前标签 id %2")
+                                  .arg(s.value(QStringLiteral("selectedId")).toLongLong())
+                                  .arg(s.value(QStringLiteral("currentClipId")).toLongLong()));
+                    }
+                    view->closeDocument(view->currentIndex());
+                } else {
+                    out() << "  --    最老的一条不是文本条目，跳过\"滚进可视区\"检查" << Qt::endl;
+                }
+            }
+
+            /* 收尾：关掉标签，再把造出来的那条删干净 */
+            view->closeDocument(view->currentIndex());
+            check(store->removeItem(id), QStringLiteral("清掉自检造的那条（不留在用户库里）"));
+            check(store->contentOf(id).isEmpty(),
+                  QStringLiteral("删掉的条目确实读不回来了"));
+        }
+
+        /*
+         * 不在列表里的标签（未命名空白文档）没什么可定位的：
+         * 准星按钮该是灰的，按下去也不能把列表里的选中项改掉。
+         */
+        dispatch(QStringLiteral("new"));
+        {
+            const QVariantMap s = treeState();
+            check(!s.value(QStringLiteral("locateEnabled")).toBool()
+                  && s.value(QStringLiteral("currentClipId")).toLongLong() < 0,
+                  QStringLiteral("定位按钮：未命名空白标签时置灰（没有可定位的条目）"));
+        }
+        dispatch(QStringLiteral("closeTab"));
     }
 
     /*

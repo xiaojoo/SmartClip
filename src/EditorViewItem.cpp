@@ -2324,6 +2324,13 @@ QVariantList EditorViewItem::documents() const {
         m.insert(QStringLiteral("modified"), d.modified);
         m.insert(QStringLiteral("active"), i == m_current);
         m.insert(QStringLiteral("clipboard"), d.clipboard);
+        /*
+         * 来源条目的 id（不是剪贴板条目时是 -1）。
+         *
+         * 给"在左侧列表里定位当前标签"用（见 Main.qml 的 locateCurrentItem）：
+         * 认条目要按 id 认，标题是会跟着正文变的，认标题迟早对不上。
+         */
+        m.insert(QStringLiteral("clipId"), d.clipId);
         m.insert(QStringLiteral("language"), d.language);
         out.append(m);
     }
@@ -2664,9 +2671,62 @@ void EditorViewItem::setContentCurrent(const QString &text) {
 bool EditorViewItem::saveCurrent() {
     if (!hasDocument())
         return false;
-    if (m_docs.at(m_current).filePath.isEmpty())
+
+    /*
+     * 剪贴板条目（左侧列表点开的、或标题栏 "+" 新建的）在库里，没有磁盘文件：
+     * Ctrl+S 是**写回库里那一条**。
+     *
+     * 原来这里对空 filePath 一律 return false，于是 Main.qml 的 saveFile()
+     * 看到 filePath 为空就转去"另存为"——新建的条目一按 Ctrl+S 就弹文件
+     * 对话框，正文永远回不到左边那条上。现在这一类走 saveClipboardEntry()，
+     * 真正的未命名空白文档仍然由 QML 那边问路径。
+     */
+    const Doc &d = m_docs.at(m_current);
+    if (d.filePath.isEmpty()) {
+        if (d.clipboard && d.clipId >= 0 && m_store)
+            return saveClipboardEntry(m_current);
         return false;
-    return saveDocument(m_current, m_docs.at(m_current).filePath);
+    }
+    return saveDocument(m_current, d.filePath);
+}
+
+bool EditorViewItem::saveClipboardEntry(int index) {
+    if (index < 0 || index >= m_docs.size() || !m_sci || !m_store)
+        return false;
+
+    if (index != m_current) {
+        activateDocument(index);
+        if (m_current != index)
+            return false;
+    }
+
+    const qint64 id = m_docs.at(index).clipId;
+    if (!m_store->updateTextEntry(id, m_sci->text())) {
+        m_lastError = QStringLiteral("无法写回剪贴板条目：%1").arg(id);
+        emit errorOccurred(m_lastError);
+        return false;
+    }
+
+    /*
+     * 标题跟着正文首行走（Store 那边改的），标签上的名字要一起变 ——
+     * 否则列表里已经是新标题，标签还挂着"新建条目"。
+     */
+    m_docs[index].clipTitle = m_store->titleOf(id);
+
+    m_bulkLoading = true;
+    m_sci->SendScintilla(QsciScintillaBase::SCI_SETSAVEPOINT);
+    m_bulkLoading = false;
+    m_docs[index].modified = false;
+
+    /*
+     * saved() 照发，但路径给空串：这一条**没有**落进任何文件，
+     * 发这个信号只是让"保存过了"这件事和别的标签一样有回声。
+     */
+    emit saved(QString());
+    emit modifiedChanged();
+    emit documentsChanged();
+    emit currentChanged();
+    return true;
 }
 
 bool EditorViewItem::saveCurrentAs(const QString &path) {

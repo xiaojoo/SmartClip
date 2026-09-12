@@ -12,6 +12,19 @@ QtObject {
         function f(d) { return '<path d="' + d + '" fill="' + c + '"/>' }
         function ci(x, y, r) { return '<circle cx="' + x + '" cy="' + y + '" r="' + r + '" fill="' + c + '"/>' }
         function co(x, y, r) { return '<circle cx="' + x + '" cy="' + y + '" r="' + r + '" fill="none" stroke="' + c + '" stroke-width="1.7"/>' }
+        /*
+         * "全部折叠 / 全部展开"共用的四个角（一对向内收的括号）。
+         *
+         * 形状和 browser-bridge 网页左栏那两个按钮是同一套，
+         * 只是把 24 的 viewBox 按 2/3 缩到这里的 16：
+         * 四个角 + 中间那条横线（折叠）/ 加号（展开）。
+         */
+        function treeCorners() {
+            return p('M6 2 H3.33 A1.33 1.33 0 0 0 2 3.33 V6')
+                 + p('M10 2 H12.67 A1.33 1.33 0 0 1 14 3.33 V6')
+                 + p('M6 14 H3.33 A1.33 1.33 0 0 1 2 12.67 V10')
+                 + p('M10 14 H12.67 A1.33 1.33 0 0 0 14 12.67 V10')
+        }
         var s = ""
         if (kind === "chevron-down")   s = p('M4.4 6.4 L8 10 L11.6 6.4')
         else if (kind === "chevron-right") s = p('M6.4 4.4 L10 8 L6.4 11.6')
@@ -28,6 +41,19 @@ QtObject {
         else if (kind === "search")        s = co(6.2, 6.2, 4.1) + p('M9.4 9.4 L13.8 13.8')
         else if (kind === "gear")          s = p('M8 4.9 A3.1 3.1 0 1 0 8 11.1 A3.1 3.1 0 1 0 8 4.9') + (function(){ var t = ""; for (var a = 0; a < 360; a += 45) t += '<line x1="13.2" y1="8" x2="15.4" y2="8" stroke="' + c + '" stroke-width="1.6" stroke-linecap="round" transform="rotate(' + a + ' 8 8)"/>'; return t })()
         else if (kind === "more")          s = ci(8, 3.2, 1.5) + ci(8, 8, 1.5) + ci(8, 12.8, 1.5)
+        /*
+         * 左侧项目树标题栏那排按钮（和 PyCharm 项目面板同款）：
+         *   全部折叠 = 四个角的括号 + 中间一条横线
+         *   全部展开 = 同一对括号 + 中间一个加号
+         *   定位     = 准星（Select Opened File）
+         *   minus    = 收起面板那条横线（window 的 win-min 是同一个形状，
+         *              这里单独给一个名字，免得看着像窗口按钮）
+         */
+        else if (kind === "collapse-all")  s = treeCorners() + p('M2.67 8 H13.33')
+        else if (kind === "expand-all")    s = treeCorners() + p('M8 5.33 V10.67 M5.33 8 H10.67')
+        else if (kind === "minus")         s = p('M3.6 8 L12.4 8')
+        /* 定位当前标签：准星（圆圈 + 四条短线），和 PyCharm 的 Select Opened File 一个意思 */
+        else if (kind === "locate")        s = co(8, 8, 4.5) + p('M8 1.6 V3.6 M8 12.4 V14.4 M1.6 8 H3.6 M12.4 8 H14.4') + ci(8, 8, 1.2)
         else if (kind === "grid")          s = p('M3 3 H7 V7 H3 Z M9 3 H13 V7 H9 Z M3 9 H7 V13 H3 Z M9 9 H13 V13 H9 Z')
         else if (kind === "branch")        s = ci(5.2, 4.8, 1.7) + ci(5.2, 11.2, 1.7) + ci(11.6, 8, 1.7) + p('M5.2 6.5 L5.2 9.5') + p('M5.2 9.5 C5.2 12 11.6 10.4 11.6 8.4')
         else if (kind === "folder")        s = f('M2.4 4.4 A1.6 1.6 0 0 1 4 2.8 H6.2 L7.6 4.6 H11.8 A1.6 1.6 0 0 1 13.4 6.2 V11 A1.6 1.6 0 0 1 11.8 12.6 H4 A1.6 1.6 0 0 1 2.4 11 Z')

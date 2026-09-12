@@ -3,6 +3,7 @@
 #include <QClipboard>
 #include <QDateTime>
 #include <QDir>
+#include <QFile>
 #include <QGuiApplication>
 #include <QImage>
 #include <QPainter>
@@ -57,6 +58,75 @@ bool ClipboardStore::addImage(const QImage &image) {
     query.addBindValue(path);
     query.addBindValue(QDateTime::currentDateTime().toString(Qt::ISODate));
     if (!query.exec()) return false;
+    emit changed();
+    return true;
+}
+
+/*
+ * 手工新建一条文本条目（左侧树标题栏那个"+"）。
+ *
+ * hash 留 NULL：那一列有唯一约束，是给剪贴板采集去重用的
+ * （见 addText）。用户自己建的第二条空白条目要能存下来，
+ * 所以这里不写 hash —— SQLite 的唯一约束不管 NULL，
+ * 多少条 NULL 都不冲突。
+ */
+qint64 ClipboardStore::createTextEntry(const QString &text) {
+    const QString clean = text.trimmed();
+    QSqlQuery query;
+    query.prepare("INSERT INTO clipboard_items(type, title, content, created_at, hash) "
+                  "VALUES ('text', ?, ?, ?, NULL)");
+    query.addBindValue(clean.isEmpty() ? tr("新建条目") : titleFor(clean));
+    query.addBindValue(text);
+    query.addBindValue(QDateTime::currentDateTime().toString(Qt::ISODate));
+    if (!query.exec())
+        return -1;
+    const qint64 id = query.lastInsertId().toLongLong();
+    emit changed();
+    return id;
+}
+
+bool ClipboardStore::updateTextEntry(qint64 id, const QString &text) {
+    const QString clean = text.trimmed();
+    QSqlQuery query;
+    query.prepare("UPDATE clipboard_items SET title = ?, content = ? "
+                  "WHERE id = ? AND type = 'text'");
+    query.addBindValue(clean.isEmpty() ? tr("新建条目") : titleFor(clean));
+    query.addBindValue(text);
+    query.addBindValue(id);
+    if (!query.exec() || query.numRowsAffected() == 0)
+        return false;
+    emit changed();
+    return true;
+}
+
+QString ClipboardStore::titleOf(qint64 id) const {
+    QSqlQuery query;
+    query.prepare("SELECT title FROM clipboard_items WHERE id = ?");
+    query.addBindValue(id);
+    if (!query.exec() || !query.next())
+        return QString();
+    return query.value(0).toString();
+}
+
+bool ClipboardStore::removeItem(qint64 id) {
+    QSqlQuery query;
+    query.prepare("SELECT type, content FROM clipboard_items WHERE id = ?");
+    query.addBindValue(id);
+    if (!query.exec() || !query.next())
+        return false;
+    const QString type = query.value(0).toString();
+    const QString content = query.value(1).toString();
+
+    QSqlQuery remove;
+    remove.prepare("DELETE FROM clipboard_items WHERE id = ?");
+    remove.addBindValue(id);
+    if (!remove.exec() || remove.numRowsAffected() == 0)
+        return false;
+
+    /* 图片条目的正文就是文件路径，条目没了那份图也别留着 */
+    if (type == QStringLiteral("image") && !content.isEmpty())
+        QFile::remove(content);
+
     emit changed();
     return true;
 }

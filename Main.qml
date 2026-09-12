@@ -80,8 +80,29 @@ Rectangle {
 
     // ---- 左侧列表宽度（可由中间间隙拖动调整） ----
     property real folderTreeWidth: 300
-    readonly property real folderTreeMinWidth: 180
+    /*
+     * 左树面板是不是被"收起面板"（标题栏那条 −）收起来了。
+     *
+     * 收起来时布局里的槽位宽度给 0（见下面 FolderTree 的 Layout.preferredWidth），
+     * 宽度值本身留着，所以再展开还是原样。注意面板一收，它自己那排按钮
+     * 也跟着没了 —— 真正能把它叫回来的入口是左边图标条上的文件夹格子
+     * （见 midRow 里那个 navCell / window.toggleFolderTree）。
+     */
+    property bool folderTreeHidden: false
+
+    /*
+     * 左树最窄 240：标题栏现在摆着"新建 / 刷新 / 定位 / 全部折叠 / 全部展开 /
+     * 更多 / 收起"七个 22px 的按钮（见 FolderTree.qml），再窄标题就要被压掉了。
+     */
+    readonly property real folderTreeMinWidth: 240
     readonly property real folderTreeMaxWidth: 600
+
+    /*
+     * 树里条目的排序：true = 最新在前（默认，和库里 ORDER BY id DESC 一致），
+     * false = 最早在前（在 QML 这侧把列表翻过来，见 orderedEntries()）。
+     * 由"更多"菜单里的那两条切换。
+     */
+    property bool newestFirst: true
 
     /*
      * 全局强调色（#4c96d8）。
@@ -119,8 +140,25 @@ Rectangle {
 
     ClipboardModel { id: cbm; onChanged: window.rebuild() }
 
-    function rebuild() { treeRows = Folders.buildTree(cbm.entries, folders, expanded, Time.periodFor) }
+    function rebuild() { treeRows = Folders.buildTree(orderedEntries(), folders, expanded, Time.periodFor) }
     function refresh() { cbm.reload(searchText) }
+
+    /*
+     * 树里条目按什么顺序排。
+     *
+     * 库里给的就是"最新在前"（items() 里 ORDER BY id DESC），所以默认直接用它；
+     * "最早在前"只需要把同一份列表倒过来 —— 数据源那边不用再查一次。
+     */
+    function orderedEntries() {
+        var list = cbm.entries
+        if (newestFirst)
+            return list
+        var out = []
+        for (var i = list.length - 1; i >= 0; --i)
+            out.push(list[i])
+        return out
+    }
+
     function toggleFolder(key) {
         var e = ({})
         for (var k in expanded) e[k] = expanded[k]
@@ -136,6 +174,150 @@ Rectangle {
         rebuild()
     }
 
+    /* 全部展开 / 全部折叠（左树标题栏那两个按钮，也是"更多"菜单里的两条） */
+    function setAllFolders(open) {
+        var e = ({})
+        for (var i = 0; i < folders.length; ++i)
+            e[folders[i].key] = open
+        expanded = e
+        rebuild()
+    }
+
+    /*
+     * 收起 / 展开左树面板。
+     *
+     * 只是把槽位宽度收成 0（宽度值留着），恢复入口在左边图标条上 ——
+     * 面板收起来之后它自己那排按钮也跟着消失了。
+     */
+    function toggleFolderTree() {
+        folderTreeHidden = !folderTreeHidden
+        Cmd.remember("treeHidden", folderTreeHidden ? "1" : "0")
+    }
+
+    /* 拖动分隔线之后把宽度记下来（拖动过程中不写，见 splitterMouse.onReleased） */
+    function rememberTreeWidth() {
+        Cmd.remember("treeWidth", String(Math.round(folderTreeWidth)))
+    }
+
+    function setNewestFirst(on) {
+        if (newestFirst === on)
+            return
+        newestFirst = on
+        Cmd.remember("treeNewestFirst", on ? "1" : "0")
+        rebuild()
+    }
+
+    /*
+     * 左树标题栏的 "+"：手工新建一条文本条目。
+     *
+     * 和剪贴板采集（ClipboardManager -> ClipboardStore::addText）不是一条路：
+     * 那条按内容去重，这里故意不去重（见 ClipboardStore::createTextEntry），
+     * 否则"再建一条空的"会被 INSERT OR IGNORE 静默丢掉。
+     *
+     * 建完立刻：清掉搜索框里的过滤（不然新条目可能根本不显示）-> 展开它所在的
+     * 日期分组 -> 选中 -> 在编辑器里打开。注意**不**写系统剪贴板
+     * （selectItem 的第二个参数）：刚建出来是空的，往剪贴板里塞个空串没意义。
+     * 编辑完按 Ctrl+S 就写回库里那一条（见 EditorViewItem::saveCurrent）。
+     */
+    function newEntry() {
+        if (searchText !== "") {
+            searchText = ""
+            topBar.clearSearch()
+        }
+
+        var id = Store.createTextEntry("")
+        if (id <= 0) {
+            Cmd.alert("新建失败", "无法写入剪贴板库")
+            return
+        }
+
+        refresh()
+
+        var item = null
+        for (var i = 0; i < cbm.entries.length; ++i) {
+            if (cbm.entries[i].id === id) {
+                item = cbm.entries[i]
+                break
+            }
+        }
+        if (!item) {
+            Cmd.alert("新建失败", "新条目没能读回来，请刷新列表")
+            return
+        }
+
+        activateFolder(Time.periodFor(item.createdAt))
+        selectItem(item, false)
+    }
+
+    /*
+     * 当前标签对应的条目 id；当前标签不是列表里的条目（磁盘文件 / 未命名
+     * 空白文档）时返回 -1。
+     *
+     * 按 id 认，不按标题认：标题是跟着正文变的（见 ClipboardStore::updateTextEntry），
+     * 认标题迟早对不上。
+     */
+    function currentClipId() {
+        var docs = view.documents
+        var i = view.currentIndex
+        if (i < 0 || i >= docs.length || !docs[i].clipboard)
+            return -1
+        var id = docs[i].clipId
+        return (id === undefined || id === null) ? -1 : id
+    }
+
+    /* 准星按钮能不能点（转给 FolderTree，见那边 locateEnabled） */
+    function canLocateCurrent() { return currentClipId() >= 0 }
+
+    /*
+     * 在左树里定位当前标签（标题栏那个准星按钮 / "更多"菜单里的"定位当前文件"）。
+     *
+     * 只做三件事：展开它所在的那一组 -> 把它选上（蓝条）-> 滚到它。
+     * **不**动编辑器里的正文，也**不**写系统剪贴板 —— 点列表里的条目会顺手
+     * 复制到剪贴板（那是"点条目"的语义），这里只是"告诉我它在哪儿"。
+     *
+     * 搜索框里有过滤的话先清掉：定位是明确的"带我去看"动作，被过滤掉就白点了
+     * （和 newEntry 清过滤是同一个理由）。
+     * 返回有没有真的定位到（没定位到通常是当前标签根本不在列表里）。
+     */
+    function locateCurrentItem() {
+        var id = currentClipId()
+        if (id < 0)
+            return false
+
+        if (searchText !== "") {
+            searchText = ""
+            topBar.clearSearch()
+            refresh()
+        }
+
+        var item = null
+        for (var i = 0; i < cbm.entries.length; ++i) {
+            if (cbm.entries[i].id === id) {
+                item = cbm.entries[i]
+                break
+            }
+        }
+        if (!item)
+            return false
+
+        var key = Time.periodFor(item.createdAt)
+        if (!expanded[key]) {
+            var e = ({})
+            for (var k in expanded) e[k] = expanded[k]
+            e[key] = true
+            expanded = e
+            rebuild()
+        }
+
+        selectedItem = item
+        /*
+         * 滚动要等这一帧的列表更新完再做（树刚重建过，行下标这会儿还在算）——
+         * Qt.callLater 就是"这一轮事件处理完再调"。
+         */
+        Qt.callLater(function () { folderTree.scrollToItem(id) })
+        return true
+    }
+
     /*
      * 点左侧条目。
      *
@@ -144,8 +326,10 @@ Rectangle {
      *           全程不经过 QML 属性，见 src/EditorViewItem.h）。
      *
      * 两种都继续回填系统剪贴板 —— 这是这个应用本来的用途。
+     * 只有"新建条目"那条路会传 copy = false：那时候条目还是空的，
+     * 塞进剪贴板没有意义（见 newEntry）。
      */
-    function selectItem(item) {
+    function selectItem(item, copy) {
         selectedItem = item
 
         if (!item) {
@@ -161,7 +345,15 @@ Rectangle {
             view.requestEditorFocus()
         }
 
-        Store.copyItem(item.id)
+        if (copy !== false)
+            Store.copyItem(item.id)
+    }
+
+    /* 当前标签是不是"来自剪贴板库"的那一类（在库里、没有磁盘文件） */
+    function isClipboardDocument() {
+        var docs = view.documents
+        var i = view.currentIndex
+        return i >= 0 && i < docs.length && docs[i].clipboard === true
     }
 
     /* ------------------------------------------------------------------
@@ -210,7 +402,12 @@ Rectangle {
     function saveFile() {
         if (!view.hasDocument)
             return false
-        if (view.filePath === "")
+        /*
+         * 剪贴板条目在库里、没有磁盘文件：Ctrl+S 走的是"写回库里那一条"
+         * （见 EditorViewItem::saveCurrent 的剪贴板分支），不该弹"另存为"。
+         * 只有真正的未命名空白文档才需要问路径。
+         */
+        if (view.filePath === "" && !isClipboardDocument())
             return saveFileAs()
         if (!view.saveCurrent()) {
             Cmd.alert("保存失败", view.lastError)
@@ -369,6 +566,63 @@ Rectangle {
         return out
     }
 
+    /*
+     * 左树"更多"菜单要用到的当前状态（见 js/EditorMenus.js 的 treeMenu）。
+     *
+     * 给的是"已经全展开 / 已经全折叠"这类判断要用的量：菜单据此把点下去
+     * 没事发生的那两条置灰。
+     */
+    function treeMenuState() {
+        var open = 0
+        for (var k in expanded)
+            if (expanded[k]) ++open
+        return { folderCount: folders.length,
+                 openCount: open,
+                 itemCount: cbm.entries.length,
+                 newestFirst: newestFirst,
+                 locateEnabled: canLocateCurrent() }
+    }
+
+    /*
+     * 左树"更多"菜单里各条的动作名（自检核对用，见 src/SelfTest.cpp）。
+     * 和弹出的那份同一个构造。
+     */
+    function treeMenuActs() {
+        var items = Menus.treeMenu(treeMenuState(), shortcutOverrides())
+        var out = []
+        for (var i = 0; i < items.length; ++i) {
+            if (items[i] && items[i].act !== undefined)
+                out.push(String(items[i].act))
+        }
+        return out
+    }
+
+    /*
+     * 左树当前状态（自检量"全部折叠 / 全部展开 / 收起面板"用，见 uiState）。
+     *
+     * panelWidth 是布局算出来的真实槽位宽度：面板收起来时它必须是 0，
+     * 只把 folderTreeHidden 置上而宽度没跟着走，从界面上是能一眼看出来的。
+     */
+    function treeState() {
+        var open = 0
+        for (var k in expanded)
+            if (expanded[k]) ++open
+        return { folderCount: folders.length,
+                 openFolders: open,
+                 rows: treeRows.length,
+                 items: cbm.entries.length,
+                 hidden: folderTreeHidden,
+                 width: folderTreeWidth,
+                 panelWidth: folderTree.width,
+                 newestFirst: newestFirst,
+                 /* 定位用：当前标签对应的条目 id / 按钮是不是可点 / 选中的是哪条 */
+                 currentClipId: currentClipId(),
+                 locateEnabled: canLocateCurrent(),
+                 selectedId: selectedItem ? selectedItem.id : -1,
+                 /* 定位的最后一步（滚进可视区）有没有真的生效 */
+                 locatedVisible: folderTree.rowVisible(selectedItem ? selectedItem.id : -1) }
+    }
+
     function showFind(replace) {
         if (!view.hasDocument)
             return
@@ -452,6 +706,15 @@ Rectangle {
         if (act.indexOf("eol:") === 0) { view.eolMode = act.substring(4); return }
         if (act.indexOf("menu:") === 0) { topBar.openGroup(act.substring(5)); return }
         if (act.indexOf("folder:") === 0) { activateFolder(act.substring(7)); return }
+        /* ---- 左侧项目树（标题栏那排按钮 / 标题上的"更多"菜单） ---- */
+        if (act === "treeNew") { newEntry(); return }
+        if (act === "treeLocate") { locateCurrentItem(); return }
+        if (act === "treeExpandAll") { setAllFolders(true); return }
+        if (act === "treeCollapseAll") { setAllFolders(false); return }
+        if (act === "treeHide") { toggleFolderTree(); return }
+        if (act === "treeSortNewest") { setNewestFirst(true); return }
+        if (act === "treeSortOldest") { setNewestFirst(false); return }
+
         /*
          * 带下标的标签动作（tab 右键菜单用，见 openTabMenu）。
          * 作用在"被右键的那一个"标签上，而不是当前标签。
@@ -661,7 +924,17 @@ Rectangle {
             topBarHeight: topBar.height,
             statusBarHeight: statusBar.height,
             windowWidth: window.width,
-            windowHeight: window.height
+            windowHeight: window.height,
+
+            /*
+             * 左树标题栏那排工具按钮 / 面板的折叠状态（自检用）。
+             *
+             * toolbarButtons 是标题栏里**实际摆出来的**按钮个数 ——
+             * 不是写死的常量，少摆一个自检就会报出来（见 SelfTest.cpp
+             * 的"标题栏那排按钮"那一节）。
+             */
+            treeToolbarButtons: folderTree.toolbarButtonCount,
+            tree: window.treeState()
         }
     }
 
@@ -685,6 +958,19 @@ Rectangle {
          * 窗口已经由 C++ 侧交给 WindowHelper（main.cpp 里 attachWidget），
          * 这里只需要把数据刷出来，并把上次的编辑器视图设置恢复回来。
          */
+
+        /*
+         * 左树：宽度 / 是不是收起来 / 条目排序都按上次的样子回来。
+         * 必须在 refresh() 之前 —— 列表就是按 newestFirst 排的。
+         * 宽度照夹一遍：设置文件被手改成 3 这种值，面板会窄到连按钮都放不下。
+         */
+        var treeW = parseFloat(Cmd.recall("treeWidth", "300"))
+        if (!isNaN(treeW))
+            folderTreeWidth = Math.max(folderTreeMinWidth,
+                                       Math.min(folderTreeMaxWidth, treeW))
+        folderTreeHidden = Cmd.recall("treeHidden", "0") === "1"
+        newestFirst = Cmd.recall("treeNewestFirst", "1") === "1"
+
         refresh()
 
         /*
@@ -929,6 +1215,19 @@ Rectangle {
                             width: 26; height: 26; x: 4; radius: 5
 
                             /*
+                             * 这一格算不算"当前打开的工具窗口"。
+                             *
+                             * 文件夹那格不再看 modelData.active：它现在是项目树
+                             * 的开关，面板收起来时这一格就该是未选中的样子
+                             * （和 PyCharm 左边那排工具窗口按钮一个道理）——
+                             * 面板收起来之后，标题栏那排按钮跟着没了，
+                             * 这里就是唯一能把树叫回来的地方。
+                             */
+                            readonly property bool selected: modelData.k === "folder"
+                                                             ? !window.folderTreeHidden
+                                                             : modelData.active
+
+                            /*
                              * 悬停态：整格填强调蓝 + 图标转白。
                              *
                              * 选中那一格原本是 #3a4a5a 的浅蓝底，
@@ -940,13 +1239,32 @@ Rectangle {
                              */
                             readonly property bool hot: navHit.containsMouse
                             color: hot ? window.accentColor
-                                       : (modelData.active ? "#3a4a5a" : "transparent")
+                                       : (selected ? "#3a4a5a" : "transparent")
 
                             AppIcon { anchors.centerIn: parent; provider: stripIcons; kind: modelData.k
                                       tint: navCell.hot ? "#ffffff"
-                                                        : (modelData.active ? window.accentColor : "#9aa0a8")
+                                                        : (navCell.selected ? window.accentColor : "#9aa0a8")
                                       size: 16 }
-                            MouseArea { id: navHit; anchors.fill: parent; hoverEnabled: true }
+                            MouseArea {
+                                id: navHit
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: modelData.k === "folder" ? Qt.PointingHandCursor
+                                                                      : Qt.ArrowCursor
+                                onClicked: (mouse) => {
+                                    if (modelData.k === "folder")
+                                        window.toggleFolderTree()
+                                }
+                            }
+
+                            /* 只有文件夹那格接上了动作，提示也只给它 */
+                            AppToolTip {
+                                hovered: navHit.containsMouse && modelData.k === "folder"
+                                text: window.folderTreeHidden ? "显示项目树" : "收起项目树"
+                                /* 贴着窗口左沿放：默认的"居中在格子上"会往左出界 */
+                                x: 2
+                                y: -implicitHeight - 3
+                            }
                         }
                     }
                     Item { width: 1; height: Math.max(1, parent.height - 300) }
@@ -978,7 +1296,11 @@ Rectangle {
             FolderTree {
                 id: folderTree
                 Layout.fillHeight: true
-                Layout.preferredWidth: window.folderTreeWidth
+                /*
+                 * 收起面板 = 槽位宽度给 0（窗口里那 5px 的拖拽间隙还在，
+                 * 从那条缝往右拖也能把面板拖回来，见 splitterMouse）。
+                 */
+                Layout.preferredWidth: window.folderTreeHidden ? 0 : window.folderTreeWidth
 
                 /*
                  * 面板右边缘在窗口里的 x。
@@ -996,6 +1318,20 @@ Rectangle {
                 selected: window.selectedItem
                 onFolderClicked: (key) => window.toggleFolder(key)
                 onItemClicked: (item) => window.selectItem(item)
+
+                /* 标题栏那排按钮：动作全在 Main 这边（数据都在这儿） */
+                onNewEntryRequested: window.newEntry()
+                onRefreshRequested: window.refresh()
+                onLocateRequested: window.locateCurrentItem()
+                onCollapseAllRequested: window.setAllFolders(false)
+                onExpandAllRequested: window.setAllFolders(true)
+                onHideRequested: window.toggleFolderTree()
+                /* 当前标签不是列表里的条目时，准星按钮置灰（没什么可定位的） */
+                locateEnabled: window.canLocateCurrent()
+                /* 标题"项目 ∨"和右边那个 ⋯ 弹的是同一份菜单 */
+                onMenuRequested: (anchor) =>
+                    ddMenu.openFor(anchor, Menus.treeMenu(window.treeMenuState(),
+                                                          window.shortcutOverrides()))
             }
 
             /*
@@ -1302,6 +1638,12 @@ Rectangle {
 
         onPressed: (mouse) => {
             pressSceneX = mapToItem(null, mouse.x, 0).x
+            /*
+             * 面板收起来时先把它叫回来：收起来之后标题栏那排按钮也跟着没了，
+             * 这条 5px 的缝就是最自然的抓手（往右拖 = 把树拉出来）。
+             */
+            if (window.folderTreeHidden)
+                window.toggleFolderTree()
             pressWidth = window.folderTreeWidth
             mouse.accepted = true
         }
@@ -1320,6 +1662,10 @@ Rectangle {
             mouse.accepted = true
         }
 
-        onReleased: (mouse) => { mouse.accepted = true }
+        onReleased: (mouse) => {
+            mouse.accepted = true
+            /* 拖完才记一次宽度：拖动过程中每动一像素写一次设置太浪费 */
+            window.rememberTreeWidth()
+        }
     }
 }

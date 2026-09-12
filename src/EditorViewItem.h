@@ -607,6 +607,12 @@ private:
     /* 把正文灌进当前文档（不动文档元信息） */
     void setContentCurrent(const QString &text);
 
+    /*
+     * 把剪贴板条目的正文写回库里（这类标签没有磁盘文件）。
+     * 见 .cpp 的 saveCurrent() 里为什么要分这一支。
+     */
+    bool saveClipboardEntry(int index);
+
     /* 去掉边框、深色滚动条 */
     void styleChrome();
 
