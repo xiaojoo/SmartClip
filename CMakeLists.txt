@@ -8,6 +8,30 @@ set(CMAKE_AUTORCC ON)
 
 find_package(Qt6 6.5 REQUIRED COMPONENTS Core Gui Qml Quick QuickControls2 QuickWidgets Sql Widgets PrintSupport)
 
+# ---------------------------------------------------------------------------
+# 配置时那条 Qt6TaskTree / Qt6QmlAssetDownloaderPrivate 的 NOT FOUND —— **可以忽略**
+#
+# 现象（Qt Creator 的 Issues 里会标红，容易被当成错误）：
+#     Could NOT find Qt6TaskTree (missing: Qt6TaskTree_DIR)
+#     ... Qt6QmlAssetDownloaderPrivate_FOUND to FALSE ... dependency Qt6TaskTree
+#     could not be found.
+#
+# 它是 Qt 自己的事：find_package(Qt6 ...) 会自动把所有 QML 插件包都 include 一遍
+# （QtPublicPluginHelpers.cmake 的 __qt_internal_include_qml_plugin_packages），
+# 其中一个可选插件 QmlAssetDownloaderPrivate（做素材下载用的，Qt Design Studio
+# 那套才用）依赖第三方库 TaskTree，而这份 Qt 6.11.2 安装里没有 Qt6TaskTree
+# （lib/cmake 下只有 Qt6QmlAssetDownloaderPrivate）。
+# 本项目不用那个插件，所以**只是一条警告**：配置照样成功（exit 0、"Build files
+# have been written"），编译和运行都不受影响。
+#
+# 别想着用 -DQT_SKIP_AUTO_QML_PLUGIN_INCLUSION=ON 把它消掉：实测那会把上面那套
+# 插件登记一起关掉，引出一堆更麻烦的警告 ——
+#     The qml plugin 'qtquick2plugin' is a dependency of 'SmartClip',
+#     but the link target was not found
+# 一共 34 条（qtquick2 / qml / models / workerscript / qtquickcontrols2 + 各套
+# style 插件），而 qt_add_qml_module 正需要那份登记。一条换 34 条，划不来。
+# ---------------------------------------------------------------------------
+
 # 内置的 QScintilla（编辑器内核，见 third/qscintilla/CMakeLists.txt）
 add_subdirectory(third/qscintilla)
 
