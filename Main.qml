@@ -1412,7 +1412,15 @@ Rectangle {
             Item {
                 id: splitterGap
 
-                Layout.preferredWidth: 5
+                /*
+                 * 面板收起来时这条缝也一起收掉。
+                 *
+                 * 留着的话收起之后编辑区左边会多出 5px 和图标条同色的暗带：
+                 * 展开时这一列到面板卡片左边缘为止（34px），收起后却到 39px ——
+                 * 看着就是"折叠和展开左边这一列宽度不一样"。收掉之后
+                 * 编辑区卡片正好顶到图标条右边，和展开时面板卡片的起点对齐。
+                 */
+                Layout.preferredWidth: window.folderTreeHidden ? 0 : 5
                 Layout.fillHeight: true
             }
 
