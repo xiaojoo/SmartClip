@@ -161,7 +161,26 @@ Rectangle {
                                 color: active ? root.tabActiveBg
                                               : (hot ? "#3a3d41" : "transparent")
 
+                                /*
+                                 * 这一层必须压在下面的 tabHit 之上（z: 1）。
+                                 *
+                                 * tabHit 是"整条标签"的点击区，声明在 RowLayout 后面 ——
+                                 * QML 里后声明的兄弟盖在上面，于是按下和悬停都先到
+                                 * tabHit：**小叉那个 MouseArea 永远收不到点击**，
+                                 * 左键点叉只会把标签切到前台，标签关不掉（实测就是这个
+                                 * 毛病：连点两下叉，两个标签都还在）。
+                                 *
+                                 * z 只能加在这个 RowLayout 上，加在叉自己那个 MouseArea
+                                 * 上没用：z 只在同一父项的子项之间比，比的始终是 tabItem
+                                 * 的两个子项（RowLayout 和 tabHit）谁在上面。
+                                 *
+                                 * 抬上来只改"按下"落在谁身上 —— 叉没写 acceptedButtons
+                                 * （默认只有左键），右键 / 中键照样穿到 tabHit 去弹菜单、
+                                 * 关标签；hover 也仍然是 tabHit 收（标签的 hover 态就是
+                                 * 它的 containsMouse）。
+                                 */
                                 RowLayout {
+                                    z: 1
                                     anchors.fill: parent
                                     anchors.leftMargin: 9
                                     anchors.rightMargin: 6
@@ -252,21 +271,12 @@ Rectangle {
                     }
                 }
 
-                /* ---- 右侧：新建 / 关闭当前 ---- */
-                ToolButton {
-                    provider: icons; kind: "new"; tip: "新建文件"; shortcut: "Ctrl+N"
-                    onClicked: root.newTabRequested()
-                }
-                ToolButton {
-                    provider: icons; kind: "close"; tip: "关闭当前标签"; shortcut: "Ctrl+W"
-                    enabled: root.hasDocument
-                    onClicked: root.tabCloseRequested(root.view.currentIndex)
-                }
-                ToolButton {
-                    provider: icons; kind: "trash"; tip: "关闭全部标签"
-                    enabled: root.view.documents.length > 0
-                    onClicked: root.tabCloseAllRequested()
-                }
+                /*
+                 * 原来这里还有三个工具栏按钮（新建 / 关闭当前 / 关闭全部），
+                 * 已经取消 —— 三条命令在"文件"菜单里都有，快捷键也还是
+                 * Ctrl+N / Ctrl+W，标签右键菜单里还有关闭那一组。
+                 * 标签栏因此整条留给标签本身，不再被按钮挤掉一截。
+                 */
             }
 
             Rectangle {
