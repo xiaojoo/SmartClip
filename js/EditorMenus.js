@@ -180,6 +180,12 @@ function viewMenu(view, ov) {
         { separator: true },
         { label: "缩进参考线", act: "toggleIndentGuides", icon: "indent",
           checked: !!view && view.indentGuidesVisible },
+        /* 行号栏右侧那条分隔竖线（见 EditorViewItem 的 gutterLineVisible） */
+        { label: "行号分隔线", act: "toggleGutterLine", icon: "numbers",
+          checked: !!view && view.gutterLineVisible },
+        /* "一行 N 字"那条竖线；N 在"设置"菜单里改 */
+        { label: "字数参考线", act: "toggleRuler", icon: "indent",
+          checked: !!view && view.rulerVisible },
         { label: "代码折叠", act: "toggleFolding", icon: "branch",
           checked: !!view && view.foldingEnabled },
         { label: "折叠全部", act: "foldAll", icon: "chevron-right",
@@ -320,6 +326,33 @@ function stepLineHeight(current, dir) {
     return kLineHeightFactors[idx]
 }
 
+/*
+ * 字数参考线（"一行 N 字"那条竖线）的可选列号。
+ *
+ * 80 是出厂默认，和 EditorViewItem 里的 m_rulerColumn 一致 —— 两处都改才算换了
+ * 默认值。不在表里的值（自定义输入的）就只显示在"自定义…"那一行上。
+ */
+var kRulerColumns = [60, 72, 80, 100, 120]
+
+function rulerColumnItems(view) {
+    var current = view ? view.rulerColumn : 80
+    var out = []
+    for (var i = 0; i < kRulerColumns.length; ++i) {
+        out.push({
+            label: kRulerColumns[i] + " 字" + (kRulerColumns[i] === 80 ? "（默认）" : ""),
+            act: "rulerColumn:" + kRulerColumns[i],
+            checked: current === kRulerColumns[i]
+        })
+    }
+    out.push({ separator: true })
+    out.push({
+        label: "自定义…（当前 " + current + " 字）",
+        act: "rulerColumnAsk",
+        icon: "gear"
+    })
+    return out
+}
+
 function settingsMenu(view, ov) {
     var hasDoc = !!view && view.hasDocument
     var items = []
@@ -348,6 +381,12 @@ function settingsMenu(view, ov) {
     var heights = lineHeightItems(view)
     for (var h = 0; h < heights.length; ++h)
         items.push(heights[h])
+
+    items.push({ separator: true })
+    items.push({ label: "字数参考线列", icon: "indent", disabled: true })
+    var cols = rulerColumnItems(view)
+    for (var r = 0; r < cols.length; ++r)
+        items.push(cols[r])
 
     items.push({ separator: true })
     items.push({ label: "自动换行", act: "toggleWrap", icon: "wrap",

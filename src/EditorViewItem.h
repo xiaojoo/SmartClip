@@ -97,6 +97,28 @@ class EditorViewItem : public QQuickItem {
     Q_PROPERTY(bool lineNumbersVisible READ lineNumbersVisible WRITE setLineNumbersVisible NOTIFY lineNumbersChanged)
     Q_PROPERTY(bool whitespaceVisible READ whitespaceVisible WRITE setWhitespaceVisible NOTIFY whitespaceChanged)
     Q_PROPERTY(bool indentGuidesVisible READ indentGuidesVisible WRITE setIndentGuidesVisible NOTIFY indentGuidesChanged)
+
+    /*
+     * 行号栏右侧那条分隔竖线（"序号右边加一条竖线"）。
+     *
+     * 实现：把一直空着的第 1 条边距（行号 = 第 0 列，折叠 = 第 2 列）留 1 像素
+     * 宽、背景刷成分隔色 —— 边距背景是整列一次填满的，所以它是一条从顶到底的
+     * 竖线，滚动 / 折叠 / 换语言都不影响（见 .cpp 的 applyMargins 与
+     * applyMarginTheme）。
+     */
+    Q_PROPERTY(bool gutterLineVisible READ gutterLineVisible WRITE setGutterLineVisible NOTIFY gutterLineChanged)
+
+    /*
+     * 字数参考线（"一行 80 字"那条竖线）与它的列号。
+     *
+     * 走 Scintilla 的 edge（EDGE_LINE）：线画在**正文区**第 rulerColumn 列，
+     * 位置按当前字体的空格宽算，跟行号栏多宽没关系；正文下方的空白区也一起
+     * 画（EditView.cpp 的 rcBeyondEOF 那一支），所以它同样通到底。
+     * 80 是出厂值，设置菜单里可以改（见 setRulerColumn 的夹取范围）。
+     */
+    Q_PROPERTY(bool rulerVisible READ rulerVisible WRITE setRulerVisible NOTIFY rulerChanged)
+    Q_PROPERTY(int rulerColumn READ rulerColumn WRITE setRulerColumn NOTIFY rulerChanged)
+
     Q_PROPERTY(bool foldingEnabled READ foldingEnabled WRITE setFoldingEnabled NOTIFY foldingChanged)
     Q_PROPERTY(bool readOnly READ readOnly WRITE setReadOnly NOTIFY readOnlyChanged)
     Q_PROPERTY(int zoomPercent READ zoomPercent NOTIFY zoomChanged)
@@ -184,12 +206,34 @@ public:
      *   [0] 行号栏里的墨点（数字）
      *   [1] 折叠栏里的墨点（折叠标记）
      *   [2] 纯白像素个数（必须为 0 —— 白带就是它）
-     *   [3] （保留位，当前行竖条已去掉）
+     *   [3] 行号栏右侧那条分隔竖线的像素（关掉开关就是 0）
+     *   [7][8][9] 三条边距的宽度；[12] 缩进参考线的像素
      *
      * 抓的是控件自己渲染出来的图，不依赖窗口是不是在前台 ——
      * 在真实窗口上截屏量像素会被别的窗口盖住，实测不可靠。
      */
     Q_INVOKABLE QVariantList marginPixelStats() const;
+
+    /*
+     * 自检用：参考线在 Scintilla 那边的实际状态（读的是 edge 消息，不是成员变量
+     * —— 钉的是"设置真的下发到了内核"）。
+     *   rulerEdgeMode   —— 0 = 不画（EDGE_NONE），1 = 竖线（EDGE_LINE）
+     *   rulerEdgeColumn —— 线的列号
+     *   rulerEdgeColor  —— 线的颜色（按 Scintilla 的 BGR 打包，配合 packed() 比）
+     */
+    Q_INVOKABLE int rulerEdgeMode() const;
+    Q_INVOKABLE int rulerEdgeColumn() const;
+    Q_INVOKABLE int rulerEdgeColor() const;
+
+    /*
+     * 自检用：参考线在控件上**画出来**的像素位置。
+     * 返回 { found, expected }：found = 抓图里扫到的列（-1 = 没扫到），
+     * expected = 按"边距 + 左留白 + 列号 × 空格宽"算出来的位置。
+     *
+     * 光看 edgeColumn 只是"消息发对了"，这条是"线真的落在 80 个字的地方"——
+     * 抓的是控件自己渲染的图，不依赖窗口在前台（同 marginPixelStats）。
+     */
+    Q_INVOKABLE QVariantList rulerPixelStats() const;
 
     int paddingLeft() const { return m_paddingLeft; }
     void setPaddingLeft(int v);
@@ -263,6 +307,16 @@ public:
      */
     bool indentGuidesVisible() const { return m_indentGuides; }
     void setIndentGuidesVisible(bool on);
+
+    /* 行号栏右侧的分隔竖线（见 Q_PROPERTY 里的说明） */
+    bool gutterLineVisible() const { return m_gutterLine; }
+    void setGutterLineVisible(bool on);
+
+    /* 字数参考线（列号以**字符**为单位，1 = 第 1 个字后面） */
+    bool rulerVisible() const { return m_rulerVisible; }
+    void setRulerVisible(bool on);
+    int rulerColumn() const { return m_rulerColumn; }
+    void setRulerColumn(int column);
 
     bool readOnly() const { return m_readOnly; }
     void setReadOnly(bool on);
@@ -454,6 +508,8 @@ signals:
     void lineNumbersChanged();
     void whitespaceChanged();
     void indentGuidesChanged();
+    void gutterLineChanged();
+    void rulerChanged();
     void foldingChanged();
     void readOnlyChanged();
     void zoomChanged();
@@ -553,6 +609,14 @@ private:
     void applyMargins();
 
     /*
+     * 字数参考线（Scintilla 的 edge）。
+     *
+     * 独立于边距：边距管"行号右边那条分隔线"，edge 管"第 N 个字那条线"。
+     * 三发消息分别是列号 / 颜色 / 模式，设置或开关一变就重发一次。
+     */
+    void applyRuler();
+
+    /*
      * 边距（行号栏 / 折叠栏）的主题化。
      *
      * 必须在 applyLanguageLexer() **之后**调用：装 lexer 时 QScintilla 会先
@@ -650,6 +714,11 @@ private:
     bool m_lineNumbers = true;
     bool m_whitespace = false;
     bool m_indentGuides = true;
+    /* 行号栏右侧的分隔竖线（默认开） */
+    bool m_gutterLine = true;
+    /* 字数参考线：默认开、"一行 80 字" */
+    bool m_rulerVisible = true;
+    int m_rulerColumn = 80;
     bool m_folding = true;
     bool m_readOnly = false;
 

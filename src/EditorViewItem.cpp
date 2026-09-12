@@ -117,6 +117,20 @@ inline long scColor(const QColor &c) {
 
 /* 主题色（用的时候过 scColor 打包） */
 const QColor kAccent(0x4c, 0x96, 0xd8);         // 强调蓝
+/*
+ * 行号栏右侧那条分隔竖线的颜色。
+ *
+ * 比底色（#1e1f22）亮一点点就够：它的作用是"把行号栏和正文分开"，不是抢眼。
+ * 拿缩进参考线的 #3e4247 试过，配 1px 宽度看起来偏重，往回收了一档。
+ */
+const QColor kGutterLine(0x33, 0x38, 0x40);
+/*
+ * 字数参考线（"一行 80 字"）的颜色。
+ *
+ * 比缩进参考线（#3e4247）再亮一档：缩进参考线满地都是，这条是"列标尺"，
+ * 要能一眼认出来是人为画的那条。
+ */
+const QColor kRulerLine(0x4b, 0x51, 0x5a);
 const QColor kCaretLineBack(0x26, 0x28, 0x2b);  // 当前行底色
 const QColor kSelectionBack(0x2f, 0x65, 0x9c);  // 选中底色
 /* 深色主题的语法配色（JetBrains 暗色系） */
@@ -560,6 +574,14 @@ void EditorViewItem::applyMarginTheme() {
     for (long margin = 0; margin <= 2; ++margin)
         m_sci->SendScintilla(QsciScintillaBase::SCI_SETMARGINBACKN, margin, paper);
 
+    /*
+     * 第 1 条边距是"行号栏右侧的分隔竖线"，底色单独用分隔色。
+     * 上面那轮先把三条都刷成编辑区底色，这里再把它压回来 —— 顺序不能反。
+     * 关掉这个开关时（宽度 0）颜色无所谓，跟着底色走就行。
+     */
+    m_sci->SendScintilla(QsciScintillaBase::SCI_SETMARGINBACKN, 1L,
+                         m_gutterLine ? scColor(kGutterLine) : paper);
+
     /* 折叠边距自己有颜色设置（0 = 跟随默认），改成跟底色一致 */
     m_sci->setFoldMarginColors(m_paperColor, m_paperColor);
 
@@ -742,12 +764,31 @@ QVariantList EditorViewItem::marginPixelStats() const {
         }
     }
 
+    /*
+     * 行号栏右侧那条分隔竖线：**整幅图**扫它的颜色，而不是按"第 1 条边距的列"
+     * 去数。边距宽度是逻辑像素、抓图是设备像素，高 DPI 下两者差一个缩放系数，
+     * 按列算会正好错开那 1 像素（实测在 125% 下就这么白数了）。
+     * 这个颜色（#333840）全编辑器只有它用，扫到的就是它。
+     */
+    int gutterInk = 0, gutterX = -1;
+    for (int y = 0; y < img.height(); ++y) {
+        for (int x = 0; x < img.width(); ++x) {
+            if (img.pixelColor(x, y) == kGutterLine) {
+                ++gutterInk;
+                if (gutterX < 0)
+                    gutterX = x;
+            }
+        }
+    }
+
     out[0] = numberInk;
     out[1] = foldInk;
     out[2] = white;
+    out[3] = gutterInk;
     out[7] = mw0;
     out[8] = mw1;
     out[9] = mw2;
+    out[10] = gutterX;
     out[12] = guideInk;
     return out;
 }
@@ -994,6 +1035,16 @@ void EditorViewItem::applyViewOptions() {
                          long(QsciScintillaBase::SC_AUTOMATICFOLD_SHOW
                               | QsciScintillaBase::SC_AUTOMATICFOLD_CHANGE));
 
+    /*
+     * 两条竖线：
+     *   * 字数参考线（第 N 个字那条）—— view 级的 edge 设置，只有开关 / 列号
+     *     变了才需要重发，所以平时不在这里刷（applyViewOptions 只在构造和
+     *     这些开关联动时被调用）；
+     *   * 行号栏右侧那条分隔线 —— 它是边距宽度 + 底色，跟着 applyMargins 走
+     *     （见那里和 applyMarginTheme）。
+     */
+    applyRuler();
+
     applyMargins();
 }
 
@@ -1038,10 +1089,23 @@ void EditorViewItem::applyMargins() {
         m_sci->setFolding(QsciScintilla::NoFoldStyle, 2);
 
     /*
-     * 第 1 列不用，宽度清零。
+     * 第 1 条边距：行号栏右侧那条分隔竖线。
      *
-     * 这里原来放过"当前行蓝色竖条"（3px 符号边距 + SC_MARK_FULLRECT 标记），
+     * 留 1 像素宽、背景刷成分隔色（见 applyMarginTheme），就得到一条从顶到底
+     * 的竖线。不用在 QML 里按边距宽度贴一个 Rectangle：边距宽度是随行号位数、
+     * 字体、折叠开关变的，QML 那边算不准；而且编辑区是原生子窗口，QML 的浮层
+     * 本来就盖不到它上面。
+     *
+     * 这条边距以前放过"当前行蓝色竖条"（3px 符号边距 + SC_MARK_FULLRECT），
      * 已按使用意见去掉 —— 当前行有正文那层底色加光标就够醒目了。
+     *
+     * 类型必须是 **SC_MARGIN_COLOUR**，不能留默认的符号边距：Scintilla 画边距
+     * 背景是按类型分支的（MarginView.cpp:205 一带）——
+     *   SC_MARGIN_BACK / FORE  -> 取正文样式的前/底色
+     *   SC_MARGIN_COLOUR       -> 取这条边距自己的底色（SCI_SETMARGINBACKN）
+     *   其余（含默认的符号边距）-> 取 **STYLE_LINENUMBER** 的底色
+     * 一开始就是这么写的：边距宽 1px、底色设了，画出来却跟底色一样（实测抓图里
+     * 那一条 0 个分隔色像素）—— 因为默认类型的底色根本不看 SCI_SETMARGINBACKN。
      *
      * 顺带记一笔查证结果（两条路都走过了，别再绕）：
      *
@@ -1056,7 +1120,10 @@ void EditorViewItem::applyMargins() {
      *    "改一次字号，编辑器就跟界面失联"，所以这条实现不能留。
      *    真要做，得另起一个原生 QWidget 自画行号栏，不动 Scintilla 的边距。
      */
-    m_sci->SendScintilla(QsciScintillaBase::SCI_SETMARGINWIDTHN, 1L, 0L);
+    m_sci->SendScintilla(QsciScintillaBase::SCI_SETMARGINTYPEN, 1L,
+                         QsciScintillaBase::SC_MARGIN_COLOUR);
+    m_sci->SendScintilla(QsciScintillaBase::SCI_SETMARGINWIDTHN, 1L,
+                         m_gutterLine ? 1L : 0L);
 
     /* 颜色最后压：装 lexer 时那次 STYLECLEARALL 会把行号样式刷回白底 */
     themeFoldMarkers();
@@ -1639,6 +1706,137 @@ void EditorViewItem::setIndentGuidesVisible(bool on) {
         m_sci->viewport()->update();
     }
     emit indentGuidesChanged();
+}
+
+void EditorViewItem::setGutterLineVisible(bool on) {
+    if (m_gutterLine == on)
+        return;
+    m_gutterLine = on;
+    /*
+     * 这条线是"第 1 条边距的宽度 + 它的背景色"，所以走 applyMargins()
+     * （末尾会调 applyMarginTheme()，颜色在那里压）。
+     */
+    applyMargins();
+    emit gutterLineChanged();
+}
+
+void EditorViewItem::setRulerVisible(bool on) {
+    if (m_rulerVisible == on)
+        return;
+    m_rulerVisible = on;
+    applyRuler();
+    emit rulerChanged();
+}
+
+void EditorViewItem::setRulerColumn(int column) {
+    /*
+     * 夹到 1 ~ 2000。
+     *
+     * 下限给 1 而不是 0：列号 0 的线会压在正文左边缘上（看着像正文的边框），
+     * 想关掉这条线用 rulerVisible，别用"列号设 0"这种隐式写法。
+     * 上限 2000 是"再宽的屏幕也够用"的兜底，防止设置文件里写进离谱的值。
+     */
+    column = qBound(1, column, 2000);
+    if (m_rulerColumn == column)
+        return;
+    m_rulerColumn = column;
+    applyRuler();
+    emit rulerChanged();
+}
+
+/*
+ * 字数参考线（Scintilla 的 edge）。
+ *
+ * 为什么用 edge 而不是自己画：位置是 Scintilla 按 vs.spaceWidth（当前默认样式
+ * 的空格宽）算的（见 EditView.cpp 的 DrawEdgeLine），换字体 / 改字号 / 缩放
+ * 之后它自己就落回"第 80 个字"的位置，不用我们跟着重算；正文下方的空白区
+ * 也一起画，所以线是通到底的。
+ *
+ * 注意 Scintilla 只有**一条** edge，所以它专门管"第 N 个字"这条；行号右边
+ * 那条分隔线走边距（见 applyMargins）。
+ *
+ * 颜色走 setEdgeColor(QColor)：QScintilla 的 QColor 重载会正确打包 BGR。
+ * 三发消息内部都会 InvalidateStyleRedraw()（Editor.cpp:7574 一带），不用自己
+ * 再 update()。
+ */
+void EditorViewItem::applyRuler() {
+    if (!m_sci)
+        return;
+
+    m_sci->setEdgeColumn(m_rulerColumn);
+    m_sci->setEdgeColor(kRulerLine);
+    m_sci->setEdgeMode(m_rulerVisible ? QsciScintilla::EdgeLine
+                                      : QsciScintilla::EdgeNone);
+}
+
+int EditorViewItem::rulerEdgeMode() const {
+    if (!m_sci)
+        return -1;
+    return int(m_sci->edgeMode());
+}
+
+int EditorViewItem::rulerEdgeColumn() const {
+    if (!m_sci)
+        return -1;
+    return m_sci->edgeColumn();
+}
+
+int EditorViewItem::rulerEdgeColor() const {
+    if (!m_sci)
+        return -1;
+    /* edgeColor() 已经把 BGR 还原成 QColor，这里再按 Scintilla 的打包规则返回，
+       自检就能和 marginBack / styleBack 一样用 packed() 直接比 */
+    return int(scColor(m_sci->edgeColor()));
+}
+
+QVariantList EditorViewItem::rulerPixelStats() const {
+    QVariantList out{-1, -1};   // { found, expected }
+    if (!m_sci || !m_sciWidget || !hasDocument())
+        return out;
+
+    const QImage img = m_sciWidget->grab().toImage();
+    if (img.isNull())
+        return out;
+
+    const qreal scale =
+        m_sciWidget->width() > 0 ? qreal(img.width()) / qreal(m_sciWidget->width()) : 1.0;
+
+    long margins = 0;
+    for (int m = 0; m <= 2; ++m)
+        margins += marginWidth(m);
+
+    /*
+     * Scintilla 画 edge 的公式（EditView.cpp: DrawEdgeLine）：
+     *     x = 列号 × 空格宽 + xStart（xStart 就是正文左边缘，横滚时跟着挪）
+     * 而正文左边缘 = 各条边距宽度 + 左留白（SCI_SETMARGINLEFT）。
+     * 空格宽用 QFontMetrics 量：和 Scintilla 量的是同一个字体（正文默认样式
+     * 用的就是 uiFont()），等宽字体下就是字符宽。
+     */
+    const QFontMetrics fm(uiFont());
+    const int space = fm.horizontalAdvance(QLatin1Char(' '));
+    const int expected =
+        int(qRound(double(margins + m_paddingLeft + m_rulerColumn * space) * scale));
+
+    /*
+     * 扫中间那一行找线。竖线是 FillRectangle 填的纯色整列，所以扫一行就够；
+     * 通道容差留 6 —— 高 DPI 下 1px 的线落在半像素上会被轻微混色，
+     * 而缩进参考线（#3e4247）和它每通道差 13 以上，不会认错。
+     */
+    const int y = img.height() / 2;
+    int found = -1;
+    for (int x = 0; x < img.width(); ++x) {
+        const QColor c = img.pixelColor(x, y);
+        if (qAbs(c.red() - kRulerLine.red()) <= 6
+            && qAbs(c.green() - kRulerLine.green()) <= 6
+            && qAbs(c.blue() - kRulerLine.blue()) <= 6) {
+            found = x;
+            break;
+        }
+    }
+
+    out[0] = found;
+    out[1] = expected;
+    return out;
 }
 
 void EditorViewItem::setReadOnly(bool on) {

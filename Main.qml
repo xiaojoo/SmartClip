@@ -353,6 +353,22 @@ Rectangle {
         return out
     }
 
+    /*
+     * 视图菜单里各条的动作名（自检核对用，见 src/SelfTest.cpp）。
+     *
+     * 同样走"和弹出的那份同一个构造"：点"视图"弹出的就是 Menus.viewMenu。
+     * 自检据此确认新的两条竖线开关确实进了菜单，而不是只在 C++ 里有属性。
+     */
+    function viewMenuActs() {
+        var items = Menus.viewMenu(view, shortcutOverrides())
+        var out = []
+        for (var i = 0; i < items.length; ++i) {
+            if (items[i] && items[i].act !== undefined)
+                out.push(String(items[i].act))
+        }
+        return out
+    }
+
     function showFind(replace) {
         if (!view.hasDocument)
             return
@@ -491,6 +507,30 @@ Rectangle {
         if (act === "toggleIndentGuides") {
             view.indentGuidesVisible = !view.indentGuidesVisible
             Cmd.remember("indentGuides", view.indentGuidesVisible ? "1" : "0")
+            return
+        }
+        if (act === "toggleGutterLine") {
+            view.gutterLineVisible = !view.gutterLineVisible
+            Cmd.remember("gutterLine", view.gutterLineVisible ? "1" : "0")
+            return
+        }
+        if (act === "toggleRuler") {
+            view.rulerVisible = !view.rulerVisible
+            Cmd.remember("rulerVisible", view.rulerVisible ? "1" : "0")
+            return
+        }
+        /* 字数参考线列号：菜单里的固定档位（rulerColumn:80）走这条 */
+        if (act.indexOf("rulerColumn:") === 0) {
+            var rc = parseInt(act.substring(12))
+            if (!isNaN(rc) && rc >= 1 && rc <= 2000)
+                view.rulerColumn = rc
+            return
+        }
+        /* 自定义列号：弹一个整数输入框（原生 QInputDialog，见 Cmd.askRulerColumn） */
+        if (act === "rulerColumnAsk") {
+            var picked = Cmd.askRulerColumn(view.rulerColumn)
+            if (picked > 0)
+                view.rulerColumn = picked
             return
         }
         if (act === "toggleFolding") { view.foldingEnabled = !view.foldingEnabled; return }
@@ -636,6 +676,16 @@ Rectangle {
         view.lineNumbersVisible = Cmd.recall("lineNumbers", "1") === "1"
         view.whitespaceVisible = Cmd.recall("whitespace", "0") === "1"
         view.indentGuidesVisible = Cmd.recall("indentGuides", "1") === "1"
+
+        /*
+         * 行号右侧的分隔竖线、字数参考线（默认开，"一行 80 字"）。
+         * 列号越界/写坏就退回默认 80，别让设置文件里的垃圾值把线顶到画面外。
+         */
+        view.gutterLineVisible = Cmd.recall("gutterLine", "1") === "1"
+        view.rulerVisible = Cmd.recall("rulerVisible", "1") === "1"
+        var rulerCol = parseInt(Cmd.recall("rulerColumn", "80"))
+        view.rulerColumn = (!isNaN(rulerCol) && rulerCol >= 1 && rulerCol <= 2000)
+                           ? rulerCol : 80
     }
 
     Connections { target: Store; function onChanged() { window.refresh() } }
@@ -669,6 +719,13 @@ Rectangle {
         }
         function onIndentGuidesChanged() {
             Cmd.remember("indentGuides", editor.view.indentGuidesVisible ? "1" : "0")
+        }
+        function onGutterLineChanged() {
+            Cmd.remember("gutterLine", editor.view.gutterLineVisible ? "1" : "0")
+        }
+        function onRulerChanged() {
+            Cmd.remember("rulerVisible", editor.view.rulerVisible ? "1" : "0")
+            Cmd.remember("rulerColumn", String(editor.view.rulerColumn))
         }
         function onErrorOccurred(message) {
             /*

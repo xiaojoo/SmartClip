@@ -131,6 +131,13 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store) {
         return result.toList();
     };
 
+    /* 读视图菜单的条目清单（见 Main.qml 的 viewMenuActs，同上） */
+    auto viewMenuActs = [qmlRoot]() {
+        QVariant result;
+        QMetaObject::invokeMethod(qmlRoot, "viewMenuActs", Q_RETURN_ARG(QVariant, result));
+        return result.toList();
+    };
+
     QDir dir(QDir::tempPath() + QStringLiteral("/smartclip-selftest"));
     dir.removeRecursively();
     dir.mkpath(QStringLiteral("."));
@@ -404,13 +411,156 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store) {
               .arg(view->marginBack(0), 6, 16, QLatin1Char('0'))
               .arg(view->marginBack(2), 6, 16, QLatin1Char('0')));
 
-    /* 折叠边距在（第 2 列有宽度），第 1 列不用 */
+    /* 折叠边距在（第 2 列有宽度） */
     check(view->marginWidth(2) > 0,
           QStringLiteral("折叠边距已启用（第 2 列有宽度）"),
           QStringLiteral("实际 %1").arg(view->marginWidth(2)));
+
+    /*
+     * 行号右边那条分隔竖线（第 1 条边距）。
+     *
+     * 这条边距一直空着，现在专门用来画它：宽度 1px、底色是**分隔色**而不是
+     * 编辑区底色 —— 边距背景整列一次填满，所以它是一条从顶到底的竖线。
+     */
+    check(view->marginWidth(1) == 1 && view->marginBack(1) == packed(0x33, 0x38, 0x40),
+          QStringLiteral("行号栏右侧有 1px 分隔竖线（第 1 列）"),
+          QStringLiteral("宽 %1 / 底色 #%2")
+              .arg(view->marginWidth(1))
+              .arg(unpacked(view->marginBack(1)), 6, 16, QLatin1Char('0')));
+
+    dispatch(QStringLiteral("toggleGutterLine"));
     check(view->marginWidth(1) == 0,
-          QStringLiteral("第 1 列不用（当前行竖条已去掉）"),
-          QStringLiteral("实际 %1").arg(view->marginWidth(1)));
+          QStringLiteral("dispatch(toggleGutterLine) 把分隔线关掉"),
+          QStringLiteral("实际宽 %1").arg(view->marginWidth(1)));
+    dispatch(QStringLiteral("toggleGutterLine"));
+    check(view->marginWidth(1) == 1 && view->gutterLineVisible(),
+          QStringLiteral("再切一次分隔线回来"));
+
+    /*
+     * 字数参考线（"一行 80 字"那条竖线）。
+     *
+     * 两件事一起钉：Scintilla 那边的 edge 状态（模式 / 列号 / 颜色），以及
+     * **画出来的像素位置** —— 抓图里扫那条线，跟"列号 × 空格宽 + 正文左边缘"
+     * 对一下。只看列号的话，"消息发下去了但线没画出来"是查不到的。
+     */
+    {
+        /*
+         * 量像素得有文档：一个标签都没开时视图挂的是 scratch 占位文档、编辑区
+         * 不显示，抓出来的图是空的。这里自己开一个；后面那些断言用的 before
+         * 计数在更靠后的位置取，不受影响。
+         */
+        if (!view->hasDocument())
+            dispatch(QStringLiteral("new"));
+
+        /*
+         * 分隔线"真的画出来了"这一条要用像素说话：它占的是第 1 条边距的那 1 像素，
+         * 底色是分隔色，边距背景整列填满，所以抓图里应该数得到接近控件高度那么多个
+         * 点；关掉开关就一个都不剩。
+         */
+        {
+            const QVariantList on = view->marginPixelStats();
+            dispatch(QStringLiteral("toggleGutterLine"));
+            const QVariantList off = view->marginPixelStats();
+            dispatch(QStringLiteral("toggleGutterLine"));
+            out() << "        （分隔竖线像素：开着 " << on.value(3).toInt() << "（第 "
+                  << on.value(10).toInt() << " 列起）/ 关掉 " << off.value(3).toInt()
+                  << "；三条边距宽 " << on.value(7).toInt() << "+" << on.value(8).toInt()
+                  << "+" << on.value(9).toInt() << "）" << Qt::endl;
+            check(on.value(3).toInt() > 100 && off.value(3).toInt() == 0,
+                  QStringLiteral("行号右侧那条分隔线真的画出来了（关掉就一个像素都没有）"),
+                  QStringLiteral("开着 %1 / 关掉 %2")
+                      .arg(on.value(3).toInt()).arg(off.value(3).toInt()));
+        }
+
+        /*
+         * 菜单里得能点到：开关在"视图"菜单，列号档位在"设置"菜单。
+         * 断言读的是和弹出来那份同一个构造（Main.qml 的 viewMenuActs /
+         * settingsMenuActs），所以"菜单里真的有这一条"是被钉住的。
+         */
+        {
+            QStringList acts;
+            for (const QVariant &item : viewMenuActs())
+                acts << item.toString();
+            check(acts.contains(QStringLiteral("toggleGutterLine"))
+                      && acts.contains(QStringLiteral("toggleRuler")),
+                  QStringLiteral("视图菜单里有那两条竖线的开关"),
+                  acts.join(QLatin1Char('/')));
+        }
+        {
+            QStringList acts, cols;
+            for (const QVariant &item : settingsMenuActs()) {
+                const QString act = item.toString();
+                acts << act;
+                if (act.startsWith(QStringLiteral("rulerColumn:")))
+                    cols << act.mid(int(qstrlen("rulerColumn:")));
+            }
+            check(cols.size() == 5 && cols.contains(QStringLiteral("80"))
+                      && cols.contains(QStringLiteral("100")),
+                  QStringLiteral("设置菜单里有 5 档参考线列号（含 80 与 100）"),
+                  cols.join(QLatin1Char('/')));
+            check(acts.contains(QStringLiteral("rulerColumnAsk")),
+                  QStringLiteral("设置菜单里有\"自定义…\"（弹整数输入框）"));
+        }
+
+        check(view->rulerEdgeMode() == 1 && view->rulerEdgeColumn() == 80,
+              QStringLiteral("字数参考线默认在第 80 列（EDGE_LINE）"),
+              QStringLiteral("模式 %1 / 列号 %2")
+                  .arg(view->rulerEdgeMode()).arg(view->rulerEdgeColumn()));
+        check(view->rulerEdgeColor() == packed(0x4b, 0x51, 0x5a),
+              QStringLiteral("参考线用的是主题里的颜色（不是 Scintilla 默认）"),
+              QStringLiteral("实际 #%1")
+                  .arg(unpacked(view->rulerEdgeColor()), 6, 16, QLatin1Char('0')));
+
+        QVariantList rulerPixels = view->rulerPixelStats();
+        out() << "        （参考线：扫到 x=" << rulerPixels.value(0).toInt()
+              << "，按 80 字算出来应为 x=" << rulerPixels.value(1).toInt() << "）"
+              << Qt::endl;
+        check(rulerPixels.value(0).toInt() >= 0
+                  && qAbs(rulerPixels.value(0).toInt() - rulerPixels.value(1).toInt()) <= 3,
+              QStringLiteral("那条线真的画在第 80 个字的位置上"),
+              QStringLiteral("扫到 x=%1 / 应为 x=%2")
+                  .arg(rulerPixels.value(0).toInt()).arg(rulerPixels.value(1).toInt()));
+
+        /* 改列号：菜单里"100 字"那一档，act 就是 "rulerColumn:100" */
+        dispatch(QStringLiteral("rulerColumn:100"));
+        check(view->rulerColumn() == 100 && view->rulerEdgeColumn() == 100,
+              QStringLiteral("dispatch(rulerColumn:100) 改列号"),
+              QStringLiteral("实际 %1").arg(view->rulerColumn()));
+        rulerPixels = view->rulerPixelStats();
+        check(rulerPixels.value(0).toInt() >= 0
+                  && qAbs(rulerPixels.value(0).toInt() - rulerPixels.value(1).toInt()) <= 3,
+              QStringLiteral("列号改到 100 之后线跟着挪（位置仍然对得上）"),
+              QStringLiteral("扫到 x=%1 / 应为 x=%2")
+                  .arg(rulerPixels.value(0).toInt()).arg(rulerPixels.value(1).toInt()));
+
+        /*
+         * 越界值两道都堵：QML 的 dispatch 直接丢掉不合法的，C++ 的 setter 再夹一道
+         * （设置文件是手改得动的，那边不夹的话 0 或者几十万这种值会顶到画面外）。
+         */
+        dispatch(QStringLiteral("rulerColumn:0"));
+        check(view->rulerColumn() == 100,
+              QStringLiteral("非法列号（0）被 dispatch 丢掉（要关这条线用开关，不用 0）"),
+              QStringLiteral("实际 %1").arg(view->rulerColumn()));
+        view->setRulerColumn(0);
+        check(view->rulerColumn() == 1, QStringLiteral("C++ 侧把 0 夹到 1"),
+              QStringLiteral("实际 %1").arg(view->rulerColumn()));
+        view->setRulerColumn(99999);
+        check(view->rulerColumn() == 2000, QStringLiteral("C++ 侧把超大值夹到 2000"),
+              QStringLiteral("实际 %1").arg(view->rulerColumn()));
+        view->setRulerColumn(80);
+
+        /* 关掉之后抓图里要扫不到那条线，开回来又要有 */
+        dispatch(QStringLiteral("toggleRuler"));
+        check(!view->rulerVisible() && view->rulerEdgeMode() == 0,
+              QStringLiteral("dispatch(toggleRuler) 关掉参考线（EDGE_NONE）"),
+              QStringLiteral("模式 %1").arg(view->rulerEdgeMode()));
+        check(view->rulerPixelStats().value(0).toInt() < 0,
+              QStringLiteral("关掉之后抓图里扫不到那条线"),
+              QStringLiteral("扫到 x=%1").arg(view->rulerPixelStats().value(0).toInt()));
+        dispatch(QStringLiteral("toggleRuler"));
+        check(view->rulerVisible() && view->rulerEdgeMode() == 1,
+              QStringLiteral("再切一次参考线回来"));
+    }
 
     /*
      * 注：这里原本还有"光标行行号高亮"的断言（逐行边距样式 / 强调色样式），

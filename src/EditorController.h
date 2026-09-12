@@ -88,6 +88,13 @@ public:
     /* 转到行：让用户填一个行号；取消返回 -1 */
     Q_INVOKABLE int askLineNumber(int maxLine, int currentLine);
 
+    /*
+     * 字数参考线列号：让用户填"在第几个字后面画那条竖线"；取消返回 -1。
+     * 范围在 .cpp 里（1 ~ 500），比 EditorViewItem 的硬夹取范围窄一档 ——
+     * 输入框是给人用的，2000 列那种值只有设置文件里才会出现。
+     */
+    Q_INVOKABLE int askRulerColumn(int current);
+
     /* 轻量设置持久化（字号 / 自动换行 / 行号 / 上次打开的目录…） */
     Q_INVOKABLE QString recall(const QString &key, const QString &fallback = QString()) const;
     Q_INVOKABLE void remember(const QString &key, const QString &value) const;

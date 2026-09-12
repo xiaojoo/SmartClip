@@ -409,6 +409,20 @@ int EditorController::askLineNumber(int maxLine, int currentLine) {
     return dialog.intValue();
 }
 
+int EditorController::askRulerColumn(int current) {
+    QInputDialog dialog(m_widget);
+    dialog.setStyleSheet(QString::fromLatin1(kDialogStyle));  /* 灰黑底，见文件头的说明 */
+    dialog.setWindowTitle(tr("字数参考线"));
+    dialog.setLabelText(tr("在第几个字后面画竖线（1 - 500）："));
+    dialog.setInputMode(QInputDialog::IntInput);
+    dialog.setIntRange(1, 500);
+    dialog.setIntStep(1);
+    dialog.setIntValue(qBound(1, current, 500));
+    if (dialog.exec() != QDialog::Accepted)
+        return -1;
+    return dialog.intValue();
+}
+
 QString EditorController::recall(const QString &key, const QString &fallback) const {    const QVariant value = QSettings().value(settingsKey(key));
     if (!value.isValid())
         return fallback;
