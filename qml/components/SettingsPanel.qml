@@ -84,6 +84,17 @@ Popup {
 
     readonly property int rowHeight: 26
 
+    /*
+     * 右栏快捷键表里"快捷键"这一列的位置。
+     *
+     * keyColumnX 是这一列的左边界：表头文字和行里那个组合键文字都从这条线
+     * 开始，所以两边只读这一个值，不会再错开（用户报过中间这列比表头右移
+     * 6px —— 那 6px 是格子给"采键高亮框"留的左内边距，格子本身得往左让出来，
+     * 文字才落在线上）。
+     */
+    readonly property real keyColumnX: 250
+    readonly property real keyCellInset: 6
+
     /* 栏目表：左边"操作步骤"那一列 */
     readonly property var navItems: [
         { key: "shortcuts", label: "快捷键", icon: "gear" },
@@ -439,7 +450,15 @@ Popup {
                             }
                         }
     
-                        /* 表头 */
+                        /*
+                         * 表头。
+                         *
+                         * 底下**不画那条横线**（原来这里有一条 borderColor 的
+                         * 1px 线）：表头和第一条是同一张表，那条线把标题和内容
+                         * 割成两半，看着像多出来的一行。行与行之间的细线照旧留着
+                         * （见下面 delegate 里的分隔线），第一条自己那条也关掉了，
+                         * 不然表头底下还是会冒一条出来。
+                         */
                         Rectangle {
                             width: parent.width
                             height: 24
@@ -455,7 +474,7 @@ Popup {
                             }
                             Text {
                                 anchors.left: parent.left
-                                anchors.leftMargin: 250
+                                anchors.leftMargin: root.keyColumnX
                                 anchors.verticalCenter: parent.verticalCenter
                                 text: "快捷键"
                                 color: root.mutedColor
@@ -468,12 +487,6 @@ Popup {
                                 text: "操作"
                                 color: root.mutedColor
                                 font.pixelSize: 11
-                            }
-                            Rectangle {
-                                anchors.bottom: parent.bottom
-                                width: parent.width
-                                height: 1
-                                color: root.borderColor
                             }
                         }
     
@@ -496,6 +509,8 @@ Popup {
                             delegate: Item {
                                 id: keyRow
                                 required property var modelData
+                                /* 表头底下不画线，所以第一条自己那条也关掉（见上面表头） */
+                                required property int index
                                 width: keyList.width
                                 height: root.rowHeight
     
@@ -514,6 +529,7 @@ Popup {
                                         height: 1
                                         color: root.borderColor
                                         opacity: 0.45
+                                        visible: keyRow.index > 0
                                     }
     
                                     /* 命令名 */
@@ -532,7 +548,12 @@ Popup {
                                     Rectangle {
                                         id: keyCell
                                         anchors.left: parent.left
-                                        anchors.leftMargin: 250
+                                        /*
+                                         * 格子往左让出 keyCellInset：文字（下面
+                                         * Text 的 leftMargin 就是它）才会正好落在
+                                         * keyColumnX 那条线上、和表头对齐。
+                                         */
+                                        anchors.leftMargin: root.keyColumnX - root.keyCellInset
                                         anchors.verticalCenter: parent.verticalCenter
                                         width: 168
                                         height: 20
@@ -543,7 +564,7 @@ Popup {
     
                                         Text {
                                             anchors.fill: parent
-                                            anchors.leftMargin: 6
+                                            anchors.leftMargin: root.keyCellInset
                                             verticalAlignment: Text.AlignVCenter
                                             text: keyRow.capturing
                                                   ? "按下新的组合键…"
