@@ -220,6 +220,24 @@ public:
     Q_INVOKABLE QVariantList marginPixelStats() const;
 
     /*
+     * 折叠尖括号位图的边长（逻辑像素）。
+     *
+     * 跟着正文字号走（12px 字号 → 10px），夹在 8~16 之间；折叠栏宽度就是
+     * 它 + 左右各 5px。自检按同一个函数核宽度，避免两处各写一份公式。
+     */
+    Q_INVOKABLE int foldIconSize() const;
+
+    /*
+     * 自检用：两个折叠尖括号位图里墨迹的包围盒，返回
+     *   { 折叠态宽, 折叠态高, 展开态宽, 展开态高 }
+     *
+     * 钉的是方向：折叠态是向右的 "›"（竖着比横着长），展开态是向下的 "⌄"
+     * （横着比竖着长）。位图标记没法从 Scintilla 那边读回形状，所以直接量自己
+     * 画出来的那张图。
+     */
+    Q_INVOKABLE QVariantList foldIconPixelStats() const;
+
+    /*
      * 自检用：参考线在 Scintilla 那边的实际状态（读的是 edge 消息，不是成员变量
      * —— 钉的是"设置真的下发到了内核"）。
      *   rulerEdgeMode   —— 0 = 不画（EDGE_NONE），1 = 竖线（EDGE_LINE）
@@ -631,8 +649,13 @@ private:
      */
     void applyMarginTheme();
 
-    /* 折叠标记的颜色（QScintilla 默认给的是白底黑框，和深色主题不搭） */
-    void themeFoldMarkers();
+    /*
+     * 折叠标记的形状 / 颜色 / 折叠栏宽度（细线尖括号 + 左右各 5px）。
+     *
+     * 必须在 setFolding() **之后**调用：QScintilla 在那里把 7 个折叠标记号配成
+     * 它那套方框（BOXPLUS / VLINE…），这里换成自己画的 "›" / "⌄" 位图。
+     */
+    void applyFoldMarkers();
     QsciLexer *lexerFor(const QString &id);
     void themeLexer(QsciLexer *lexer);
 

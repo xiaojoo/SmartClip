@@ -13,8 +13,11 @@
 #include <QGuiApplication>
 #include <QMenu>
 #include <QPair>
+#include <QPainter>
 #include <QHash>
 #include <QPalette>
+#include <QPixmap>
+#include <QPolygonF>
 #include <QPrintDialog>
 #include <QPrinter>
 #include <QQuickWidget>
@@ -131,6 +134,13 @@ const QColor kGutterLine(0x33, 0x38, 0x40);
  * 要能一眼认出来是人为画的那条。
  */
 const QColor kRulerLine(0x4b, 0x51, 0x5a);
+/*
+ * 折叠箭头两边各留多少空隙。
+ *
+ * 折叠栏宽度 = 箭头宽 + 2 × 这个值（见 applyFoldMarkers）—— 14px 的默认宽度
+ * 在深色主题下箭头贴着行号和分隔线，看着很挤。
+ */
+constexpr int kFoldIconGap = 5;
 const QColor kCaretLineBack(0x26, 0x28, 0x2b);  // 当前行底色
 const QColor kSelectionBack(0x2f, 0x65, 0x9c);  // 选中底色
 /* 深色主题的语法配色（JetBrains 暗色系） */
@@ -605,34 +615,134 @@ void EditorViewItem::applyMarginTheme() {
      */
 }
 
-void EditorViewItem::themeFoldMarkers() {
+/*
+ * 折叠箭头（细线尖括号）的位图。
+ *
+ * 为什么自绘，而不是用 Scintilla 的箭头标记：自带的那两个（SC_MARK_ARROW /
+ * SC_MARK_ARROWDOWN）是**实心三角**（LineMarker.cpp:182 一带），画出来是 ▼ / ▶；
+ * 而这一版 QScintilla 的 FoldStyle 又没有 ArrowFoldStyle（qsciscintilla.h 的
+ * enum 只到 BoxedTreeFoldStyle）。想要"细线尖括号"只能自己画。
+ *
+ * 画好之后走 QsciScintilla::markerDefine(QPixmap, n)：Qt 版的 XPM 类是
+ * "把传进来的指针当 QPixmap 收下"（XPM.cpp:26 的 reinterpret_cast），所以这条路
+ * 是通的 —— 位图被拷进标记里（QPixmap 隐式共享，临时对象也没问题），画的时候在
+ * 边距里居中（PlatQt.cpp:530 DrawXPM）。
+ *
+ * box 是位图边长（逻辑像素），尖括号画在方框正中：down = "⌄"，否则是 "›"。
+ */
+static QPixmap foldChevron(bool down, const QColor &colour, int box)
+{
+    QPixmap pm(box, box);
+    pm.fill(Qt::transparent);
+
+    QPainter p(&pm);
+    p.setRenderHint(QPainter::Antialiasing, true);
+
+    QPen pen(colour);
+    pen.setWidthF(1.6);
+    pen.setCapStyle(Qt::RoundCap);
+    pen.setJoinStyle(Qt::RoundJoin);
+    p.setPen(pen);
+
+    const qreal mid = box / 2.0;
+    const qreal arm = box * 0.30;    // 尖括号张开的一半（横向 / 纵向各一份）
+    const qreal half = arm * 0.6;    // 折点到两端的落差
+    QPolygonF poly;
+    if (down) {
+        poly << QPointF(mid - arm, mid - half)
+             << QPointF(mid, mid + half)
+             << QPointF(mid + arm, mid - half);
+    } else {
+        poly << QPointF(mid - half, mid - arm)
+             << QPointF(mid + half, mid)
+             << QPointF(mid - half, mid + arm);
+    }
+    p.drawPolyline(poly);
+    return pm;
+}
+
+/*
+ * 折叠标记：向右 / 向下的细线尖括号，不带方框、不带树线，左右各留 5px。
+ *
+ * setFolding() 该做的都做了（边距类型 = SC_MARGIN_SYMBOL、掩码 = SC_MASK_FOLDERS、
+ * 可点击、7 个折叠标记号都配好），紧随其后把这些标记号换成自己要的样子：
+ *
+ *   FOLDER / FOLDEREND          折叠着的那一行 -> "›"
+ *   FOLDEROPEN / FOLDEROPENMID  展开着的那一行 -> "⌄"
+ *   FOLDERSUB / FOLDERTAIL / FOLDERMIDTAIL  折块内部的树线 -> 空白
+ *
+ * 位图标记的颜色是画进位图里的（跟着箭头的颜色走），所以不用再设
+ * SCI_MARKERSETFORE / BACK。
+ */
+void EditorViewItem::applyFoldMarkers() {
     if (!m_sci)
         return;
 
-    const long paper = scColor(m_paperColor);
-    const long line = scColor(QColor(0x5c, 0x60, 0x66));   // 树线（竖线 / 拐角）
-    const long box = scColor(QColor(0x9a, 0xa0, 0xa8));    // 折叠方块与 +/- 号
+    const int box = foldIconSize();
+    const QPixmap closed = foldChevron(false, QColor(0x9a, 0xa0, 0xa8), box);
+    const QPixmap open = foldChevron(true, QColor(0x9a, 0xa0, 0xa8), box);
 
-    /* QScintilla 默认把标记画成白底黑框，深色主题下很刺眼，这里按主题重设 */
-    const int treeMarks[] = {QsciScintillaBase::SC_MARKNUM_FOLDERSUB,
-                             QsciScintillaBase::SC_MARKNUM_FOLDERTAIL,
-                             QsciScintillaBase::SC_MARKNUM_FOLDERMIDTAIL};
-    for (int m : treeMarks) {
-        m_sci->SendScintilla(QsciScintillaBase::SCI_MARKERSETFORE, long(m), line);
-        m_sci->SendScintilla(QsciScintillaBase::SCI_MARKERSETBACK, long(m), paper);
-    }
+    const struct {
+        int mark;
+        long shape;
+    } kPlainShapes[] = {
+        {QsciScintillaBase::SC_MARKNUM_FOLDERSUB,     QsciScintillaBase::SC_MARK_EMPTY},
+        {QsciScintillaBase::SC_MARKNUM_FOLDERTAIL,    QsciScintillaBase::SC_MARK_EMPTY},
+        {QsciScintillaBase::SC_MARKNUM_FOLDERMIDTAIL, QsciScintillaBase::SC_MARK_EMPTY},
+    };
+    for (const auto &s : kPlainShapes)
+        m_sci->SendScintilla(QsciScintillaBase::SCI_MARKERDEFINE, long(s.mark), s.shape);
 
-    const int boxMarks[] = {QsciScintillaBase::SC_MARKNUM_FOLDER,
-                            QsciScintillaBase::SC_MARKNUM_FOLDEROPEN,
-                            QsciScintillaBase::SC_MARKNUM_FOLDEREND,
-                            QsciScintillaBase::SC_MARKNUM_FOLDEROPENMID};
-    for (int m : boxMarks) {
-        m_sci->SendScintilla(QsciScintillaBase::SCI_MARKERSETBACK, long(m), box);
-        m_sci->SendScintilla(QsciScintillaBase::SCI_MARKERSETFORE, long(m), m_paperColor);
-        /* 悬停 / 按下时用强调色，鼠标扫过时能看出可以点 */
-        m_sci->SendScintilla(QsciScintillaBase::SCI_MARKERSETBACKSELECTED, long(m),
-                             0x4c96d8);
-    }
+    m_sci->markerDefine(closed, QsciScintillaBase::SC_MARKNUM_FOLDER);
+    m_sci->markerDefine(closed, QsciScintillaBase::SC_MARKNUM_FOLDEREND);
+    m_sci->markerDefine(open, QsciScintillaBase::SC_MARKNUM_FOLDEROPEN);
+    m_sci->markerDefine(open, QsciScintillaBase::SC_MARKNUM_FOLDEROPENMID);
+
+    /*
+     * 边距宽度 = 箭头宽 + 左右各 5px。
+     *
+     * 位图标记是**居中**画的（PlatQt.cpp:530：x = rc.left + (rc.Width() - 位图宽)/2），
+     * 所以边距比位图宽出 10px，箭头两边就各是 5px。位图边长跟着字号走
+     * （见 foldIconSize），换字号时这里跟着重算。
+     */
+    if (m_folding)
+        m_sci->setMarginWidth(1, box + 2 * kFoldIconGap);
+}
+
+int EditorViewItem::foldIconSize() const {
+    /*
+     * 12px 字号 → 10px 的尖括号；字号放大 / 缩小它跟着走，夹在 8~16 之间
+     * （再小看不清，再大就比行高还高了）。
+     */
+    return qBound(8, qRound(m_fontPixelSize * 0.8), 16);
+}
+
+QVariantList EditorViewItem::foldIconPixelStats() const {
+    const int box = foldIconSize();
+    const QImage closed = foldChevron(false, QColor(0x9a, 0xa0, 0xa8), box).toImage();
+    const QImage open = foldChevron(true, QColor(0x9a, 0xa0, 0xa8), box).toImage();
+
+    /* 量墨迹的包围盒（透明底上 alpha > 0 的像素） */
+    auto inkBounds = [](const QImage &img) {
+        int minX = img.width(), maxX = -1, minY = img.height(), maxY = -1;
+        for (int y = 0; y < img.height(); ++y) {
+            for (int x = 0; x < img.width(); ++x) {
+                if (qAlpha(img.pixel(x, y)) > 0) {
+                    minX = qMin(minX, x);
+                    maxX = qMax(maxX, x);
+                    minY = qMin(minY, y);
+                    maxY = qMax(maxY, y);
+                }
+            }
+        }
+        if (maxX < 0)
+            return QPair<int, int>(0, 0);
+        return QPair<int, int>(maxX - minX + 1, maxY - minY + 1);
+    };
+
+    const QPair<int, int> c = inkBounds(closed);
+    const QPair<int, int> o = inkBounds(open);
+    return QVariantList{c.first, c.second, o.first, o.second};
 }
 
 /*
@@ -1163,7 +1273,7 @@ void EditorViewItem::applyMargins() {
                          m_gutterLine ? 1L : 0L);
 
     /* 颜色最后压：装 lexer 时那次 STYLECLEARALL 会把行号样式刷回白底 */
-    themeFoldMarkers();
+    applyFoldMarkers();
     applyMarginTheme();
 }
 

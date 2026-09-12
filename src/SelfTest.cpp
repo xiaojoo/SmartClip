@@ -417,6 +417,42 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store) {
           QStringLiteral("实际 %1").arg(view->marginWidth(1)));
 
     /*
+     * 折叠栏宽度 = 箭头宽 + 左右各 5px。
+     *
+     * 位图标记是画在边距正中的（PlatQt.cpp 的 DrawXPM），所以"左右各 5px"落到
+     * 宽度上就是 图标边长 + 10；曾经 14px 的默认宽度（QScintilla 那个
+     * defaultFoldMarginWidth）就是在这里被卡住的。
+     */
+    {
+        const int expected = view->foldIconSize() + 10;
+        check(qAbs(view->marginWidth(1) - expected) <= 1,
+              QStringLiteral("折叠栏宽度 = 尖括号宽 + 左右各 5px"),
+              QStringLiteral("图标 %1 → 期望 %2，实际 %3")
+                  .arg(view->foldIconSize()).arg(expected).arg(view->marginWidth(1)));
+    }
+
+    /*
+     * 尖括号的方向：折叠态向右 "›"、展开态向下 "⌄"。
+     *
+     * 位图标记的形状没法从 Scintilla 那边读回来，所以直接量自己画的那两张图：
+     * 向右的竖着比横着长，向下的横着比竖着长。方框标记（原来那套 +/- 方块）
+     * 在这里是正方的，这条能当场抓住"又退回方框了"。
+     */
+    {
+        const QVariantList icon = view->foldIconPixelStats();
+        const int cw = icon.value(0).toInt(), ch = icon.value(1).toInt();
+        const int ow = icon.value(2).toInt(), oh = icon.value(3).toInt();
+        out() << "        （折叠箭头墨迹：折叠态 " << cw << "x" << ch
+              << "，展开态 " << ow << "x" << oh << "）" << Qt::endl;
+        check(cw > 0 && ch > cw,
+              QStringLiteral("折叠状态画成向右的尖括号 ›（竖着比横着长）"),
+              QStringLiteral("实际 %1x%2").arg(cw).arg(ch));
+        check(ow > oh,
+              QStringLiteral("展开状态画成向下的尖括号 ⌄（横着比竖着长）"),
+              QStringLiteral("实际 %1x%2").arg(ow).arg(oh));
+    }
+
+    /*
      * 紧贴正文左边那条分隔竖线（第 2 条边距，也是最后一条）。
      *
      * 宽度 1px、底色是**分隔色**而不是编辑区底色 —— 边距背景整列一次填满，
