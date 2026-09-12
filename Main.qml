@@ -7,6 +7,7 @@ import "qml/models"
 import "qml/utils"
 import "js/FolderManager.js" as Folders
 import "js/TimeUtils.js" as Time
+import "js/EditorMenus.js" as Menus
 /*
  * 点击条目 / 菜单里的"复制"都要回填系统剪贴板。
  *
@@ -267,11 +268,19 @@ Rectangle {
         }
     }
 
-    function closeOtherTabs() {
-        var keep = view.currentIndex
+    /*
+     * 关掉除 index 之外的标签。
+     *
+     * index 不给就是"当前标签"（菜单栏 / 快捷键那条路的语义）；
+     * 标签右键菜单会传**点中的那一个** —— 右键点的标签未必是激活的，
+     * 不传的话"关闭其他"会把用户刚点的那一个也关掉。
+     */
+    function closeOtherTabs(index) {
+        if (index === undefined || index === null)
+            index = view.currentIndex
         var rest = []
         for (var i = 0; i < view.documents.length; ++i)
-            if (i !== keep) rest.push(i)
+            if (i !== index) rest.push(i)
         closeTabs(rest)
     }
 
@@ -290,6 +299,41 @@ Rectangle {
             if (!saveFile())
                 return
         }
+    }
+
+    /*
+     * 内容区 tab 上的右键菜单。
+     *
+     * 落点和菜单栏那套不一样：菜单栏是 openFor（挂在控件正下方），
+     * 这里是 openAtPoint —— 菜单左上角紧贴鼠标右键的那一点。
+     * 条目见 js/EditorMenus.js 的 tabMenu（关闭 / 关闭其他 / 关闭全部）。
+     */
+    function openTabMenu(index, anchor, x, y) {
+        ddMenu.openAtPoint(anchor, x, y, Menus.tabMenu(view, index, shortcutOverrides()))
+    }
+
+    /* name -> 当前生效的快捷键。菜单里写的是出厂默认值，改过键的要以这份为准 */
+    function shortcutOverrides() {
+        var ov = ({})
+        for (var i = 0; i < shortcutItems.length; ++i) {
+            var item = shortcutItems[i]
+            if (item && item.name)
+                ov[item.name] = item.shortcut
+        }
+        return ov
+    }
+
+    /*
+     * tab 右键菜单里那几条的动作名（自检核对用，见 src/SelfTest.cpp）。
+     *
+     * 走的是和 openTabMenu 完全同一份构造：断言里看到的条目就是菜单里弹出的条目。
+     */
+    function tabMenuActs(index) {
+        var items = Menus.tabMenu(view, index === undefined ? 0 : index, shortcutOverrides())
+        var out = []
+        for (var i = 0; i < items.length; ++i)
+            out.push(items[i] && items[i].act !== undefined ? String(items[i].act) : "separator")
+        return out
     }
 
     function showFind(replace) {
@@ -363,6 +407,15 @@ Rectangle {
         if (act.indexOf("eol:") === 0) { view.eolMode = act.substring(4); return }
         if (act.indexOf("menu:") === 0) { topBar.openGroup(act.substring(5)); return }
         if (act.indexOf("folder:") === 0) { activateFolder(act.substring(7)); return }
+        /*
+         * 带下标的标签动作（tab 右键菜单用，见 openTabMenu）。
+         * 作用在"被右键的那一个"标签上，而不是当前标签。
+         */
+        if (act.indexOf("closeTab:") === 0) { closeTab(parseInt(act.substring(9))); return }
+        if (act.indexOf("closeOthers:") === 0) {
+            closeOtherTabs(parseInt(act.substring(12)))
+            return
+        }
 
         /* ---- 文件 ---- */
         if (act === "new") { newFile(); return }
@@ -421,6 +474,27 @@ Rectangle {
         if (act === "about") { showAbout(); return }
     }
 
+    /*
+     * 菜单真正画在宿主窗口里的左上角（给自检量，见 uiState 的 menuX / menuY）。
+     *
+     * 为什么不直接读 ddMenu.x：菜单是 popupType: Popup.Window，它有**自己的
+     * 原生窗口**（原因见 DropdownMenu.qml 开头）—— 弹窗内容在自己那个窗口里
+     * 就画在 (0,0)，水平位置全在窗口几何上，读 x/y 永远是 0（实测就是这样，
+     * 自检一开始读出 (0,0)）。所以改成用屏幕坐标反推：
+     *
+     *     可见菜单左上角(全局) - 宿主窗口左上角(全局)
+     *
+     * 取的是 background 而不是 contentItem：菜单可见的那块矩形就是 background
+     * （margins: 0，正好铺满弹窗），contentItem 按 padding 内缩了 4px。
+     */
+    function menuTopLeft() {
+        if (!ddMenu.opened || !ddMenu.background)
+            return Qt.point(0, 0)
+        var a = ddMenu.background.mapToGlobal(0, 0)
+        var b = window.mapToGlobal(0, 0)
+        return Qt.point(a.x - b.x, a.y - b.y)
+    }
+
     /* 菜单栏 / 旧接口名 */
     function handleCommand(act) { dispatch(act) }
 
@@ -447,6 +521,16 @@ Rectangle {
             menuHasIcons: ddMenu.hasIcons,
 
             /*
+             * 内容区 tab 的右键菜单落在哪。
+             *
+             * 取的是菜单**实际画在窗口里**的那个左上角（menuTopLeft：弹窗是独立
+             * 原生窗口，读 ddMenu.x 只会得到 0），自检把同一个点传给 openTabMenu，
+             * 再拿这里的值对齐 —— 要的就是"菜单左上角紧贴鼠标右键那一点"。
+             */
+            menuX: window.menuTopLeft().x,
+            menuY: window.menuTopLeft().y,
+
+            /*
              * 分隔线热区的纵向范围（自检里量它有没有越界）。
              *
              * splitterTop / splitterBottom 必须和中间行（midRow）的上下边界
@@ -459,6 +543,7 @@ Rectangle {
             midRowBottom: window.mapFromItem(midRow, 0, 0).y + midRow.height,
             topBarHeight: topBar.height,
             statusBarHeight: statusBar.height,
+            windowWidth: window.width,
             windowHeight: window.height
         }
     }
@@ -811,6 +896,12 @@ Rectangle {
                 onTabCloseAllRequested: window.closeAllTabs()
                 onNewTabRequested: window.newFile()
                 onClipboardRefreshRequested: window.refresh()
+                /*
+                 * tab 右键菜单：把"被右键的标签 + 鼠标在标签里的坐标"转给
+                 * openTabMenu —— 菜单左上角要落在鼠标那一点上。
+                 */
+                onTabContextMenuRequested: (index, anchor, x, y) =>
+                    window.openTabMenu(index, anchor, x, y)
             }
         }
 

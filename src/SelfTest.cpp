@@ -116,6 +116,14 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store) {
         return result.toMap();
     };
 
+    /* 读 tab 右键菜单的条目清单（见 Main.qml 的 tabMenuActs，和弹出的是同一份构造） */
+    auto tabMenuActs = [qmlRoot](int index) {
+        QVariant result;
+        QMetaObject::invokeMethod(qmlRoot, "tabMenuActs", Q_RETURN_ARG(QVariant, result),
+                                  Q_ARG(QVariant, QVariant(index)));
+        return result.toList();
+    };
+
     QDir dir(QDir::tempPath() + QStringLiteral("/smartclip-selftest"));
     dir.removeRecursively();
     dir.mkpath(QStringLiteral("."));
@@ -704,6 +712,87 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store) {
     dispatch(QStringLiteral("closeAllTabs"));
     check(view->documents().isEmpty(), QStringLiteral("closeAllTabs 之后没有标签"));
     check(!view->hasDocument(), QStringLiteral("空状态：hasDocument = false"));
+
+    /*
+     * ================= 内容区 tab 的右键菜单 =================
+     *
+     * 两件事要钉住：
+     *
+     *  1) 菜单里的动作是按**被右键的那个标签**来的，不是当前激活的那个。
+     *     右键一个没激活的标签时两者不是同一个，"关闭其他"要留下点中的那个、
+     *     关掉其余的全部；动错标签就是这个功能最典型的 bug。
+     *     这里用"文件标签 + 空白标签"两种标签来分辨：文件标签有 filePath、
+     *     空白标签没有，关错了从 filePath 上一眼就能看出来。
+     *
+     *  2) 菜单左上角紧贴鼠标右键那一点（DropdownMenu.openAtPoint）。
+     *     这条只能量：菜单 x/y 必须正好等于传进去的坐标。
+     */
+    check(view->openFile(srcPath) >= 0, QStringLiteral("tab 菜单用例：打开文件标签"));
+    dispatch(QStringLiteral("new"));
+    check(view->documents().size() == 2, QStringLiteral("tab 菜单用例：文件标签 + 空白标签"),
+          QStringLiteral("实际 %1 个").arg(view->documents().size()));
+
+    /* closeTab:<i>：关的是下标 0 那个（文件），当前标签是 1（空白） */
+    dispatch(QStringLiteral("closeTab:0"));
+    check(view->documents().size() == 1, QStringLiteral("closeTab:0 只关掉一个标签"),
+          QStringLiteral("剩 %1 个").arg(view->documents().size()));
+    check(view->filePath().isEmpty(),
+          QStringLiteral("关掉的是下标 0 那个文件标签，活下来的是空白标签"),
+          view->filePath());
+
+    /* closeOthers:<i>：留下的是下标 1（文件），当前标签是下标 2 */
+    check(view->openFile(srcPath) >= 0, QStringLiteral("tab 菜单用例：再打开文件标签"));
+    dispatch(QStringLiteral("new"));
+    check(view->documents().size() == 3 && view->currentIndex() == 2,
+          QStringLiteral("tab 菜单用例：三个标签，当前的不是要留下的那个"),
+          QStringLiteral("共 %1 个 / 当前下标 %2")
+              .arg(view->documents().size()).arg(view->currentIndex()));
+
+    dispatch(QStringLiteral("closeOthers:1"));
+    check(view->documents().size() == 1, QStringLiteral("closeOthers:1 只留一个标签"),
+          QStringLiteral("剩 %1 个").arg(view->documents().size()));
+    check(view->filePath() == QFileInfo(srcPath).absoluteFilePath(),
+          QStringLiteral("留下的是下标 1 那个文件标签（不是当前标签）"), view->filePath());
+
+    /* 菜单条目：三条，下标跟着"被右键的那个标签"走（这里问的是下标 1） */
+    {
+        QString acts;
+        const QVariantList list = tabMenuActs(1);
+        for (const QVariant &a : list)
+            acts += (acts.isEmpty() ? QString() : QStringLiteral(" | ")) + a.toString();
+        check(acts == QStringLiteral("closeTab:1 | closeOthers:1 | closeAllTabs"),
+              QStringLiteral("tab 菜单 = 关闭 / 关闭其他 / 关闭全部，下标是点中的那个"),
+              acts);
+    }
+
+    /*
+     * 左上角就落在鼠标那一点上。
+     *
+     * anchor 传 null：坐标直接按宿主窗口内容区算，自检不用真的去点某个标签
+     * （标签当锚点时走的是同一行 mapToItem，和菜单栏那套 openFor 共用）。
+     * 菜单开着不动它：和下面那组长菜单检查一样，进程随后就退出了。
+     */
+    const double probeX = 300.0;
+    const double probeY = 120.0;
+    QMetaObject::invokeMethod(qmlRoot, "openTabMenu",
+                              Q_ARG(QVariant, QVariant(0)),
+                              Q_ARG(QVariant, QVariant()),
+                              Q_ARG(QVariant, QVariant(probeX)),
+                              Q_ARG(QVariant, QVariant(probeY)));
+    {
+        const QVariantMap ui = uiState();
+        const double mx = ui.value(QStringLiteral("menuX")).toDouble();
+        const double my = ui.value(QStringLiteral("menuY")).toDouble();
+        const double contentH = ui.value(QStringLiteral("menuContentHeight")).toDouble();
+        check(ui.value(QStringLiteral("menuOpened")).toBool(),
+              QStringLiteral("openTabMenu 弹出菜单（tab 右键那条路）"));
+        check(qAbs(mx - probeX) < 0.5 && qAbs(my - probeY) < 0.5,
+              QStringLiteral("菜单左上角紧贴鼠标点（300,120）"),
+              QStringLiteral("实际 (%1, %2)").arg(mx).arg(my));
+        check(qAbs(contentH - 92.0) < 0.5,
+              QStringLiteral("菜单里就是 tab 那三条（3×28 + 8 内边距）"),
+              QStringLiteral("内容高 %1").arg(contentH));
+    }
 
     /*
      * 长下拉菜单必须限高 + 可滚动。

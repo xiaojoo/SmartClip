@@ -136,6 +136,37 @@ Popup {
         root.open()
     }
 
+    /*
+     * 在**鼠标那一点**打开：菜单左上角紧贴 (px, py)（内容区 tab 的右键菜单）。
+     *
+     * 和 openFor 是一件事的两种落点：
+     *   openFor      锚一个控件，菜单挂在它的正下方（菜单栏 tab / 工具栏按钮）；
+     *   openAtPoint  锚一个坐标，菜单左上角就压在右键按下的那一点上。
+     *
+     * (px, py) 是 anchor 的本地坐标（右键事件里的 mouse.x / mouse.y），
+     * 先换算成宿主窗口内容区坐标 —— Popup 的 x/y 要的是宿主坐标，不是屏幕
+     * 坐标（原因见 openFor 上面的说明）。anchor 传 null 时按宿主坐标直接用。
+     *
+     * 只有贴边放不下时才往回收：右边 / 下边分别夹进宿主窗口。
+     * 弹窗是独立原生窗口，伸到窗口外面不会被裁掉，但那几条就点不到了。
+     * 一般位置（tab 在窗口上半部分，右边还留着菜单宽度）夹取不生效，
+     * 左上角就是鼠标那一点。
+     *
+     * 先算好坐标再 open()，和 openFor 一样：不在打开之后二次移动，
+     * 否则会闪一下"初始位置的菜单"再跳到鼠标这里。
+     */
+    function openAtPoint(anchor, px, py, items) {
+        entries = items
+        list.contentY = 0
+
+        var host = root.parent
+        var p = anchor ? anchor.mapToItem(host, px, py) : Qt.point(px, py)
+
+        root.x = Math.round(Math.max(2, Math.min(p.x, host.width - menuWidth - 4)))
+        root.y = Math.round(Math.max(2, Math.min(p.y, host.height - menuHeight - 4)))
+        root.open()
+    }
+
     contentItem: Item {
         Flickable {
             id: list

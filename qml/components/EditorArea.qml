@@ -44,6 +44,15 @@ Rectangle {
     signal newTabRequested()
     signal clipboardRefreshRequested()
 
+    /*
+     * tab 上的右键菜单（由 Main.qml 的 openTabMenu 弹出）。
+     *
+     * menuAnchor 传的是**那个标签本身**（不是整个 tab 栏），(x, y) 是右键那一点
+     * 在标签里的本地坐标：菜单要按它们换算成窗口坐标，让左上角紧贴鼠标那一点
+     * （见 DropdownMenu.openAtPoint 与 openFor 的坐标口径说明）。
+     */
+    signal tabContextMenuRequested(int index, var menuAnchor, real x, real y)
+
     readonly property color barBg: "#1e1f22"
     readonly property color editorBg: "#1e1f22"
     readonly property color borderColor: "#4b4d4f"
@@ -211,11 +220,29 @@ Rectangle {
                                     id: tabHit
                                     anchors.fill: parent
                                     hoverEnabled: true
+                                    /*
+                                     * 右键也收：tab 上的右键菜单（关闭 / 关闭其他 /
+                                     * 关闭全部）走下面 onClicked 的 RightButton 分支。
+                                     *
+                                     * 关掉那个小叉的 MouseArea 不用管：它没写
+                                     * acceptedButtons（默认只有左键），右键在它上面
+                                     * 不会被吃掉，照样落到这一层来。
+                                     */
                                     acceptedButtons: Qt.LeftButton | Qt.MiddleButton
+                                                     | Qt.RightButton
                                     cursorShape: Qt.PointingHandCursor
                                     onClicked: (mouse) => {
                                         if (mouse.button === Qt.MiddleButton)
                                             root.tabCloseRequested(tabItem.modelData.index)
+                                        else if (mouse.button === Qt.RightButton)
+                                            /*
+                                             * 坐标用的是事件里的 mouse.x / mouse.y：
+                                             * tabHit 是 anchors.fill 标签的，两者同一套
+                                             * 坐标，所以直接把标签当锚点传出去。
+                                             */
+                                            root.tabContextMenuRequested(
+                                                tabItem.modelData.index, tabItem,
+                                                mouse.x, mouse.y)
                                         else
                                             root.view.activateDocument(tabItem.modelData.index)
                                     }

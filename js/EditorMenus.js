@@ -313,6 +313,34 @@ function helpMenu(ov) {
     ], ov)
 }
 
+/*
+ * 内容区标签栏的右键菜单（点 tab 弹出，见 qml/components/EditorArea.qml）。
+ *
+ * index 是**右键点中的那个**标签，不是当前激活的那个 —— 右键一个没激活的
+ * 标签时两者不是同一个，"关闭其他"必须以点中的为基准，否则会把用户刚点的
+ * 那一个一起关掉。所以这里用带下标的动作 closeTab:<i> / closeOthers:<i>，
+ * 由 Main.qml 的 dispatch 解析（纯命令名的 closeTab / closeOtherTabs
+ * 仍然是"当前标签"，菜单栏和快捷键走那条）。
+ *
+ * 只有关闭类命令：保存 / 另存为这些作用在"当前文档"上，而右键点的标签
+ * 未必是当前那个，放进来会动错文件。
+ */
+function tabMenu(view, index, ov) {
+    var count = (view && view.documents) ? view.documents.length : 0
+    var has = index >= 0 && index < count
+    /* 快捷键显示值跟用户改过的走（closeTab 在可改键清单里） */
+    var closeKey = (ov && typeof ov["closeTab"] === "string" && ov["closeTab"] !== "")
+                   ? ov["closeTab"] : "Ctrl+W"
+    return [
+        { label: "关闭", act: "closeTab:" + index, shortcut: closeKey, icon: "close",
+          disabled: !has },
+        { label: "关闭其他", act: "closeOthers:" + index, icon: "close",
+          disabled: !has || count < 2 },
+        { label: "关闭全部", act: "closeAllTabs", icon: "trash",
+          disabled: count < 1 }
+    ]
+}
+
 /* 菜单栏 tab */
 function tabLabels() {
     return ["文件", "编辑", "搜索", "视图", "语言", "编码", "换行", "设置", "帮助"]
