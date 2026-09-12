@@ -80,6 +80,35 @@ Rectangle {
 
     IconProvider { id: icons }
 
+    /*
+     * tab 栏和顶上那条横向滚动条的几何（自检读它，见 src/SelfTest.cpp）。
+     *
+     * 要钉的是"横条有没有压到容器圆角上"：
+     *   scrollLeft 和 width - scrollRight 都不能小于容器圆角半径，
+     *   scrollBottom 要在标签上沿（stripTop）之上 —— 横条不能盖住标签。
+     */
+    function tabBarState() {
+        return {
+            height: tabBar.height,
+            width: tabBar.width,
+            cornerRadius: tabBar.cornerRadius,
+            stripTop: tabScroll.mapToItem(tabBar, 0, 0).y,
+            stripHeight: tabScroll.height,
+            scrollShown: tabBar.scrollShown,
+            /* 自检诊断用：横条自己算出来的比例 / Flickable 的内容宽 */
+            scrollSize: tabScrollBar.size,
+            scrollPosition: tabScrollBar.position,
+            scrollVisible: tabScrollBar.visible,
+            flickWidth: tabScroll.width,
+            flickContent: tabScroll.contentWidth,
+            scrollLeft: tabScrollBar.x,
+            scrollRight: tabScrollBar.x + tabScrollBar.width,
+            scrollTop: tabScrollBar.y,
+            scrollBottom: tabScrollBar.y + tabScrollBar.height,
+            tabs: root.view.documents.length
+        }
+    }
+
     function imageSource() {
         if (!root.previewItem || root.previewItem.type !== "image")
             return ""
@@ -102,7 +131,31 @@ Rectangle {
         Rectangle {
             id: tabBar
 
+            /*
+             * 标签栏两个上角的圆角。
+             *
+             * 这个值同时是**顶部那条横向滚动条左右要让开的量**（见下面
+             * ScrollBar 的 left / rightMargin）：横条伸进这段圆角里，
+             * 就会把那两刀圆角啃成直角。两边用同一个常量，改一处就对齐。
+             */
+            readonly property real cornerRadius: 10
+
+            /*
+             * tab 撑满容器了吗 —— 也就是顶上那条横向滚动条要不要出现。
+             *
+             * 直接问滚动条自己（ThinScrollBar 里就是 visible: size < 1.0），
+             * 不在这里另算一遍"总宽 > 容器宽"：同一件事算两份迟早对不上。
+             */
+            readonly property bool scrollShown: tabScrollBar.visible
+
             Layout.fillWidth: true
+            /*
+             * 高度始终是 35px，**滚动条出现时也不长高**。
+             *
+             * 那条横条是浮在标签栏最顶上 3px 里的（正好落在标签原有的 3px
+             * 上边距那条缝里，谁也不碰）：不占高度，标签和下面编辑区都不会
+             * 因为标签撑满了而挪一下。
+             */
             Layout.preferredHeight: 35
             visible: root.hasTabs
             color: root.barBg
@@ -113,8 +166,8 @@ Rectangle {
              * Qt Quick 的 clip 只按矩形裁剪、radius 不参与裁剪，
              * 所以 root 的 radius: 10 挡不住这个铺满顶部的直角矩形。
              */
-            topLeftRadius: 10
-            topRightRadius: 10
+            topLeftRadius: cornerRadius
+            topRightRadius: cornerRadius
 
             RowLayout {
                 anchors.fill: parent
@@ -136,6 +189,46 @@ Rectangle {
                     clip: true
                     boundsBehavior: Flickable.StopAtBounds
                     interactive: contentWidth > width
+
+                    /*
+                     * 横向滚动条：浮在标签栏最顶上，**不占高度**。
+                     *
+                     * 落点正好是标签原来那 3px 上边距：横条 3px 高、贴着容器
+                     * 顶边，标签还是从 y=3 开始 —— 横条出现 / 消失都不会把
+                     * 标签栏撑高，标签和下面的编辑区都不动。
+                     *
+                     * 为什么这样能挪到顶上：附加属性的自动摆放只认"父项就是
+                     * Flickable"的横条 —— Qt 的 layoutHorizontal() 第一行就是
+                     * `if (horizontal->parentItem() != flickable) return;`。
+                     * 这里给它另指一个 parent（标签栏本身），自动摆放就此关掉、
+                     * 位置归下面的 anchors；而 size / position / active / 拖动时
+                     * 回写 contentX 都是另外接的信号，照样生效。
+                     *
+                     * 左右各让开容器圆角那么多：横条就压在圆角那一刀的高度上，
+                     * 不让开就会把圆角啃成直角。
+                     */
+                    ScrollBar.horizontal: ThinScrollBar {
+                        id: tabScrollBar
+
+                        parent: tabBar
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.top: parent.top
+                        anchors.leftMargin: tabBar.cornerRadius
+                        anchors.rightMargin: tabBar.cornerRadius
+                        anchors.topMargin: 0
+                        height: 3
+                        /*
+                         * 这个 0 不能省。
+                         *
+                         * Fusion 样式的 ScrollBar 自带 padding: 2（见
+                         * .../qml/QtQuick/Controls/Fusion/ScrollBar.qml），
+                         * 横条的滑块高 = 高度 - 上下 padding —— 3px 的条会被
+                         * 它挤成负数（贴成一条看不见的线）。ThinScrollBar 的
+                         * 滑块是自己画的一个矩形，不需要样式那圈内边距。
+                         */
+                        padding: 0
+                    }
 
                     Row {
                         id: tabRow

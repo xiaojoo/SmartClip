@@ -810,6 +810,110 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store) {
     check(!view->hasDocument(), QStringLiteral("空状态：hasDocument = false"));
 
     /*
+     * ============ tab 撑满容器：顶上那条横向滚动条 ============
+     *
+     * 标签多到装不下时，标签栏顶部要出现一条横向滚动条（见 EditorArea 的
+     * ScrollBar.horizontal），而且：
+     *
+     *   * 没撑满时不出现；
+     *   * **出现时也不许把标签栏撑高**（不占高度）：标签栏始终 35px、标签始终
+     *     29px 高、标签上沿始终在 y=3 —— 那条横条是浮在标签原有的 3px 上边距
+     *     里的，标签和下面的编辑区都不该挪一下；
+     *   * 横条左右要让开容器圆角半径那么多，否则会把圆角啃成直角；
+     *   * 横条整个在标签上沿之上，不盖住标签。
+     *
+     * 标签宽 132（短标题取最小值）、间距 3：9 个就撑满（1104px 的标签区）。
+     */
+    {
+        /* 先开两个：没撑满，应该没有横条 */
+        dispatch(QStringLiteral("new"));
+        dispatch(QStringLiteral("new"));
+        const QVariantMap small = uiState().value(QStringLiteral("tabBar")).toMap();
+        check(!small.value(QStringLiteral("scrollShown")).toBool(),
+              QStringLiteral("两个标签：没撑满，顶部没有滚动条"),
+              QStringLiteral("%1 个标签 / 高 %2")
+                  .arg(small.value(QStringLiteral("tabs")).toInt())
+                  .arg(small.value(QStringLiteral("height")).toDouble()));
+        check(qAbs(small.value(QStringLiteral("height")).toDouble() - 35.0) < 0.5,
+              QStringLiteral("标签栏是 35px"),
+              QStringLiteral("实际 %1").arg(small.value(QStringLiteral("height")).toDouble()));
+        check(qAbs(small.value(QStringLiteral("stripHeight")).toDouble() - 29.0) < 0.5,
+              QStringLiteral("两个标签时标签高度 29px"),
+              QStringLiteral("实际 %1").arg(small.value(QStringLiteral("stripHeight")).toDouble()));
+        const double smallStripTop = small.value(QStringLiteral("stripTop")).toDouble();
+
+        /* 再开到 12 个：撑满了，横条出现 */
+        for (int i = 0; i < 10; ++i)
+            dispatch(QStringLiteral("new"));
+
+        /*
+         * 等 QML 把标签重新摆一遍再量。
+         *
+         * 上面那串 dispatch 是同步返回的：文档已经加进去了，但标签的宽度
+         * （Row 的宽度 -> contentWidth）要等这一轮布局跑完才是新的，
+         * 滚动条的比例也是跟着 visibleArea 才更新的。不等的话量到的是
+         * 上一次布局的旧值（实测量到 278，是只有两个标签时的宽度）。
+         */
+        for (int i = 0; i < 3; ++i)
+            QCoreApplication::processEvents();
+
+        const QVariantMap big = uiState().value(QStringLiteral("tabBar")).toMap();
+        const double h = big.value(QStringLiteral("height")).toDouble();
+        const double w = big.value(QStringLiteral("width")).toDouble();
+        const double radius = big.value(QStringLiteral("cornerRadius")).toDouble();
+        const double stripTop = big.value(QStringLiteral("stripTop")).toDouble();
+        const double stripH = big.value(QStringLiteral("stripHeight")).toDouble();
+        const double left = big.value(QStringLiteral("scrollLeft")).toDouble();
+        const double right = big.value(QStringLiteral("scrollRight")).toDouble();
+        const double barTop = big.value(QStringLiteral("scrollTop")).toDouble();
+        const double barBottom = big.value(QStringLiteral("scrollBottom")).toDouble();
+        const QString geom = QStringLiteral("栏 %1x%2 圆角 %3 / 横条 x %4..%5 y %6..%7 / 标签 %8..%9"
+                                            " / size %10 pos %11 可见 %12 / Flickable %13 内容 %14")
+                                 .arg(w).arg(h).arg(radius).arg(left).arg(right)
+                                 .arg(barTop).arg(barBottom).arg(stripTop)
+                                 .arg(stripTop + stripH)
+                                 .arg(big.value(QStringLiteral("scrollSize")).toDouble())
+                                 .arg(big.value(QStringLiteral("scrollPosition")).toDouble())
+                                 .arg(big.value(QStringLiteral("scrollVisible")).toBool())
+                                 .arg(big.value(QStringLiteral("flickWidth")).toDouble())
+                                 .arg(big.value(QStringLiteral("flickContent")).toDouble());
+
+        check(big.value(QStringLiteral("scrollShown")).toBool(),
+              QStringLiteral("12 个标签：撑满了，顶部出现横向滚动条"),
+              QStringLiteral("%1 个标签").arg(big.value(QStringLiteral("tabs")).toInt()));
+        /*
+         * 不占高度这条是重点：撑满之后标签栏高度、标签高度、标签上沿
+         * 都必须和没撑满时一模一样。
+         */
+        check(qAbs(h - small.value(QStringLiteral("height")).toDouble()) < 0.5,
+              QStringLiteral("横条出现时标签栏没被撑高（还是 35px）"), geom);
+        check(qAbs(stripTop - smallStripTop) < 0.5,
+              QStringLiteral("标签上沿没挪（横条浮在它上面那条 3px 里）"), geom);
+        check(qAbs(stripH - 29.0) < 0.5,
+              QStringLiteral("标签本身还是 29px 高"), geom);
+        check(qAbs((barBottom - barTop) - 3.0) < 0.5,
+              QStringLiteral("横条高 3px"), geom);
+        check(left >= radius - 0.5 && (w - right) >= radius - 0.5,
+              QStringLiteral("横条左右各让开容器圆角，没压在圆角上"), geom);
+        check(barTop >= -0.5 && barBottom <= stripTop + 0.5,
+              QStringLiteral("横条贴在容器顶边上、整个在标签上沿之上（不盖标签）"), geom);
+        check(right > left, QStringLiteral("横条有实际宽度"), geom);
+        check(barBottom <= h - 0.5 && right <= w - 0.5,
+              QStringLiteral("横条整个在标签栏里面"), geom);
+
+        /* 关掉多余的，回到一个：横条应该收回去（同样要等这一轮布局） */
+        dispatch(QStringLiteral("closeAllTabs"));
+        dispatch(QStringLiteral("new"));
+        for (int i = 0; i < 3; ++i)
+            QCoreApplication::processEvents();
+        const QVariantMap again = uiState().value(QStringLiteral("tabBar")).toMap();
+        check(!again.value(QStringLiteral("scrollShown")).toBool(),
+              QStringLiteral("标签又少了：滚动条收回去，标签栏还是 35px"),
+              QStringLiteral("高 %1").arg(again.value(QStringLiteral("height")).toDouble()));
+        dispatch(QStringLiteral("closeAllTabs"));
+    }
+
+    /*
      * ================= 内容区 tab 的右键菜单 =================
      *
      * 两件事要钉住：

@@ -531,6 +531,12 @@ Rectangle {
             menuY: window.menuTopLeft().y,
 
             /*
+             * tab 栏和顶上那条横向滚动条的几何（tab 撑满容器时才出现）。
+             * 自检量的是"横条有没有压到容器圆角上、有没有盖住标签"。
+             */
+            tabBar: editor.tabBarState(),
+
+            /*
              * 分隔线热区的纵向范围（自检里量它有没有越界）。
              *
              * splitterTop / splitterBottom 必须和中间行（midRow）的上下边界
