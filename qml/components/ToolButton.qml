@@ -25,6 +25,12 @@ Rectangle {
     property bool checked: false
     property bool showArrow: false
 
+    /*
+     * 图标边长。默认 16（查找栏那排就是这个尺寸）；
+     * 左侧项目树标题栏那一排要小一档，见 FolderTree.toolIconSize。
+     */
+    property int iconSize: 16
+
     signal clicked()
 
     readonly property bool hot: hit.containsMouse && root.enabled
@@ -49,7 +55,7 @@ Rectangle {
             visible: root.kind !== ""
             provider: root.provider
             kind: root.kind
-            size: 16
+            size: root.iconSize
             tint: (root.hot || root.checked) ? root.hotIcon : root.idleIcon
         }
 

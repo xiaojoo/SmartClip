@@ -42,6 +42,14 @@ Rectangle {
     readonly property int toolbarButtonCount: toolRow.children.length
 
     /*
+     * 标题栏那排按钮的尺寸：按钮 20×20、里面图标 13×13。
+     *
+     * 只在这里写一遍值，七个按钮都读它 —— 想再调大小改这两行就够。
+     */
+    readonly property int toolButtonSize: 20
+    readonly property int toolIconSize: 13
+
+    /*
      * 准星按钮能不能点（由 Main 按"当前标签是不是列表里的条目"给）。
      * 当前标签是磁盘文件或未命名空白文档时没什么可定位的，那就置灰。
      */
@@ -151,28 +159,35 @@ Rectangle {
                 spacing: 1
 
                 /*
-                 * 22×22 是照着标题栏的高度挑的：再大这一排就比"项目"那行字
-                 * 高出一截，七个挤在一起也放不下（面板最窄只到 240）。
+                 * 按钮 20×20、里面图标 13×13（宽度只在 root 上写一次）。
+                 *
+                 * 图标比 ToolButton 的默认 16 小一档：标题栏只有 35px 高，
+                 * 七个 16px 的图标挤在一起比"项目"那行字还抢眼，
+                 * 缩到 13 之后这一排才像工具的辅助按钮，不像主操作。
+                 * 按钮本身也跟着从 22 收到 20 —— 图标四周留白比例不变。
                  */
                 ToolButton {
-                    implicitWidth: 22
-                    implicitHeight: 22
+                    implicitWidth: root.toolButtonSize
+                    implicitHeight: root.toolButtonSize
+                    iconSize: root.toolIconSize
                     provider: icons
                     kind: "plus"
                     tip: "新建条目"
                     onClicked: root.newEntryRequested()
                 }
                 ToolButton {
-                    implicitWidth: 22
-                    implicitHeight: 22
+                    implicitWidth: root.toolButtonSize
+                    implicitHeight: root.toolButtonSize
+                    iconSize: root.toolIconSize
                     provider: icons
                     kind: "refresh"
                     tip: "刷新列表"
                     onClicked: root.refreshRequested()
                 }
                 ToolButton {
-                    implicitWidth: 22
-                    implicitHeight: 22
+                    implicitWidth: root.toolButtonSize
+                    implicitHeight: root.toolButtonSize
+                    iconSize: root.toolIconSize
                     provider: icons
                     kind: "locate"
                     enabled: root.locateEnabled
@@ -181,16 +196,18 @@ Rectangle {
                     onClicked: root.locateRequested()
                 }
                 ToolButton {
-                    implicitWidth: 22
-                    implicitHeight: 22
+                    implicitWidth: root.toolButtonSize
+                    implicitHeight: root.toolButtonSize
+                    iconSize: root.toolIconSize
                     provider: icons
                     kind: "collapse-all"
                     tip: "全部折叠"
                     onClicked: root.collapseAllRequested()
                 }
                 ToolButton {
-                    implicitWidth: 22
-                    implicitHeight: 22
+                    implicitWidth: root.toolButtonSize
+                    implicitHeight: root.toolButtonSize
+                    iconSize: root.toolIconSize
                     provider: icons
                     kind: "expand-all"
                     tip: "全部展开"
@@ -198,16 +215,18 @@ Rectangle {
                 }
                 ToolButton {
                     id: moreButton
-                    implicitWidth: 22
-                    implicitHeight: 22
+                    implicitWidth: root.toolButtonSize
+                    implicitHeight: root.toolButtonSize
+                    iconSize: root.toolIconSize
                     provider: icons
                     kind: "more"
                     tip: "更多选项"
                     onClicked: root.menuRequested(moreButton)
                 }
                 ToolButton {
-                    implicitWidth: 22
-                    implicitHeight: 22
+                    implicitWidth: root.toolButtonSize
+                    implicitHeight: root.toolButtonSize
+                    iconSize: root.toolIconSize
                     provider: icons
                     kind: "minus"
                     tip: "收起面板"
