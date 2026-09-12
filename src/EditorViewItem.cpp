@@ -1844,6 +1844,7 @@ int EditorViewItem::openFile(const QString &path) {
 
     m_docs[m_current].filePath = abs;
     m_docs[m_current].clipboard = false;
+    m_docs[m_current].clipId = -1;
     m_docs[m_current].clipTitle.clear();
     m_docs[m_current].encoding = detectedEncoding;
     m_docs[m_current].language = languageForPath(abs);
@@ -1875,28 +1876,29 @@ int EditorViewItem::openClipboardItem(qint64 id, const QString &title) {
     const QString text = m_store->contentOf(id);
 
     /*
-     * 复用规则：
-     *   已经有一条"剪贴板来源 + 没有未保存改动"的标签 -> 直接换掉它的内容；
-     *   否则新开一条。
+     * 一个条目一条标签：**点过的条目各占一条标签**，同一条目只占一条。
      *
-     * 这样在左侧列表里上下点着看不会攒出一堆标签，而正在改的那条
-     * 也不会被下一次点击冲掉（不丢用户的东西，也不用弹窗打断）。
+     *   没开过 -> 新开一条；
+     *   已经开着 -> 切回它那条（正文在它自己那份 QsciDocument 里，不重灌）。
+     *
+     * 原来这里是"复用那条没改过内容的剪贴板标签"：点来点去始终是同一个标签
+     * 在换内容，看起来就是"不管点哪个文件都只有一个标签在变"。按 id 认标签
+     * 之后，左边点过的条目才一条条攒得下来，而且：
+     *   * 正在改的那条不会被下一次点击冲掉 —— 点回它只是切过去，改动原样还在；
+     *   * 同一条目不会开出两条一模一样的标签（和 openFile() 按文件路径认标签
+     *     是同一套规矩，见 indexOfPath）。
      */
-    int target = -1;
     for (int i = 0; i < m_docs.size(); ++i) {
-        if (m_docs.at(i).clipboard && !m_docs.at(i).modified) {
-            target = i;
-            break;
+        const Doc &d = m_docs.at(i);
+        if (d.clipboard && d.clipId == id) {
+            activateDocument(i);
+            return m_current;
         }
     }
 
-    if (target < 0) {
-        target = newDocument();
-        if (target < 0)
-            return -1;
-    } else {
-        activateDocument(target);
-    }
+    const int target = newDocument();
+    if (target < 0)
+        return -1;
 
     QElapsedTimer timer;
     timer.start();
@@ -1904,6 +1906,7 @@ int EditorViewItem::openClipboardItem(qint64 id, const QString &title) {
     setContentCurrent(text);
 
     m_docs[m_current].clipboard = true;
+    m_docs[m_current].clipId = id;
     m_docs[m_current].clipTitle = title;
     m_docs[m_current].encoding = QStringLiteral("UTF-8");
     m_docs[m_current].language = QStringLiteral("plain");
@@ -2018,6 +2021,7 @@ bool EditorViewItem::saveDocument(int index, const QString &path) {
     const QString abs = QFileInfo(path).absoluteFilePath();
     m_docs[index].filePath = abs;
     m_docs[index].clipboard = false;
+    m_docs[index].clipId = -1;
     m_docs[index].clipTitle.clear();
 
     /* 未命名文件另存为之后按扩展名认语言 */

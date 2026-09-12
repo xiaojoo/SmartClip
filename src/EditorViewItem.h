@@ -438,6 +438,14 @@ private:
          */
         bool modified = false;
         bool clipboard = false;            // 来自剪贴板（没有磁盘文件）
+        /*
+         * 来源条目的 id（只在 clipboard 为真时有意义）。
+         *
+         * 标签的身份：左边列表里点过的条目按 id 认标签 —— 同一条目只开一条
+         * 标签，再点就是切回它，见 .cpp 的 openClipboardItem()。
+         * 另存为 / 变成文件之后 clipboard 关掉，这个 id 也跟着清掉。
+         */
+        qint64 clipId = -1;
         int untitledNo = 0;                // 未命名标签的序号
         long cursorPos = 0;                // 光标绝对位置（切标签时恢复）
         int firstVisibleLine = 0;           // 首行（保持滚动位置）

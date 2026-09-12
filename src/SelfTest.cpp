@@ -634,6 +634,102 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store) {
         out() << "  --    剪贴板库为空，跳过条目载入检查" << Qt::endl;
     }
 
+    /*
+     * ============ 左边列表点条目：一个条目一条标签 ============
+     *
+     * 原来 openClipboardItem() 是"复用那条没改过内容的剪贴板标签"——点来点去
+     * 始终是同一个标签在换内容，看着就是"不管点哪个文件都只有一个标签在变"。
+     * 现在按条目 id 认标签：
+     *
+     *   没开过的条目 -> 新开一条；
+     *   开过的条目   -> 切回它自己那条（正文在它那份 QsciDocument 里，不重灌）。
+     *
+     * 所以这里量三件事：点新条目会多一条标签；点开的条目不再多开；
+     * 以及"切回来"是真的切换（标签下标回到原来那条、正文没被换掉）。
+     * 找两条**正文不一样**的文本条目来做判定 —— 正文一样就分不出切到哪条了。
+     */
+    if (store) {
+        auto straight = [](const QString &s) {
+            QString copy = s;
+            copy.remove(QLatin1Char('\r'));  // Scintilla 会把 CRLF 归一，比较时先抹平
+            return copy;
+        };
+
+        const QVariantList all = store->items(QString());
+        QVariantMap entryA, entryB;
+        for (const QVariant &v : all) {
+            const QVariantMap m = v.toMap();
+            if (m.value(QStringLiteral("type")).toString() != QLatin1String("text"))
+                continue;
+            if (entryA.isEmpty()) {
+                entryA = m;
+                continue;
+            }
+            if (straight(store->contentOf(m.value(QStringLiteral("id")).toLongLong()))
+                != straight(store->contentOf(entryA.value(QStringLiteral("id")).toLongLong()))) {
+                entryB = m;
+                break;
+            }
+        }
+
+        if (entryA.isEmpty() || entryB.isEmpty()) {
+            out() << "  --    剪贴板里没有两条正文不同的文本条目，跳过" << Qt::endl;
+        } else {
+            const qint64 idA = entryA.value(QStringLiteral("id")).toLongLong();
+            const QString titleA = entryA.value(QStringLiteral("title")).toString();
+            const qint64 idB = entryB.value(QStringLiteral("id")).toLongLong();
+            const QString titleB = entryB.value(QStringLiteral("title")).toString();
+
+            view->openClipboardItem(idA, titleA);
+            const int afterA = view->documents().size();
+            const int indexA = view->currentIndex();
+            const QString textA = view->currentText();
+
+            view->openClipboardItem(idB, titleB);
+            check(view->documents().size() == afterA + 1,
+                  QStringLiteral("点另一个条目会新开一条标签（不再共用一个标签换内容）"),
+                  QStringLiteral("%1 -> %2 条").arg(afterA).arg(view->documents().size()));
+            check(view->currentText() != textA,
+                  QStringLiteral("新标签里装的是另一个条目的正文"),
+                  QStringLiteral("长度 %1").arg(view->currentText().size()));
+
+            const int indexB = view->currentIndex();
+
+            /* 在这条标签上改一笔：下面看它会不会被下一次点击冲掉 */
+            view->duplicateLine();
+            const QString textBEdited = view->currentText();
+            check(view->modified(), QStringLiteral("在标签里改一笔 -> 已修改状态"));
+
+            view->openClipboardItem(idA, titleA);
+            check(view->documents().size() == afterA + 1,
+                  QStringLiteral("再点开过的条目不再新开标签（切回原来那条）"),
+                  QStringLiteral("实际 %1 条").arg(view->documents().size()));
+            check(view->currentIndex() == indexA, QStringLiteral("切回来的就是那个条目自己那条"),
+                  QStringLiteral("下标 %1（应该是 %2）").arg(view->currentIndex()).arg(indexA));
+            check(view->currentText() == textA,
+                  QStringLiteral("那条的正文原样还在"));
+
+            view->openClipboardItem(idB, titleB);
+            check(view->documents().size() == afterA + 1,
+                  QStringLiteral("点回改过的那条也不新开标签"));
+            check(view->currentIndex() == indexB && view->currentText() == textBEdited,
+                  QStringLiteral("改过的那条改动还在，没被重灌成原文"),
+                  QStringLiteral("下标 %1 / 正文 %2 字符")
+                      .arg(view->currentIndex()).arg(view->currentText().size()));
+
+            /*
+             * 收尾：把这两条关掉。
+             *
+             * 上面那条现在是"已修改"，C++ 的 closeDocument() 不问保存直接关
+             * （问保存的是 QML 的 closeTab）——不留着它，最后那次
+             * dispatch(closeAllTabs) 才不会被"要不要保存"的弹窗卡住。
+             * 先关下标大的，小的那个下标才不会跟着挪。
+             */
+            view->closeDocument(qMax(indexA, indexB));
+            view->closeDocument(qMin(indexA, indexB));
+        }
+    }
+
     /* 缩进参考线：默认开、颜色是压过的灰（不是正文色） */
     check(view->indentGuidesVisible(), QStringLiteral("缩进参考线默认开启"));
     check(view->styleFore(37) == packed(0x3e, 0x42, 0x47),   // 37 = STYLE_INDENTGUIDE
