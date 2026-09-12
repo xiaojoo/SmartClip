@@ -5,7 +5,20 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import "../../js/TimeUtils.js" as Time
 import "../utils"
+import SmartClip.Editor 1.0
 
+/*
+ * 编辑区：标签栏 + 查找栏 + 正文。
+ *
+ * 正文是原生 QScintilla（见 src/EditorViewItem.h），所以这里只负责外壳：
+ *   * 标签栏 —— 多文档切换 / 关闭 / 新建；
+ *   * 查找栏 —— 一条独立的栏（不能做成浮层，见 FindBar.qml 开头）；
+ *   * 空状态（欢迎页）和图片预览。
+ *
+ * 注意 EditorView 必须被"真正隐藏"（visible: false）而不是只被盖住：
+ * 它是独立的原生子窗口，只要 show 着就会盖在 QML 任何内容之上。
+ * Main.qml / 工具栏拿到的编辑器句柄是 root.view。
+ */
 Rectangle {
     id: root
 
@@ -14,375 +27,218 @@ Rectangle {
     clip: true
     border.width: 0
 
-    property var item: null
-    property bool showWelcome: true
+    /* 图片条目预览（没有文件、也不是文本的东西走这里） */
+    property var previewItem: null
+
+    /*
+     * 编辑器本体。
+     *
+     * Main.qml 通过 root.view 调命令、绑状态；工具栏绑的也是它。
+     */
+    readonly property alias view: editorView
+    readonly property alias findBar: find
+
+    /* 标签栏请求（关闭要先问"要不要保存"，所以交给 Main.qml） */
+    signal tabCloseRequested(int index)
+    signal tabCloseAllRequested()
+    signal newTabRequested()
+    signal clipboardRefreshRequested()
 
     readonly property color barBg: "#1e1f22"
     readonly property color editorBg: "#1e1f22"
     readonly property color borderColor: "#4b4d4f"
     readonly property color tabBg: "#45484c"
+    readonly property color tabActiveBg: "#2b2d30"
     readonly property color textBright: "#e8e8e8"
     readonly property color textMain: "#bbbbbb"
     readonly property color textMuted: "#7d7d7d"
     readonly property color hintKey: "#8b929e"
     readonly property color accentColor: "#4c96d8"
-    readonly property color codeColor: "#a9b7c6"
     readonly property color imageColor: "#d7a85b"
     readonly property color lineNumberColor: "#606366"
+    readonly property color dangerColor: "#e06c75"
 
-    readonly property int editorFontSize: 13
-    readonly property int editorPadding: 12
-    readonly property int gutterWidth: 50
+    /*
+     * 正文默认字号（12）。
+     *
+     * 写成可写属性而不是常量：启动时会按上次保存的设置覆盖它（Main.qml），
+     * "设置"菜单里改字号也改这里 —— EditorView 的 fontPixelSize 一直绑着它，
+     * 免得直接给 fontPixelSize 赋值把绑定打断。
+     */
+    property int editorFontSize: 12
+    readonly property bool hasDocument: root.view.hasDocument
+    readonly property bool hasTabs: root.hasDocument || root.previewItem !== null
 
-    readonly property color selectionBg: "#3d78b8"
-    readonly property color selectionText: "#ffffff"
-
-    readonly property color contextMenuBg: "#2b2d30"
-    readonly property color contextMenuBorder: "#45484c"
-    readonly property color contextMenuHover: "#3d78b8"
-    readonly property color contextMenuText: "#e6e7e9"
-    readonly property color contextMenuDisabled: "#686b70"
-    readonly property color contextMenuShortcut: "#969ba3"
-    readonly property color contextMenuShortcutDisabled: "#55585d"
-
-    IconProvider {
-        id: icons
-    }
-
-    function tabTitle() {
-        return item ? item.title : "README.md"
-    }
-
-    function editorText() {
-        if (!root.item)
-            return ""
-
-        if (root.item.content !== undefined
-                && root.item.content !== null) {
-            return String(root.item.content)
-        }
-
-        if (root.item.text !== undefined
-                && root.item.text !== null) {
-            return String(root.item.text)
-        }
-
-        return ""
-    }
+    IconProvider { id: icons }
 
     function imageSource() {
-        if (!root.item || root.item.type !== "image")
+        if (!root.previewItem || root.previewItem.type !== "image")
             return ""
-
-        var raw = root.item.content
-
+        var raw = root.previewItem.content
         if (raw === undefined || raw === null)
             return ""
-
         var path = String(raw).replace(/\\/g, "/")
-
-        if (path === ""
-                || path.indexOf("\n") !== -1
-                || path.length > 512) {
+        if (path === "" || path.indexOf("\n") !== -1 || path.length > 512)
             return ""
-        }
-
         if (path.indexOf("file:") === 0)
             return path
-
         return "file:///" + path
-    }
-
-    /*
-     * 每一行的实际起始字符位置。
-     *
-     * 不能单纯使用固定 lineHeight，
-     * 因为 TextArea 开启 Wrap 后，
-     * 一行代码可能占两行甚至更多行。
-     */
-    readonly property var lineStartPositions: {
-        var content = textArea.text
-        var result = [0]
-
-        /*
-         * 用 indexOf 一行一行找，而不是逐字符 charAt。
-         *
-         * 实测 16 万字符 / 3000 行：
-         * charAt 循环约 15ms，indexOf 循环不到 1ms。
-         * 这个绑定在每次文本变化时都会重算（包括打字），
-         * 所以差这十几毫秒在长文本里是能感觉到的。
-         */
-        var at = content.indexOf("\n")
-
-        while (at !== -1) {
-            result.push(at + 1)
-            at = content.indexOf("\n", at + 1)
-        }
-
-        return result
-    }
-
-    /*
-     * 上面那份行首位置数组是按哪份正文算出来的。
-     *
-     * textArea.text 和 lineStartPositions 是两个独立绑定，
-     * 切换文件时会先后重新求值，中间存在一帧「新正文 + 旧位置数组」。
-     * 那一帧里位置数组里的值远超当前正文长度，
-     * positionToRectangle() 内部拿它去 QTextCursor::setPosition，
-     * 就会刷 "Position ... out of range"，而且行号也会错位。
-     *
-     * 所以把「算这份数组时用的正文」一起记下来，用的时候先核对；
-     * 对不上就当场按当前正文重算（见 gutterSlots），
-     * 这样两个值永远同源，不存在中间态。
-     */
-    readonly property string lineStartPositionsFor: textArea.text
-
-    /*
-     * 行号栏只给“看得见的行”建 delegate，固定 200 个槽位循环用。
-     *
-     * 以前是 Repeater 直接铺满全部行：
-     * 3000 行的内容会建 3000 个 Item + 3000 个 Text，
-     * 每个还要调一次 positionToRectangle，
-     * 实测打开一个 25 万字符的条目，整帧要 4 秒（其中约 3 秒耗在这里）。
-     *
-     * 现在开销从 O(总行数) 降到 O(可见行数)，滚动时只是换这几个槽位的内容。
-     *
-     * 为什么从 80 提到 200：槽位数是「一次最多能画多少行」的硬上限，
-     * 80 个槽 × 约 21px 行高 ≈ 1200px，也就是编辑器视口一超过
-     * 这个高度，下面就没有槽位可用了 —— 表现就是大屏 / 全屏时
-     * 行号画到一半就断掉（实测 2000px 高时只画到 y≈1197）。
-     * 200 × 21 ≈ 4200px，4K 全屏也够；代价只是多建 120 个小 Item。
-     */
-    readonly property int gutterSlotCount: 200
-
-    /*
-     * 每个槽位当前显示的行：{ line, y, height }，用不到的槽位就是 undefined。
-     * 文本、尺寸、滚动位置变化都会重算。
-     */
-    readonly property var gutterSlots: {
-        /*
-         * 这几个属性都参与了计算，必须在绑定里显式读一次：
-         * js 里调 positionAt / positionToRectangle 不会自动建立依赖，
-         * 不读的话滚动时这个绑定不会重算。
-         */
-        var viewTop = editorFlick.contentY
-        var viewHeight = editorFlick.height
-        var areaWidth = textArea.width
-
-        /*
-         * 行首位置数组必须和正文同源。
-         *
-         * textArea.text 与 lineStartPositions 是两个独立绑定，
-         * 切换文件时会出现一帧「新正文 + 旧位置数组」，
-         * 旧数组里的值（比如 4750）远超新正文字符数，
-         * positionToRectangle() 拿它去 setPosition 就会刷
-         * "QTextCursor::setPosition: Position ... out of range"。
-         *
-         * 所以这里先核对数组是按哪份正文算的：对不上就按当前正文
-         * 当场重算一遍（indexOf 扫一遍，代价可以忽略），
-         * 保证下面用到的位置一定落在当前正文里。
-         */
-        var content = textArea.text
-        var positions = root.lineStartPositions
-
-        if (root.lineStartPositionsFor !== content) {
-            positions = [0]
-
-            var at = content.indexOf("\n")
-
-            while (at !== -1) {
-                positions.push(at + 1)
-                at = content.indexOf("\n", at + 1)
-            }
-        }
-
-        var total = positions.length
-
-        if (areaWidth <= 0 || total <= 0)
-            return []
-
-        // 1) 视口顶部那一点落在第几行：行首位置数组是递增的，直接二分
-        var probe = textArea.positionAt(0, Math.max(0, viewTop))
-        var first = 0
-        var lo = 0
-        var hi = total - 1
-
-        while (lo <= hi) {
-            var mid = (lo + hi) >> 1
-
-            if (positions[mid] <= probe) {
-                first = mid
-                lo = mid + 1
-            } else {
-                hi = mid - 1
-            }
-        }
-
-        // 2) 从这一行往下，只算视口内的行（多留一点缓冲）
-        var slots = []
-        var bottom = viewTop + viewHeight + 40
-
-        for (var i = 0;
-             i < root.gutterSlotCount && first + i < total;
-             ++i) {
-            var rect = textArea.positionToRectangle(
-                positions[first + i]
-            )
-
-            if (rect.y > bottom)
-                break
-
-            slots.push({
-                line: first + i,
-                y: rect.y,
-                height: rect.height
-            })
-        }
-
-        return slots
     }
 
     ColumnLayout {
         anchors.fill: parent
         spacing: 0
 
-        /*
-         * 顶部 Tab
-         */
+        /* ================= 标签栏 ================= */
         Rectangle {
             id: tabBar
 
             Layout.fillWidth: true
             Layout.preferredHeight: 35
-
-            visible: !root.showWelcome
-
+            visible: root.hasTabs
             color: root.barBg
 
             /*
              * 顶部两个圆角只能由标签栏自己画。
              *
-             * Qt Quick 的 clip 只按矩形裁剪，radius 不参与裁剪，
-             * 所以 root 的 radius: 10 挡不住这个铺满顶部的直角矩形：
-             * 标签栏的方角会把卡片上沿的圆角整个盖掉。
-             *
-             * 这里只圆上面两个角，下面两个角在卡片内部，
-             * 与内容区同色，圆不圆都看不出来。
+             * Qt Quick 的 clip 只按矩形裁剪、radius 不参与裁剪，
+             * 所以 root 的 radius: 10 挡不住这个铺满顶部的直角矩形。
              */
             topLeftRadius: 10
             topRightRadius: 10
 
             RowLayout {
                 anchors.fill: parent
+                anchors.leftMargin: 6
+                anchors.rightMargin: 6
+                spacing: 4
 
-                anchors.leftMargin: 8
-                anchors.rightMargin: 8
+                /* ---- 打开的文档（横向可滚动） ---- */
+                Flickable {
+                    id: tabScroll
 
-                spacing: 6
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    Layout.topMargin: 3
+                    Layout.bottomMargin: 3
 
-                Rectangle {
-                    Layout.preferredWidth: 240
-                    Layout.preferredHeight: 28
+                    contentWidth: tabRow.width
+                    contentHeight: height
+                    clip: true
+                    boundsBehavior: Flickable.StopAtBounds
+                    interactive: contentWidth > width
 
-                    color: root.tabBg
-                    radius: 5
+                    Row {
+                        id: tabRow
+                        height: parent.height
+                        spacing: 3
 
-                    RowLayout {
-                        anchors.fill: parent
+                        Repeater {
+                            model: root.view.documents
 
-                        anchors.leftMargin: 10
-                        anchors.rightMargin: 6
+                            delegate: Rectangle {
+                                id: tabItem
 
-                        spacing: 8
+                                required property var modelData
 
-                        AppIcon {
-                            Layout.preferredWidth: 16
-                            Layout.preferredHeight: 16
+                                readonly property bool active: modelData.active === true
+                                readonly property bool hot: tabHit.containsMouse
 
-                            provider: icons
+                                height: tabRow.height
+                                width: Math.max(132, Math.min(250,
+                                                              tabLabel.implicitWidth + 74))
 
-                            kind: root.item
-                                  && root.item.type === "image"
-                                  ? "image"
-                                  : "file"
+                                radius: 5
+                                color: active ? root.tabActiveBg
+                                              : (hot ? "#3a3d41" : "transparent")
 
-                            tint: root.item
-                                  && root.item.type === "image"
-                                  ? root.imageColor
-                                  : root.accentColor
+                                RowLayout {
+                                    anchors.fill: parent
+                                    anchors.leftMargin: 9
+                                    anchors.rightMargin: 6
+                                    spacing: 6
 
-                            size: 16
+                                    AppIcon {
+                                        provider: icons
+                                        kind: tabItem.modelData.clipboard ? "paste" : "file"
+                                        size: 14
+                                        tint: tabItem.active ? root.accentColor : root.textMuted
+                                        Layout.alignment: Qt.AlignVCenter
+                                    }
 
-                            Layout.alignment: Qt.AlignVCenter
-                        }
+                                    Label {
+                                        id: tabLabel
+                                        Layout.fillWidth: true
+                                        text: tabItem.modelData.filePath !== ""
+                                              ? tabItem.modelData.title
+                                              : tabItem.modelData.title
+                                        color: tabItem.active ? root.textBright : root.textMain
+                                        font.pixelSize: 12
+                                        elide: Text.ElideMiddle
+                                        verticalAlignment: Text.AlignVCenter
+                                    }
 
-                        Text {
-                            Layout.fillWidth: true
+                                    /* 未保存：一个点；鼠标移上来变成关闭键 */
+                                    Rectangle {
+                                        Layout.preferredWidth: 7
+                                        Layout.preferredHeight: 7
+                                        Layout.alignment: Qt.AlignVCenter
+                                        radius: 4
+                                        color: root.accentColor
+                                        visible: tabItem.modelData.modified === true
+                                                 && !tabItem.hot
+                                    }
 
-                            text: root.tabTitle()
+                                    AppIcon {
+                                        provider: icons
+                                        kind: "close"
+                                        size: 13
+                                        tint: tabItem.hot ? root.textBright : root.textMuted
+                                        Layout.alignment: Qt.AlignVCenter
+                                        visible: tabItem.hot
+                                                 || tabItem.modelData.modified !== true
 
-                            color: root.textBright
+                                        MouseArea {
+                                            anchors.fill: parent
+                                            anchors.margins: -4
+                                            cursorShape: Qt.PointingHandCursor
+                                            onClicked: root.tabCloseRequested(tabItem.modelData.index)
+                                        }
+                                    }
+                                }
 
-                            font.pixelSize: 12
-
-                            elide: Text.ElideRight
-
-                            verticalAlignment:
-                                Text.AlignVCenter
-                        }
-
-                        AppIcon {
-                            Layout.preferredWidth: 16
-                            Layout.preferredHeight: 16
-
-                            provider: icons
-                            kind: "close"
-                            tint: root.textMuted
-                            size: 16
-
-                            opacity: 0.8
-
-                            MouseArea {
-                                anchors.fill: parent
-
-                                cursorShape:
-                                    Qt.PointingHandCursor
-
-                                onClicked: {
-                                    root.item = null
-                                    root.showWelcome = true
+                                MouseArea {
+                                    id: tabHit
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    acceptedButtons: Qt.LeftButton | Qt.MiddleButton
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: (mouse) => {
+                                        if (mouse.button === Qt.MiddleButton)
+                                            root.tabCloseRequested(tabItem.modelData.index)
+                                        else
+                                            root.view.activateDocument(tabItem.modelData.index)
+                                    }
                                 }
                             }
                         }
                     }
                 }
 
-                Item {
-                    Layout.fillWidth: true
+                /* ---- 右侧：新建 / 关闭当前 ---- */
+                ToolButton {
+                    provider: icons; kind: "new"; tip: "新建文件"; shortcut: "Ctrl+N"
+                    onClicked: root.newTabRequested()
                 }
-
-                AppIcon {
-                    Layout.preferredWidth: 18
-                    Layout.preferredHeight: 18
-
-                    provider: icons
-                    kind: "grid"
-                    tint: root.textMuted
-                    size: 18
-
-                    opacity: 0.75
+                ToolButton {
+                    provider: icons; kind: "close"; tip: "关闭当前标签"; shortcut: "Ctrl+W"
+                    enabled: root.hasDocument
+                    onClicked: root.tabCloseRequested(root.view.currentIndex)
                 }
-
-                AppIcon {
-                    Layout.preferredWidth: 18
-                    Layout.preferredHeight: 18
-
-                    provider: icons
-                    kind: "chevronDown"
-                    tint: root.textMuted
-                    size: 18
-
-                    opacity: 0.75
+                ToolButton {
+                    provider: icons; kind: "trash"; tip: "关闭全部标签"
+                    enabled: root.view.documents.length > 0
+                    onClicked: root.tabCloseAllRequested()
                 }
             }
 
@@ -390,139 +246,108 @@ Rectangle {
                 anchors.left: parent.left
                 anchors.right: parent.right
                 anchors.bottom: parent.bottom
-
                 height: 1
-
                 color: root.borderColor
                 opacity: 0.65
             }
         }
 
-        /*
-         * 主内容区域
-         */
+        /* ================= 查找 / 替换栏 ================= */
+        FindBar {
+            id: find
+            Layout.fillWidth: true
+            view: root.view
+        }
+
+        /* ================= 正文 ================= */
         Rectangle {
             id: contentArea
 
             Layout.fillWidth: true
             Layout.fillHeight: true
-
             color: root.editorBg
-
             clip: true
-
             radius: 10
 
-            /*
-             * 欢迎页
-             */
+            /* ---- 空状态：没有任何标签时显示 ---- */
             Column {
                 id: welcomePanel
 
-                visible: root.showWelcome
-
+                visible: !root.hasTabs
                 width: 460
-
                 anchors.centerIn: parent
+                spacing: 16
 
-                spacing: 18
+                Text {
+                    width: parent.width
+                    text: "SmartClip 编辑器"
+                    color: root.textBright
+                    font.pixelSize: 20
+                    font.bold: true
+                    horizontalAlignment: Text.AlignHCenter
+                }
 
                 Repeater {
                     model: [
-                        {
-                            title: "搜索全部内容",
-                            shortcut: "Double Shift"
-                        },
-                        {
-                            title: "刷新剪贴板",
-                            shortcut: "F5"
-                        },
-                        {
-                            title: "最近复制",
-                            shortcut: "Ctrl+E"
-                        },
-                        {
-                            title: "导航栏",
-                            shortcut: "Alt+Home"
-                        }
+                        { title: "新建文件", shortcut: "Ctrl+N" },
+                        { title: "打开文件", shortcut: "Ctrl+O" },
+                        { title: "保存", shortcut: "Ctrl+S" },
+                        { title: "查找 / 替换", shortcut: "Ctrl+F / Ctrl+H" },
+                        { title: "转到行", shortcut: "Ctrl+G" },
+                        { title: "撤销 / 重做", shortcut: "Ctrl+Z / Ctrl+Y" },
+                        { title: "刷新剪贴板", shortcut: "F5" }
                     ]
 
                     delegate: Row {
                         required property var modelData
 
                         width: parent.width
-                        height: 28
-
+                        height: 26
                         spacing: 12
 
                         Text {
-                            width: 180
-
+                            width: 200
                             text: modelData.title
-
                             color: root.textMain
-
                             font.pixelSize: 13
-
-                            verticalAlignment:
-                                Text.AlignVCenter
+                            horizontalAlignment: Text.AlignRight
+                            verticalAlignment: Text.AlignVCenter
                         }
 
                         Text {
                             text: modelData.shortcut
-
                             color: root.hintKey
-
                             font.pixelSize: 12
-
-                            verticalAlignment:
-                                Text.AlignVCenter
+                            verticalAlignment: Text.AlignVCenter
                         }
                     }
                 }
 
                 Text {
                     width: parent.width
-
-                    text: "复制任意内容自动采集，点击左侧条目回填剪贴板"
-
+                    text: "点左侧列表可把剪贴板内容载入编辑器"
                     color: root.textMuted
-
                     font.pixelSize: 12
-
-                    horizontalAlignment:
-                        Text.AlignHCenter
-
-                    verticalAlignment:
-                        Text.AlignVCenter
-
-                    wrapMode:
-                        Text.WordWrap
+                    horizontalAlignment: Text.AlignHCenter
+                    wrapMode: Text.WordWrap
                 }
             }
 
-            /*
-             * 图片预览
-             */
+            /* ---- 图片预览 ---- */
             Rectangle {
                 id: imagePanel
 
-                visible:
-                    root.item !== null
-                    && root.item !== undefined
-                    && root.item.type === "image"
+                visible: root.previewItem !== null
+                         && root.previewItem !== undefined
+                         && root.previewItem.type === "image"
 
                 anchors.fill: parent
-
                 anchors.margins: 20
-
                 color: root.editorBg
-
                 radius: 8
 
                 ColumnLayout {
                     anchors.fill: parent
-
                     spacing: 12
 
                     RowLayout {
@@ -530,56 +355,41 @@ Rectangle {
                         Layout.preferredHeight: 36
 
                         AppIcon {
+                            provider: icons; kind: "image"; tint: root.imageColor
+                            size: 20
                             Layout.preferredWidth: 20
                             Layout.preferredHeight: 20
-
-                            provider: icons
-                            kind: "image"
-                            tint: root.imageColor
-                            size: 20
                         }
 
                         Text {
                             Layout.fillWidth: true
-
-                            text: root.tabTitle()
-
+                            text: root.previewItem ? root.previewItem.title : ""
                             color: root.textBright
-
                             font.pixelSize: 14
                             font.bold: true
-
                             elide: Text.ElideRight
-
-                            verticalAlignment:
-                                Text.AlignVCenter
+                            verticalAlignment: Text.AlignVCenter
                         }
 
                         Text {
-                            text:
-                                root.item
-                                && root.item.timestamp
-                                ? Time.formatTime(
-                                      root.item.timestamp
-                                  )
-                                : ""
-
+                            /*
+                             * 用 displayTime，不是 formatTime ——
+                             * js/TimeUtils.js 里没有 formatTime 这个函数
+                             * （旧代码一直写错，选图片条目时会刷
+                             *  "Property 'formatTime' ... is not a function"）。
+                             */
+                            text: root.previewItem && root.previewItem.createdAt
+                                  ? Time.displayTime(root.previewItem.createdAt) : ""
                             color: root.textMuted
-
                             font.pixelSize: 11
-
-                            verticalAlignment:
-                                Text.AlignVCenter
+                            verticalAlignment: Text.AlignVCenter
                         }
                     }
 
                     Rectangle {
                         Layout.fillWidth: true
-
                         height: 1
-
                         color: root.borderColor
-
                         opacity: 0.6
                     }
 
@@ -589,47 +399,31 @@ Rectangle {
 
                         Image {
                             id: previewImage
-
                             anchors.fill: parent
-
                             source: root.imageSource()
-
-                            fillMode:
-                                Image.PreserveAspectFit
-
+                            fillMode: Image.PreserveAspectFit
                             asynchronous: true
                             cache: true
                             smooth: true
-
                             visible: source !== ""
                         }
 
                         Column {
                             anchors.centerIn: parent
-
                             spacing: 10
-
-                            visible:
-                                previewImage.source === ""
+                            visible: previewImage.source === ""
 
                             AppIcon {
-                                anchors.horizontalCenter:
-                                    parent.horizontalCenter
-
+                                anchors.horizontalCenter: parent.horizontalCenter
                                 width: 32
                                 height: 32
-
-                                provider: icons
-                                kind: "image"
-                                tint: root.imageColor
+                                provider: icons; kind: "image"; tint: root.imageColor
                                 size: 32
                             }
 
                             Text {
                                 text: "无法预览图片"
-
                                 color: root.textMuted
-
                                 font.pixelSize: 13
                             }
                         }
@@ -637,1085 +431,43 @@ Rectangle {
                 }
             }
 
-            /*
-             * 文本编辑器
-             */
-            Flickable {
-                id: editorFlick
-
-                visible:
-                    !root.showWelcome
-                    && root.item !== null
-                    && root.item !== undefined
-                    && root.item.type === "text"
+            /* ---- 正文编辑器（原生 QScintilla） ---- */
+            EditorView {
+                id: editorView
 
                 anchors.fill: parent
 
-                clip: true
-
-                flickableDirection:
-                    Flickable.VerticalFlick
-
-                boundsBehavior:
-                    Flickable.StopAtBounds
-
-                contentWidth: width
-
-                contentHeight:
-                    Math.max(
-                        editorRow.height,
-                        height
-                    )
-
-                ScrollBar.vertical: ScrollBar {
-                    id: editorScrollBar
-
-                    /*
-                     * 只有真正超出视口时才显示。
-                     *
-                     * 不使用 AlwaysOn，
-                     * 避免页面切换时出现闪一下的滚动条。
-                     */
-                    policy: ScrollBar.AsNeeded
-
-                    width: 8
-
-                    interactive: true
-
-                    visible:
-                        editorFlick.contentHeight
-                        > editorFlick.height + 1
-
-                    opacity:
-                        visible ? 1.0 : 0.0
-
-                    Behavior on opacity {
-                        NumberAnimation {
-                            duration: 80
-                        }
-                    }
-                }
-
-                Row {
-                    id: editorRow
-
-                    width: editorFlick.width
-
-                    height:
-                        Math.max(
-                            textArea.implicitHeight,
-                            editorFlick.height
-                        )
-
-                    /*
-                     * 行号栏
-                     */
-                    Rectangle {
-                        id: gutter
-
-                        width: root.gutterWidth
-
-                        height: editorRow.height
-
-                        /*
-                         * 行号栏不自己涂底色。
-                         *
-                         * 它和内容区同色（#1e1f22），一旦自己上色，
-                         * 这个直角矩形就会把内容区左下角的圆角盖成方角。
-                         *
-                         * 而且它在 Flickable 内部、随内容一起滚动，
-                         * 高度又至少和视口一样高，
-                         * 所以不管滚到哪里，视口左下角都被它压住。
-                         *
-                         * 留空让父级 contentArea 的圆角直接透出来，
-                         * 任何滚动位置都不会再丢角。
-                         */
-                        color: "transparent"
-
-                        clip: true
-
-                        Repeater {
-                            model: root.gutterSlotCount
-
-                            delegate: Item {
-                                id: lineNumberDelegate
-
-                                required property int index
-
-                                readonly property var slot:
-                                    root.gutterSlots[index]
-
-                                width: gutter.width
-
-                                visible: slot !== undefined
-                                         && slot !== null
-
-                                /*
-                                 * 位置仍然来自 TextArea 的实际字符坐标，
-                                 * 所以换行后的代码，行号依旧和第一行文字顶部对齐。
-                                 */
-                                y: visible ? slot.y : 0
-
-                                height:
-                                    visible
-                                    ? Math.max(slot.height,
-                                               root.editorFontSize)
-                                    : 0
-
-                                Text {
-                                    anchors.fill: parent
-
-                                    anchors.rightMargin: 10
-
-                                    text:
-                                        lineNumberDelegate.visible
-                                        ? String(
-                                              lineNumberDelegate.slot.line
-                                              + 1)
-                                        : ""
-
-                                    color:
-                                        root.lineNumberColor
-
-                                    font.family: "Consolas"
-
-                                    font.pixelSize:
-                                        root.editorFontSize
-
-                                    horizontalAlignment:
-                                        Text.AlignRight
-
-                                    verticalAlignment:
-                                        Text.AlignVCenter
-                                }
-                            }
-                        }
-                    }
-
-                    /*
-                     * 行号 / 编辑器分隔线
-                     */
-                    Rectangle {
-                        width: 1
-
-                        height: editorRow.height
-
-                        color: root.borderColor
-
-                        opacity: 0.6
-                    }
-
-                    /*
-                     * 正文
-                     */
-                    Item {
-                        id: editorSurface
-
-                        width:
-                            Math.max(
-                                0,
-                                editorRow.width
-                                - gutter.width
-                                - 1
-                            )
-
-                        height: editorRow.height
-
-                        /*
-                         * 正文编辑器。
-                         *
-                         * 这里特意用 Item 包一层：
-                         * 右键拦截层必须是 TextArea 的“兄弟层”，
-                         * 而不是 TextArea 的子 MouseArea。
-                         *
-                         * 这样 Qt Quick Controls 的 TextArea 内部
-                         * 默认右键菜单就不会再收到这个右键事件，
-                         * 从根源上消除白色默认菜单偶发闪现。
-                         */
-                        TextArea {
-                            id: textArea
-
-                            // 分隔线到正文第一个字符严格保持 10px。
-                            x: 10
-                            y: 0
-                            width: Math.max(0, parent.width - 10)
-                            height: parent.height
-
-                            wrapMode:
-                                TextArea.Wrap
-
-                            selectByMouse: true
-
-                            // Qt 6.9+：彻底关闭 TextArea 自带的默认右键菜单。
-                            // 自绘 Popup 是唯一的右键菜单。
-                            ContextMenu.menu: null
-
-                            color: "#d6d7da"
-
-                            selectionColor:
-                                root.selectionBg
-
-                            selectedTextColor:
-                                root.selectionText
-
-                            font.family: "Consolas"
-
-                            font.pixelSize:
-                                root.editorFontSize
-
-                            topPadding:
-                                root.editorPadding
-
-                            bottomPadding:
-                                root.editorPadding
-
-                            leftPadding: 0
-
-                            rightPadding: 20
-
-                            placeholderText:
-                                qsTr("（内容为空）")
-
-                            background: null
-
-                            text: root.editorText()
-
-                            onTextChanged: {
-                                if (root.item) {
-                                    if (root.item.content !== undefined)
-                                        root.item.content = text
-                                }
-                            }
-
-                            /*
-                             * 光标自动跟随。
-                             *
-                             * 编辑较长文本时，
-                             * 光标进入视口外自动滚动。
-                             */
-                            onCursorRectangleChanged: {
-                                if (!activeFocus)
-                                    return
-
-                                var y =
-                                    textArea.y
-                                    + cursorRectangle.y
-
-                                var maxY =
-                                    Math.max(
-                                        0,
-                                        editorFlick.contentHeight
-                                        - editorFlick.height
-                                    )
-
-                                if (
-                                    y
-                                    < editorFlick.contentY
-                                ) {
-                                    editorFlick.contentY =
-                                        Math.max(
-                                            0,
-                                            y
-                                        )
-                                } else if (
-                                    y
-                                    + cursorRectangle.height
-                                    >
-                                    editorFlick.contentY
-                                    + editorFlick.height
-                                ) {
-                                    editorFlick.contentY =
-                                        Math.min(
-                                            maxY,
-                                            y
-                                            + cursorRectangle.height
-                                            - editorFlick.height
-                                        )
-                                }
-                            }
-                        }
-
-                        /*
-                         * =====================================================
-                         * 右键专用拦截层
-                         * =====================================================
-                         *
-                         * 关键点：
-                         *
-                         * 1. 它是 TextArea 的兄弟 Item；
-                         * 2. z = 100，保证右键先被这里拿到；
-                         * 3. acceptedButtons 只有 RightButton，
-                         *    所以左键仍然完全交给 TextArea；
-                         * 4. 不使用 Qt.callLater；
-                         * 5. 菜单在 open() 之前就已经计算好最终位置。
-                         *
-                         * 因此不会出现：
-                         * “先显示白色/初始菜单 -> 再移动到正确位置”的闪现。
-                         */
-                        MouseArea {
-                            id: contextMouseArea
-
-                            anchors.fill: parent
-
-                            z: 100
-
-                            acceptedButtons:
-                                Qt.RightButton
-
-                            preventStealing: true
-
-                            propagateComposedEvents: false
-
-                            cursorShape:
-                                Qt.IBeamCursor
-
-                            onPressed: function(mouse) {
-                                if (mouse.button !== Qt.RightButton)
-                                    return
-
-                                mouse.accepted = true
-
-                                /*
-                                 * 保持和普通编辑器一致：
-                                 * 没有选区时，右键位置成为光标位置；
-                                 * 已有选区时，不破坏当前选区。
-                                 */
-                                if (textArea.selectedText.length === 0) {
-                                    var position =
-                                        textArea.positionAt(
-                                            mouse.x,
-                                            mouse.y
-                                        )
-
-                                    textArea.cursorPosition =
-                                        position
-                                }
-
-                                textArea.forceActiveFocus()
-
-                                var p =
-                                    contextMouseArea.mapToItem(
-                                        contentArea,
-                                        mouse.x,
-                                        mouse.y
-                                    )
-
-                                editorSurface.openEditorContextMenu(
-                                    p.x,
-                                    p.y
-                                )
-                            }
-
-                            onReleased: function(mouse) {
-                                if (mouse.button === Qt.RightButton)
-                                    mouse.accepted = true
-                            }
-                        }
-
-                        /*
-                         * =====================================================
-                         * 自绘右键菜单
-                         * =====================================================
-                         *
-                         * 这里不用 Menu。
-                         *
-                         * 原来的 Menu 会经过 Qt Quick Controls 的
-                         * Menu/Popup 默认布局和样式流程，在 TextArea
-                         * 右键事件与 Popup 打开时序叠加后，可能短暂出现
-                         * 默认白色菜单。
-                         *
-                         * 改成纯 Popup + 手工 Column 后：
-                         * - 背景永远是自定义深色；
-                         * - 菜单尺寸固定；
-                         * - padding 固定为 6px；
-                         * - 每个菜单项高度固定 30px；
-                         * - 左右内容边距严格 10px；
-                         * - 菜单外边距上下左右统一 6px。
-                         */
-                        Popup {
-                            id: editorContextMenu
-
-                            parent: contentArea
-
-                            popupType: Popup.Item
-
-                            width: 210
-
-                            /*
-                             * 7 个菜单项 × 30px
-                             * + 2 条分隔线 × 1px
-                             * + 上下 padding 6px
-                             * = 224px。
-                             *
-                             * 必须在 open() 前就有确定的高度，
-                             * 否则第一次右键时可能拿到 height=0，
-                             * 导致菜单先出现在错误位置再跳动。
-                             */
-                            height: 224
-
-                            padding: 6
-
-                            closePolicy:
-                                Popup.CloseOnEscape
-                                | Popup.CloseOnPressOutside
-
-                            background: Rectangle {
-                                color:
-                                    root.contextMenuBg
-
-                                radius: 6
-
-                                border.width: 1
-
-                                border.color:
-                                    root.contextMenuBorder
-                            }
-
-                            contentItem: Column {
-                                width:
-                                    editorContextMenu.availableWidth
-
-                                spacing: 0
-
-                                MenuItem {
-                                    id: undoItem
-
-                                    width: parent.width
-                                    height: 30
-
-                                    text: qsTr("撤销")
-
-                                    enabled:
-                                        textArea.canUndo
-
-                                    padding: 0
-
-                                    onTriggered: {
-                                        textArea.undo()
-                                        editorContextMenu.close()
-                                    }
-
-                                    contentItem: RowLayout {
-                                        anchors.fill: parent
-
-                                        anchors.leftMargin: 10
-                                        anchors.rightMargin: 10
-
-                                        spacing: 12
-
-                                        Text {
-                                            Layout.fillWidth: true
-
-                                            text: undoItem.text
-
-                                            color:
-                                                !undoItem.enabled
-                                                ? root.contextMenuDisabled
-                                                : undoItem.hovered
-                                                  ? "#ffffff"
-                                                  : root.contextMenuText
-
-                                            font.pixelSize: 13
-
-                                            verticalAlignment:
-                                                Text.AlignVCenter
-                                        }
-
-                                        Text {
-                                            text: "Ctrl+Z"
-
-                                            color:
-                                                !undoItem.enabled
-                                                ? root.contextMenuShortcutDisabled
-                                                : undoItem.hovered
-                                                  ? "#ffffff"
-                                                  : root.contextMenuShortcut
-
-                                            font.pixelSize: 11
-
-                                            verticalAlignment:
-                                                Text.AlignVCenter
-
-                                            horizontalAlignment:
-                                                Text.AlignRight
-                                        }
-                                    }
-
-                                    background: Rectangle {
-                                        radius: 4
-
-                                        color:
-                                            undoItem.enabled
-                                            && undoItem.hovered
-                                            ? root.contextMenuHover
-                                            : "transparent"
-                                    }
-                                }
-
-                                MenuItem {
-                                    id: redoItem
-
-                                    width: parent.width
-                                    height: 30
-
-                                    text: qsTr("重做")
-
-                                    enabled:
-                                        textArea.canRedo
-
-                                    padding: 0
-
-                                    onTriggered: {
-                                        textArea.redo()
-                                        editorContextMenu.close()
-                                    }
-
-                                    contentItem: RowLayout {
-                                        anchors.fill: parent
-
-                                        anchors.leftMargin: 10
-                                        anchors.rightMargin: 10
-
-                                        spacing: 12
-
-                                        Text {
-                                            Layout.fillWidth: true
-
-                                            text: redoItem.text
-
-                                            color:
-                                                !redoItem.enabled
-                                                ? root.contextMenuDisabled
-                                                : redoItem.hovered
-                                                  ? "#ffffff"
-                                                  : root.contextMenuText
-
-                                            font.pixelSize: 13
-
-                                            verticalAlignment:
-                                                Text.AlignVCenter
-                                        }
-
-                                        Text {
-                                            text: "Ctrl+Y"
-
-                                            color:
-                                                !redoItem.enabled
-                                                ? root.contextMenuShortcutDisabled
-                                                : redoItem.hovered
-                                                  ? "#ffffff"
-                                                  : root.contextMenuShortcut
-
-                                            font.pixelSize: 11
-
-                                            verticalAlignment:
-                                                Text.AlignVCenter
-
-                                            horizontalAlignment:
-                                                Text.AlignRight
-                                        }
-                                    }
-
-                                    background: Rectangle {
-                                        radius: 4
-
-                                        color:
-                                            redoItem.enabled
-                                            && redoItem.hovered
-                                            ? root.contextMenuHover
-                                            : "transparent"
-                                    }
-                                }
-
-                                Rectangle {
-                                    width: parent.width - 20
-                                    height: 1
-
-                                    x: 10
-
-                                    color:
-                                        root.contextMenuBorder
-
-                                    opacity: 0.75
-                                }
-
-                                MenuItem {
-                                    id: cutItem
-
-                                    width: parent.width
-                                    height: 30
-
-                                    text: qsTr("剪切")
-
-                                    enabled:
-                                        textArea.selectedText.length > 0
-
-                                    padding: 0
-
-                                    onTriggered: {
-                                        textArea.cut()
-                                        editorContextMenu.close()
-                                    }
-
-                                    contentItem: RowLayout {
-                                        anchors.fill: parent
-
-                                        anchors.leftMargin: 10
-                                        anchors.rightMargin: 10
-
-                                        spacing: 12
-
-                                        Text {
-                                            Layout.fillWidth: true
-
-                                            text: cutItem.text
-
-                                            color:
-                                                !cutItem.enabled
-                                                ? root.contextMenuDisabled
-                                                : cutItem.hovered
-                                                  ? "#ffffff"
-                                                  : root.contextMenuText
-
-                                            font.pixelSize: 13
-
-                                            verticalAlignment:
-                                                Text.AlignVCenter
-                                        }
-
-                                        Text {
-                                            text: "Ctrl+X"
-
-                                            color:
-                                                !cutItem.enabled
-                                                ? root.contextMenuShortcutDisabled
-                                                : cutItem.hovered
-                                                  ? "#ffffff"
-                                                  : root.contextMenuShortcut
-
-                                            font.pixelSize: 11
-
-                                            verticalAlignment:
-                                                Text.AlignVCenter
-
-                                            horizontalAlignment:
-                                                Text.AlignRight
-                                        }
-                                    }
-
-                                    background: Rectangle {
-                                        radius: 4
-
-                                        color:
-                                            cutItem.enabled
-                                            && cutItem.hovered
-                                            ? root.contextMenuHover
-                                            : "transparent"
-                                    }
-                                }
-
-                                MenuItem {
-                                    id: copyItem
-
-                                    width: parent.width
-                                    height: 30
-
-                                    text: qsTr("复制")
-
-                                    enabled:
-                                        textArea.selectedText.length > 0
-
-                                    padding: 0
-
-                                    onTriggered: {
-                                        textArea.copy()
-                                        editorContextMenu.close()
-                                    }
-
-                                    contentItem: RowLayout {
-                                        anchors.fill: parent
-
-                                        anchors.leftMargin: 10
-                                        anchors.rightMargin: 10
-
-                                        spacing: 12
-
-                                        Text {
-                                            Layout.fillWidth: true
-
-                                            text: copyItem.text
-
-                                            color:
-                                                !copyItem.enabled
-                                                ? root.contextMenuDisabled
-                                                : copyItem.hovered
-                                                  ? "#ffffff"
-                                                  : root.contextMenuText
-
-                                            font.pixelSize: 13
-
-                                            verticalAlignment:
-                                                Text.AlignVCenter
-                                        }
-
-                                        Text {
-                                            text: "Ctrl+C"
-
-                                            color:
-                                                !copyItem.enabled
-                                                ? root.contextMenuShortcutDisabled
-                                                : copyItem.hovered
-                                                  ? "#ffffff"
-                                                  : root.contextMenuShortcut
-
-                                            font.pixelSize: 11
-
-                                            verticalAlignment:
-                                                Text.AlignVCenter
-
-                                            horizontalAlignment:
-                                                Text.AlignRight
-                                        }
-                                    }
-
-                                    background: Rectangle {
-                                        radius: 4
-
-                                        color:
-                                            copyItem.enabled
-                                            && copyItem.hovered
-                                            ? root.contextMenuHover
-                                            : "transparent"
-                                    }
-                                }
-
-                                MenuItem {
-                                    id: pasteItem
-
-                                    width: parent.width
-                                    height: 30
-
-                                    text: qsTr("粘贴")
-
-                                    enabled:
-                                        textArea.canPaste
-
-                                    padding: 0
-
-                                    onTriggered: {
-                                        textArea.paste()
-                                        editorContextMenu.close()
-                                    }
-
-                                    contentItem: RowLayout {
-                                        anchors.fill: parent
-
-                                        anchors.leftMargin: 10
-                                        anchors.rightMargin: 10
-
-                                        spacing: 12
-
-                                        Text {
-                                            Layout.fillWidth: true
-
-                                            text: pasteItem.text
-
-                                            color:
-                                                !pasteItem.enabled
-                                                ? root.contextMenuDisabled
-                                                : pasteItem.hovered
-                                                  ? "#ffffff"
-                                                  : root.contextMenuText
-
-                                            font.pixelSize: 13
-
-                                            verticalAlignment:
-                                                Text.AlignVCenter
-                                        }
-
-                                        Text {
-                                            text: "Ctrl+V"
-
-                                            color:
-                                                !pasteItem.enabled
-                                                ? root.contextMenuShortcutDisabled
-                                                : pasteItem.hovered
-                                                  ? "#ffffff"
-                                                  : root.contextMenuShortcut
-
-                                            font.pixelSize: 11
-
-                                            verticalAlignment:
-                                                Text.AlignVCenter
-
-                                            horizontalAlignment:
-                                                Text.AlignRight
-                                        }
-                                    }
-
-                                    background: Rectangle {
-                                        radius: 4
-
-                                        color:
-                                            pasteItem.enabled
-                                            && pasteItem.hovered
-                                            ? root.contextMenuHover
-                                            : "transparent"
-                                    }
-                                }
-
-                                MenuItem {
-                                    id: deleteItem
-
-                                    width: parent.width
-                                    height: 30
-
-                                    text: qsTr("删除")
-
-                                    enabled:
-                                        textArea.selectedText.length > 0
-
-                                    padding: 0
-
-                                    onTriggered: {
-                                        textArea.remove(
-                                            textArea.selectionStart,
-                                            textArea.selectionEnd
-                                        )
-                                        editorContextMenu.close()
-                                    }
-
-                                    contentItem: RowLayout {
-                                        anchors.fill: parent
-
-                                        anchors.leftMargin: 10
-                                        anchors.rightMargin: 10
-
-                                        spacing: 12
-
-                                        Text {
-                                            Layout.fillWidth: true
-
-                                            text: deleteItem.text
-
-                                            color:
-                                                !deleteItem.enabled
-                                                ? root.contextMenuDisabled
-                                                : deleteItem.hovered
-                                                  ? "#ffffff"
-                                                  : root.contextMenuText
-
-                                            font.pixelSize: 13
-
-                                            verticalAlignment:
-                                                Text.AlignVCenter
-                                        }
-
-                                        Text {
-                                            text: "Delete"
-
-                                            color:
-                                                !deleteItem.enabled
-                                                ? root.contextMenuShortcutDisabled
-                                                : deleteItem.hovered
-                                                  ? "#ffffff"
-                                                  : root.contextMenuShortcut
-
-                                            font.pixelSize: 11
-
-                                            verticalAlignment:
-                                                Text.AlignVCenter
-
-                                            horizontalAlignment:
-                                                Text.AlignRight
-                                        }
-                                    }
-
-                                    background: Rectangle {
-                                        radius: 4
-
-                                        color:
-                                            deleteItem.enabled
-                                            && deleteItem.hovered
-                                            ? root.contextMenuHover
-                                            : "transparent"
-                                    }
-                                }
-
-                                Rectangle {
-                                    width: parent.width - 20
-                                    height: 1
-
-                                    x: 10
-
-                                    color:
-                                        root.contextMenuBorder
-
-                                    opacity: 0.75
-                                }
-
-                                MenuItem {
-                                    id: selectAllItem
-
-                                    width: parent.width
-                                    height: 30
-
-                                    text: qsTr("全选")
-
-                                    enabled:
-                                        textArea.length > 0
-
-                                    padding: 0
-
-                                    onTriggered: {
-                                        textArea.selectAll()
-                                        editorContextMenu.close()
-                                    }
-
-                                    contentItem: RowLayout {
-                                        anchors.fill: parent
-
-                                        anchors.leftMargin: 10
-                                        anchors.rightMargin: 10
-
-                                        spacing: 12
-
-                                        Text {
-                                            Layout.fillWidth: true
-
-                                            text: selectAllItem.text
-
-                                            color:
-                                                !selectAllItem.enabled
-                                                ? root.contextMenuDisabled
-                                                : selectAllItem.hovered
-                                                  ? "#ffffff"
-                                                  : root.contextMenuText
-
-                                            font.pixelSize: 13
-
-                                            verticalAlignment:
-                                                Text.AlignVCenter
-                                        }
-
-                                        Text {
-                                            text: "Ctrl+A"
-
-                                            color:
-                                                !selectAllItem.enabled
-                                                ? root.contextMenuShortcutDisabled
-                                                : selectAllItem.hovered
-                                                  ? "#ffffff"
-                                                  : root.contextMenuShortcut
-
-                                            font.pixelSize: 11
-
-                                            verticalAlignment:
-                                                Text.AlignVCenter
-
-                                            horizontalAlignment:
-                                                Text.AlignRight
-                                        }
-                                    }
-
-                                    background: Rectangle {
-                                        radius: 4
-
-                                        color:
-                                            selectAllItem.enabled
-                                            && selectAllItem.hovered
-                                            ? root.contextMenuHover
-                                            : "transparent"
-                                    }
-                                }
-                            }
-                        }
-
-                        /*
-                         * 在 Popup 打开前计算最终坐标。
-                         * 不延迟，不二次修正，因此不会闪现初始位置。
-                         */
-                        function openEditorContextMenu(mouseX, mouseY) {
-                            /*
-                             * 菜单和 contentArea 使用同一个坐标系。
-                             *
-                             * 这里的 10px 有两个作用：
-                             *
-                             * 1. 上 / 右 / 下：距离 contentArea 边缘 10px；
-                             * 2. 左：距离编辑器中间那根竖线 10px。
-                             *
-                             * 注意左侧不能直接使用 contentArea.left，
-                             * 因为 contentArea 最左边还有 50px 行号栏。
-                             */
-                            var margin = 10
-
-                            /*
-                             * Popup 已经固定为最终尺寸，
-                             * 因此这里不会出现第一次打开时 height=0。
-                             */
-                            var menuWidth = editorContextMenu.width
-                            var menuHeight = editorContextMenu.height
-
-                            /*
-                             * 竖线位置：
-                             * gutter.width + 1px separator。
-                             * 菜单再向右留 10px。
-                             */
-                            var minX =
-                                gutter.width
-                                + 1
-                                + margin
-
-                            var minY = margin
-
-                            /*
-                             * 右边和下边同样保留 10px。
-                             */
-                            var maxX = Math.max(
-                                minX,
-                                contentArea.width
-                                - menuWidth
-                                - margin
-                            )
-
-                            var maxY = Math.max(
-                                minY,
-                                contentArea.height
-                                - menuHeight
-                                - margin
-                            )
-
-                            var finalX = Math.max(
-                                minX,
-                                Math.min(mouseX, maxX)
-                            )
-
-                            var finalY = Math.max(
-                                minY,
-                                Math.min(mouseY, maxY)
-                            )
-
-                            /*
-                             * 先关闭旧菜单，再设置最终位置，
-                             * 最后才 open()。
-                             *
-                             * 整个过程不使用 Qt.callLater，
-                             * 不进行第二次移动，因此不会闪出
-                             * 一个“初始位置”的菜单。
-                             */
-                            editorContextMenu.close()
-
-                            editorContextMenu.x =
-                                Math.round(finalX)
-
-                            editorContextMenu.y =
-                                Math.round(finalY)
-
-                            editorContextMenu.open()
-                        }
-
-                    }
-                }
+                /*
+                 * 和卡片边缘留出内边距，下面两角的圆角交给卡片自己。
+                 *
+                 * 编辑器是原生子控件，它自己的矩形角是直角，会盖住
+                 * contentArea（radius: 10）的圆角。给它自己裁角会把竖向
+                 * 滚动条一起裁掉（滑块点不到）；撑到窗口底边又会超出容器
+                 * 压住状态栏。留内边距是最稳的。
+                 */
+                readonly property int cardInset: 10
+
+                anchors.leftMargin: cardInset
+                anchors.rightMargin: cardInset
+                anchors.bottomMargin: cardInset
+
+                /*
+                 * 没有标签时**必须真的隐藏**：原生子窗口不受 QML 的
+                 * 层叠影响，只要 show 着就会盖在欢迎页上面。
+                 */
+                visible: root.view.hasDocument
+
+                paddingLeft: 12
+                paddingRight: 12
+
+                fontPixelSize: root.editorFontSize
+                textColor: "#d6d7da"
+                paperColor: root.editorBg
+                gutterColor: root.editorBg
+                lineNumberColor: root.lineNumberColor
+
+                /* 切换标签时把"全部高亮"重新刷一遍 */
+                onDocumentsChanged: if (find.opened) find.refreshHighlight()
             }
         }
     }

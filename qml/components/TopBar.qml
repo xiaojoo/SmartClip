@@ -4,15 +4,16 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import "../utils"
+import SmartClip.Globals 1.0
+import "../../js/EditorMenus.js" as Menus
 
 /*
  * 顶部这一行（原生标题栏去掉后它就是窗口最顶上的一行）：
  *
- *   [S] SmartClip │ 文件 编辑 视图 … 帮助        [🔍 搜索剪贴内容]  [− □ ×]
+ *   [S] SmartClip │ 文件 编辑 搜索 … 帮助        [🔍 搜索剪贴内容]  [− □ ×]
  *
- * 最左边的 ☰ 汉堡键和「main」分支选择器已经去掉：
- * 汉堡键弹出的那组菜单和菜单栏 tab 是同一份东西，重复；
- * 分支名是从 IDE 抄来的装饰，这个应用不做版本控制。
+ * 菜单项和工具栏按钮是同一套命令（见 js/EditorMenus.js 与 Main.qml 的
+ * dispatch），菜单里额外显示快捷键、勾选状态和禁用状态。
  *
  * 搜索框在这一行的最右边（菜单右边）。
  * 最小化 / 最大化(还原) / 关闭 三个按钮在搜索框右边，也在这同一行。
@@ -25,6 +26,13 @@ Rectangle {
 
     // 要操作的窗口（Main.qml 的 window），转给右侧的窗口按钮
     property var host: null
+    // 编辑器本体，菜单里的勾选 / 禁用状态要看它
+    property var view: null
+    /*
+     * 当前生效的快捷键清单（Cmd.shortcutItems，见 src/EditorController.h）。
+     * 菜单条目里硬编码的那份只是出厂默认，用户改过键之后要以这份为准。
+     */
+    property var shortcuts: []
 
     signal openMenu(Item anchor, var items)
     signal searchChanged(string text)
@@ -36,37 +44,33 @@ Rectangle {
     readonly property color textMuted:   "#6f737a"
     readonly property color fieldBg:     "#2b2d30"
 
-    function folderItems() {
-        return [ { label: "今天",  act: "folder:today" }, { label: "昨天", act: "folder:yesterday" },
-                 { label: "近 7 天", act: "folder:week" }, { label: "更早", act: "folder:older" } ]
-    }
-    function hasMenu(label) {
-        return label === "文件" || label === "编辑" || label === "视图" ||
-               label === "运行" || label === "工具" || label === "帮助"
-    }
+    function hasMenu(label) { return Menus.hasMenu(label) }
+
+    /*
+     * 菜单条目。
+     *
+     * 第三个参数把"用户改过的快捷键"覆盖表带进去（name -> 组合键），
+     * 没改过的动作不在表里，菜单就用 EditorMenus.js 里的出厂默认值。
+     */
     function menuItems(label) {
-        if (label === "文件") return [{ label: "刷新剪贴板", act: "refresh" }, { label: "退出", act: "quit" }]
-        if (label === "编辑") return [{ label: "复制所选", act: "copy" }, { label: "清空搜索", act: "clearsearch" }]
-        if (label === "视图") return folderItems()
-        if (label === "运行") return [{ label: "重新采集剪贴板", act: "refresh" }]
-        if (label === "工具") return [{ label: "设置", act: "none" }, { label: "关于 SmartClip", act: "none" }]
-        if (label === "帮助") return [{ label: "使用说明", act: "none" }, { label: "关于", act: "none" }]
-        return [{ label: "（暂无）", act: "none" }]
+        var ov = ({})
+        for (var i = 0; i < (root.shortcuts ? root.shortcuts.length : 0); ++i) {
+            var item = root.shortcuts[i]
+            if (item && item.name)
+                ov[item.name] = item.shortcut
+        }
+        return Menus.menuItems(label, root.view, ov)
     }
-    function toolItems() { return [{ label: "设置", act: "none" }, { label: "关于 SmartClip", act: "none" }] }
 
     /*
      * 锚点用左边的应用图标。
      *
-     * 原来锚在 ☰ 汉堡键上，那个键已经删掉；
      * 现在唯一还会调到这里的是 Main.qml 的 "menu:" 命令，
      * 用它当锚点菜单会从这一行最左边弹出，位置仍然合理。
      */
     function openGroup(label) { root.openMenu(appBadge, root.menuItems(label)) }
     function clearSearch() { field.text = "" }
-    function tabLabels() {
-        return ["文件", "编辑", "视图", "导航", "代码", "运行", "工具", "VCS", "窗口", "帮助"]
-    }
+    function tabLabels() { return Menus.tabLabels() }
 
     IconProvider { id: icons }
 
@@ -181,6 +185,17 @@ Rectangle {
                             font.pixelSize: 12; background: Item {}
                             verticalAlignment: TextInput.AlignVCenter
                             onTextChanged: root.searchChanged(text)
+
+                            /*
+                             * 编辑区是原生 QScintilla 子窗口，它拿着键盘焦点时
+                             * 打字进不了 QML。所以这个输入框拿到焦点时，先把原生
+                             * 控件的焦点交还给 QQuickWidget（见
+                             * EditorViewItem::releaseEditorFocus）。
+                             */
+                            onActiveFocusChanged: {
+                                if (activeFocus && root.view)
+                                    root.view.releaseEditorFocus()
+                            }
                         } }
                 }
             }
@@ -330,7 +345,7 @@ Rectangle {
              * 就是这个下场：报错刷屏，而且窗口完全拖不动。
              */
             try {
-                root.host.startSystemMove()
+                Win.startSystemMove()
             } catch (e) {
                 console.warn("TopBar: startSystemMove 不可用：", e)
             }
@@ -339,13 +354,12 @@ Rectangle {
         onReleased: (mouse) => { started = false }
 
         // 双击空白处 = 放大 / 还原，和原生标题栏的习惯一致
+        // （展开 / 收拢的动画在 winHelper 里，见 src/WindowHelper.cpp）
         onDoubleClicked: (mouse) => {
-            if (!root.host || overInteractive(mouse))
+            if (overInteractive(mouse))
                 return
-            if (root.host.visibility === Window.Maximized)
-                root.host.showNormal()
-            else
-                root.host.showMaximized()
+            /* 窗口操作统一走 WinHelper（见 src/WindowHelper.cpp） */
+            Win.toggleMaximize()
         }
     }
 }

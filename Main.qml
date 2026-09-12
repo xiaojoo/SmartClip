@@ -8,20 +8,21 @@ import "qml/utils"
 import "js/FolderManager.js" as Folders
 import "js/TimeUtils.js" as Time
 /*
- * 点击条目 / 菜单里的“复制”都要回填系统剪贴板，
- * 走的是 js/ClipboardManager.js 里包了一层 clipboardStore 的 Store。
+ * 点击条目 / 菜单里的"复制"都要回填系统剪贴板。
  *
- * QML 的 JS import 是按文件生效的：
- * ClipboardModel.qml 里那份 `as Store` 不会外泄到这里，
- * 所以这个文件必须自己 import 一次，否则 selectItem() 里
- * 的 Store.copyItem() 会直接抛 ReferenceError（剪贴板也回填不了）。
+ * 数据源现在是 QML 单例 Store（SmartClip.Globals，见 main.cpp 的
+ * qmlRegisterSingletonInstance）—— 任何 QML 文档只要 import 该模块就能直接用，
+ * 不再需要 js/ClipboardManager.js 那层包装（那个文件已删除）。
  */
-import "js/ClipboardManager.js" as Store
+import SmartClip.Globals 1.0
 
-ApplicationWindow {
+Rectangle {
     id: window
-    width: 1460; height: 900; minimumWidth: 1000; minimumHeight: 640; visible: true
-    title: "SmartClip — 剪贴板"
+    /*
+     * 窗口尺寸/标题/边框/可见性现在由 C++ 的 QWidget 负责（见 src/main.cpp），
+     * 这里只是 QQuickWidget 里的内容层。
+     */
+    width: 1460; height: 900
 
     /*
      * 窗口本身必须透明，整窗的圆角才画得出来。
@@ -41,12 +42,16 @@ ApplicationWindow {
     readonly property real cornerRadius: 12
 
     /*
-     * 是否处于最大化状态。
+     * 是否处于最大化（或正在进出的过程中）。
+     *
+     * 真值不在 QML 里，而是由 C++ 的 winHelper 维护（src/WindowHelper.h）：
+     * 展开 / 收拢的动画由它驱动，所以只有它知道当前算不算最大化；
+     * 用户把窗口拖到屏幕顶端吸附最大化时，它也会跟着窗口状态更新。
      *
      * 只有这个状态为 false 时才允许拖四边改窗口大小
      * （见文件末尾的 ResizeEdge），最大化时那四条热区整个关掉。
      */
-    readonly property bool maximized: window.visibility === Window.Maximized
+    readonly property bool maximized: Win.maximized
 
     /*
      * 去掉系统原生标题栏（截图里顶上那条白底、带图标 / 标题 /
@@ -57,13 +62,20 @@ ApplicationWindow {
      * 没有边框了，四边和四角的拖动改变大小也要自己补
      * （见文件末尾的 resizeHandles），否则窗口只能靠按钮最大化。
      */
-    flags: Qt.Window | Qt.FramelessWindowHint
 
     property string searchText: ""
     property var selectedItem: null
     property string activeFolder: "today"
     property var treeRows: []
-    property bool showWhatTab: true
+    /* 欢迎页 / 编辑器：现在由"有没有打开的标签"决定，见 EditorArea */
+
+    /*
+     * 编辑器本体（EditorArea 里的原生 EditorView）。
+     *
+     * 工具栏、状态栏、菜单里的勾选与禁用状态都绑在它身上；
+     * 命令也全发给它（见下面的 dispatch）。
+     */
+    readonly property var view: editor.view
 
     // ---- 左侧列表宽度（可由中间间隙拖动调整） ----
     property real folderTreeWidth: 300
@@ -86,6 +98,24 @@ ApplicationWindow {
     ]
     property var expanded: ({ "today": true, "yesterday": false, "week": false, "older": false })
 
+    /*
+     * 可改键清单的镜像（见 src/EditorController.h 的 shortcutItems）。
+     *
+     * 菜单里那个快捷键文字（js/EditorMenus.js 里硬编码的那份）在用户改过键
+     * 之后就对不上了，所以菜单构造时把这份清单传进 EditorMenus，让它用
+     * 当前生效的组合键覆盖显示值。C++ 侧改键会发 shortcutsChanged()，
+     * 下面那个 Connections 负责重新取一份。
+     */
+    property var shortcutItems: Cmd.shortcutItems
+
+    function shortcutLabel(name, fallback) {
+        for (var i = 0; i < shortcutItems.length; ++i)
+            if (shortcutItems[i].name === name)
+                return shortcutItems[i].shortcut !== "" ? shortcutItems[i].shortcut
+                                                        : (fallback !== undefined ? fallback : "")
+        return fallback !== undefined ? fallback : ""
+    }
+
     ClipboardModel { id: cbm; onChanged: window.rebuild() }
 
     function rebuild() { treeRows = Folders.buildTree(cbm.entries, folders, expanded, Time.periodFor) }
@@ -94,64 +124,458 @@ ApplicationWindow {
         var e = ({})
         for (var k in expanded) e[k] = expanded[k]
         e[key] = !e[key]
-        expanded = e; activeFolder = key; selectedItem = null; showWhatTab = true
+        expanded = e; activeFolder = key; selectedItem = null
         rebuild()
     }
     function activateFolder(key) {
         var e = ({})
         for (var k in expanded) e[k] = expanded[k]
         e[key] = true
-        expanded = e; activeFolder = key; selectedItem = null; showWhatTab = true
+        expanded = e; activeFolder = key; selectedItem = null
         rebuild()
     }
+
+    /*
+     * 点左侧条目。
+     *
+     *   图片 -> 走图片预览（没有正文可编辑）；
+     *   文本 -> 载入编辑器标签（正文由 C++ 按 id 从库里取，
+     *           全程不经过 QML 属性，见 src/EditorViewItem.h）。
+     *
+     * 两种都继续回填系统剪贴板 —— 这是这个应用本来的用途。
+     */
     function selectItem(item) {
-        selectedItem = item; showWhatTab = false
-        if (item) Store.copyItem(item.id)
-    }
-    function handleCommand(act) {
-        if (act === "refresh") refresh()
-        else if (act === "quit") window.close()
-        else if (act === "copy") { if (selectedItem) Store.copyItem(selectedItem.id) }
-        else if (act === "clearsearch") { searchText = ""; topBar.clearSearch() }
-        else if (act.indexOf("folder:") === 0) activateFolder(act.substring(7))
-        else if (act.indexOf("menu:") === 0) topBar.openGroup(act.substring(5))
+        selectedItem = item
+
+        if (!item) {
+            editor.previewItem = null
+            return
+        }
+
+        if (item.type === "image") {
+            editor.previewItem = item
+        } else {
+            editor.previewItem = null
+            view.openClipboardItem(item.id, item.title)
+            view.requestEditorFocus()
+        }
+
+        Store.copyItem(item.id)
     }
 
-    Component.onCompleted: refresh()
-    Connections { target: clipboardStore; function onChanged() { window.refresh() } }
+    /* ------------------------------------------------------------------
+     * 命令分发
+     *
+     * 工具栏按钮、菜单项、快捷键（C++ 侧 QAction，见 EditorController）
+     * 三条入口最后都落到这里，行为只有一份。
+     * ---------------------------------------------------------------- */
 
-    DropdownMenu { id: ddMenu; anchors.fill: parent; onSelected: (act) => window.handleCommand(act) }
+    function commentPrefix() {
+        var lang = view.language
+        if (lang === "python" || lang === "bash" || lang === "yaml"
+                || lang === "perl" || lang === "ruby" || lang === "makefile")
+            return "#"
+        if (lang === "sql" || lang === "lua")
+            return "--"
+        if (lang === "batch")
+            return "REM "
+        if (lang === "properties")
+            return ";"
+        if (lang === "fortran")
+            return "!"
+        if (lang === "tex")
+            return "%"
+        return "//"
+    }
+
+    function newFile() {
+        view.newDocument()
+        editor.previewItem = null
+        view.requestEditorFocus()
+    }
+
+    function openFile() {
+        var path = Cmd.openFileDialog()
+        if (path === "")
+            return
+        if (view.openFile(path) < 0)
+            Cmd.alert("打开失败", view.lastError)
+        else {
+            editor.previewItem = null
+            view.requestEditorFocus()
+        }
+    }
+
+    function saveFile() {
+        if (!view.hasDocument)
+            return false
+        if (view.filePath === "")
+            return saveFileAs()
+        if (!view.saveCurrent()) {
+            Cmd.alert("保存失败", view.lastError)
+            return false
+        }
+        return true
+    }
+
+    function saveFileAs() {
+        if (!view.hasDocument)
+            return false
+        var suggested = view.filePath !== "" ? Cmd.fileNameOf(view.filePath)
+                                             : view.displayName + ".txt"
+        var path = Cmd.saveFileDialog(suggested)
+        if (path === "")
+            return false
+        if (!view.saveCurrentAs(path)) {
+            Cmd.alert("保存失败", view.lastError)
+            return false
+        }
+        return true
+    }
+
+    /* 关闭一个标签（有未保存改动会先问）。返回是否真的关掉了。 */
+    function closeTab(index) {
+        var docs = view.documents
+        if (index === undefined || index === null || index < 0)
+            index = view.currentIndex
+        if (index < 0 || index >= docs.length)
+            return false
+
+        if (docs[index].modified) {
+            var answer = Cmd.confirmSave(docs[index].title)
+            if (answer === 2)
+                return false
+            if (answer === 0) {
+                view.activateDocument(index)
+                if (!saveFile())
+                    return false
+            }
+        }
+
+        view.closeDocument(index)
+        if (view.documents.length === 0)
+            editor.previewItem = null
+        return true
+    }
+
+    /* 从后往前关，前面的下标才不会跟着挪 */
+    function closeTabs(indices) {
+        indices.sort(function (a, b) { return b - a })
+        for (var i = 0; i < indices.length; ++i) {
+            if (!closeTab(indices[i]))
+                return
+        }
+    }
+
+    function closeOtherTabs() {
+        var keep = view.currentIndex
+        var rest = []
+        for (var i = 0; i < view.documents.length; ++i)
+            if (i !== keep) rest.push(i)
+        closeTabs(rest)
+    }
+
+    function closeAllTabs() {
+        var all = []
+        for (var i = 0; i < view.documents.length; ++i)
+            all.push(i)
+        closeTabs(all)
+    }
+
+    function saveAll() {
+        for (var i = 0; i < view.documents.length; ++i) {
+            if (!view.documents[i].modified)
+                continue
+            view.activateDocument(i)
+            if (!saveFile())
+                return
+        }
+    }
+
+    function showFind(replace) {
+        if (!view.hasDocument)
+            return
+        if (replace) editor.findBar.openReplace()
+        else editor.findBar.openFind()
+    }
+
+    function findStep(forward) {
+        if (!editor.findBar.opened || editor.findBar.currentText() === "") {
+            showFind(false)
+            return
+        }
+        editor.findBar.findNext(forward)
+    }
+
+    function gotoLine() {
+        if (!view.hasDocument)
+            return
+        var line = Cmd.askLineNumber(view.lineCount, view.cursorLine)
+        if (line > 0) {
+            view.gotoLine(line)
+            view.requestEditorFocus()
+        }
+    }
+
+    function toggleWrap() {
+        view.wrapEnabled = !view.wrapEnabled
+        Cmd.remember("wrap", view.wrapEnabled ? "1" : "0")
+    }
+
+    function toggleLineNumbers() {
+        view.lineNumbersVisible = !view.lineNumbersVisible
+        Cmd.remember("lineNumbers", view.lineNumbersVisible ? "1" : "0")
+    }
+
+    function toggleWhitespace() {
+        view.whitespaceVisible = !view.whitespaceVisible
+        Cmd.remember("whitespace", view.whitespaceVisible ? "1" : "0")
+    }
+
+    function showShortcuts() {
+        settingsPanel.show("shortcuts")
+    }
+
+    function showAbout() {
+        settingsPanel.show("about")
+    }
+
+    function dispatch(act) {
+        if (act === undefined || act === null || act === "" || act === "none")
+            return
+
+        /* ---- 带参数的命令 ---- */
+        if (act.indexOf("fontSize:") === 0) {
+            var px = parseInt(act.substring(9))
+            if (!isNaN(px) && px >= 6 && px <= 72)
+                editor.editorFontSize = px      // 走绑定，见 EditorArea.editorFontSize
+            return
+        }
+        if (act.indexOf("commentFontSize:") === 0) {
+            var cpx = parseInt(act.substring(16))
+            if (!isNaN(cpx) && cpx >= 0 && cpx <= 72)
+                view.commentFontPixelSize = cpx
+            return
+        }
+        if (act.indexOf("font:") === 0) { view.fontFamily = act.substring(5); return }
+        if (act.indexOf("lang:") === 0) { view.language = act.substring(5); return }
+        if (act.indexOf("encoding:") === 0) { view.encoding = act.substring(9); return }
+        if (act.indexOf("eol:") === 0) { view.eolMode = act.substring(4); return }
+        if (act.indexOf("menu:") === 0) { topBar.openGroup(act.substring(5)); return }
+        if (act.indexOf("folder:") === 0) { activateFolder(act.substring(7)); return }
+
+        /* ---- 文件 ---- */
+        if (act === "new") { newFile(); return }
+        if (act === "open") { openFile(); return }
+        if (act === "save") { saveFile(); return }
+        if (act === "saveAs") { saveFileAs(); return }
+        if (act === "saveAll") { saveAll(); return }
+        if (act === "closeTab") { closeTab(view.currentIndex); return }
+        if (act === "closeOtherTabs") { closeOtherTabs(); return }
+        if (act === "closeAllTabs") { closeAllTabs(); return }
+        if (act === "print") { view.printDocument(); return }
+        if (act === "refresh") { refresh(); return }
+        if (act === "quit") { Win.closeWindow(); return }
+        if (act === "clearsearch") { searchText = ""; topBar.clearSearch(); return }
+
+        /* ---- 编辑 ---- */
+        if (act === "undo") { view.undo(); return }
+        if (act === "redo") { view.redo(); return }
+        if (act === "cut") { view.cut(); return }
+        if (act === "copy") { view.copy(); return }
+        if (act === "paste") { view.paste(); return }
+        if (act === "selectAll") { view.selectAll(); return }
+        if (act === "copyLine") { view.copyCurrentLine(); return }
+        if (act === "copyAll") { view.copyAll(); return }
+        if (act === "deleteLine") { view.deleteLine(); return }
+        if (act === "duplicateLine") { view.duplicateLine(); return }
+        if (act === "toggleComment") { view.toggleComment(commentPrefix()); return }
+        if (act === "toggleReadOnly") { view.readOnly = !view.readOnly; return }
+
+        /* ---- 查找 ---- */
+        if (act === "find") { showFind(false); return }
+        if (act === "replace") { showFind(true); return }
+        if (act === "findNext") { findStep(true); return }
+        if (act === "findPrev") { findStep(false); return }
+        if (act === "goto") { gotoLine(); return }
+
+        /* ---- 视图 ---- */
+        if (act === "zoomIn") { view.zoomIn(); return }
+        if (act === "zoomOut") { view.zoomOut(); return }
+        if (act === "zoomReset") { view.zoomReset(); return }
+        if (act === "toggleWrap") { toggleWrap(); return }
+        if (act === "toggleLineNumbers") { toggleLineNumbers(); return }
+        if (act === "toggleWhitespace") { toggleWhitespace(); return }
+        if (act === "toggleIndentGuides") {
+            view.indentGuidesVisible = !view.indentGuidesVisible
+            Cmd.remember("indentGuides", view.indentGuidesVisible ? "1" : "0")
+            return
+        }
+        if (act === "toggleFolding") { view.foldingEnabled = !view.foldingEnabled; return }
+        if (act === "foldAll") { view.foldAll(); return }
+        if (act === "unfoldAll") { view.unfoldAll(); return }
+
+        /* ---- 其它 ---- */
+        if (act === "shortcuts") { showShortcuts(); return }
+        if (act === "settings") { showShortcuts(); return }
+        if (act === "about") { showAbout(); return }
+    }
+
+    /* 菜单栏 / 旧接口名 */
+    function handleCommand(act) { dispatch(act) }
 
     /*
-     * 圆角遮罩的形状（白 = 保留，透明 = 挖掉）。
+     * 界面侧绑定状态，给 `--self-test` 用（见 src/SelfTest.h）。
      *
-     * 白色本身不会被画到屏幕上：visible: false 只是让它不参与正常显示，
-     * 下面 maskSource 会单独把它渲染成一张纹理当蒙版用。
+     * 工具栏按钮能不能点、状态栏有没有拿到编辑器，这些都是 QML 绑定，
+     * C++ 侧看不到；自检时由这里把结果报出去。
      */
-    Rectangle {
-        id: maskShape
+    function uiState() {
+        return {
+            hasView: view !== null && view !== undefined,
+            topBarHasView: topBar.view !== null && topBar.view !== undefined,
+            statusHasDoc: statusBar.hasDoc,
+            findOpened: editor.findBar.opened,
+            findReplaceVisible: editor.findBar.replaceVisible,
+            /* 下拉菜单：长菜单（语言 27 项）必须限高 + 可滚动，
+               否则会一路盖住左侧导航栏（见 DropdownMenu.maxMenuHeight） */
+            menuOpened: ddMenu.opened,
+            menuHeight: ddMenu.menuHeight,
+            menuContentHeight: ddMenu.entriesHeight,
+            menuScrollable: ddMenu.scrollable,
+            /* 有图标的菜单：图标在左、快捷键在右（工具栏已取消） */
+            menuHasIcons: ddMenu.hasIcons,
 
-        visible: false
-        width: window.width; height: window.height
-        radius: window.cornerRadius
-        color: "#ffffff"
+            /*
+             * 分隔线热区的纵向范围（自检里量它有没有越界）。
+             *
+             * splitterTop / splitterBottom 必须和中间行（midRow）的上下边界
+             * 对齐：高了会压住顶栏菜单，低了会压住底部状态栏，
+             * 那两条上也就能拖动左树宽度（改之前就是这个毛病）。
+             */
+            splitterTop: splitterMouse.y,
+            splitterBottom: splitterMouse.y + splitterMouse.height,
+            midRowTop: window.mapFromItem(midRow, 0, 0).y,
+            midRowBottom: window.mapFromItem(midRow, 0, 0).y + midRow.height,
+            topBarHeight: topBar.height,
+            statusBarHeight: statusBar.height,
+            windowHeight: window.height
+        }
     }
 
     /*
-     * 把遮罩形状渲染成纹理。
+     * 最大化 / 还原。
      *
-     * MultiEffect 的 maskSource 必须是一个能提供纹理的源
-     * （ShaderEffectSource），直接塞一个普通 Item 进去
-     * 会拿不到纹理，结果整个窗口被乘成黑色 —— 实测就是这样。
+     * 不再直接 showMaximized() / showNormal()：那两步由 C++ 的
+     * winHelper 接管（尺寸一次到位，界面做一次淡入，见
+     * src/WindowHelper.cpp 顶部为什么不做几何动画）。
      */
-    ShaderEffectSource {
-        id: maskTexture
+    function toggleMaximize() { Win.toggleMaximize() }
 
-        sourceItem: maskShape
-        hideSource: true
-        live: true
-        smooth: true
-        width: window.width; height: window.height
+    /*
+     * 分段计时"点开一条长文本"这条路径。
+     *
+     * 之前只测到一个总数（2 秒），无法判断是"切换界面"、"写剪贴板"、
+     * 还是"虚拟行重算"造成的，所以这里把每一步单独计时。
+     */
+    Component.onCompleted: {
+        /*
+         * 窗口已经由 C++ 侧交给 WindowHelper（main.cpp 里 attachWidget），
+         * 这里只需要把数据刷出来，并把上次的编辑器视图设置恢复回来。
+         */
+        refresh()
+
+        /*
+         * 恢复上次的字号 / 换行 / 行号 / 空白字符设置。
+         * 字号出厂默认 12（见 EditorArea.editorFontSize 与 EditorViewItem）。
+         */
+        var size = parseInt(Cmd.recall("fontSize", "12"))
+        if (!isNaN(size) && size >= 6 && size <= 72)
+            editor.editorFontSize = size
+
+        /* 注释字号 / 字体家族也是上次怎么设的怎么回来 */
+        var commentSize = parseInt(Cmd.recall("commentFontSize", "0"))
+        if (!isNaN(commentSize) && commentSize >= 0 && commentSize <= 72)
+            view.commentFontPixelSize = commentSize
+        var family = Cmd.recall("fontFamily", "Consolas")
+        if (family !== "")
+            view.fontFamily = family
+
+        view.wrapEnabled = Cmd.recall("wrap", "0") === "1"
+        view.lineNumbersVisible = Cmd.recall("lineNumbers", "1") === "1"
+        view.whitespaceVisible = Cmd.recall("whitespace", "0") === "1"
+        view.indentGuidesVisible = Cmd.recall("indentGuides", "1") === "1"
+    }
+
+    Connections { target: Store; function onChanged() { window.refresh() } }
+
+    /* 快捷键（C++ 侧注册的 QAction，见 src/EditorController.h）走到同一份分发 */
+    Connections {
+        target: Cmd
+        function onCommandRequested(name) { window.dispatch(name) }
+        /* 改键 / 恢复默认之后，菜单里的快捷键文字要跟着变 */
+        function onShortcutsChanged() { window.shortcutItems = Cmd.shortcutItems }
+    }
+
+    /* 需要记住的编辑器视图设置 */
+    Connections {
+        target: editor.view
+
+        function onFontChanged() {
+            Cmd.remember("fontSize", String(editor.view.fontPixelSize))
+            Cmd.remember("commentFontSize", String(editor.view.commentFontPixelSize))
+            Cmd.remember("fontFamily", editor.view.fontFamily)
+        }
+        function onWrapChanged() {
+            Cmd.remember("wrap", editor.view.wrapEnabled ? "1" : "0")
+        }
+        function onLineNumbersChanged() {
+            Cmd.remember("lineNumbers", editor.view.lineNumbersVisible ? "1" : "0")
+        }
+        function onWhitespaceChanged() {
+            Cmd.remember("whitespace", editor.view.whitespaceVisible ? "1" : "0")
+        }
+        function onIndentGuidesChanged() {
+            Cmd.remember("indentGuides", editor.view.indentGuidesVisible ? "1" : "0")
+        }
+        function onErrorOccurred(message) {
+            /*
+             * 自检模式（--self-test）里不弹模态框。
+             *
+             * 自检有一条"故意往不存在的路径写文件"的检查项，它会触发这个信号；
+             * 照平时那样弹 QMessageBox 就会卡在模态框上，桌面上留一个点不掉的
+             * 窗口（真踩过：自检进程挂住，用户看到一个"出错了"对话框）。
+             */
+            if (!Cmd.selfTestMode)
+                Cmd.alert("出错了", message)
+        }
+    }
+
+    /*
+     * 下拉菜单。
+     *
+     * 它是**原生弹窗**（见 qml/components/DropdownMenu.qml 开头）：
+     * 编辑区是原生子窗口，场景内的浮层会被它盖住，所以菜单必须自己是一个
+     * 同级原生窗口。这里不再有 anchors.fill —— Popup 不是 Item。
+     */
+    DropdownMenu {
+        id: ddMenu
+        parent: window
+        onSelected: (act) => window.dispatch(act)
+    }
+
+    /*
+     * 设置面板（快捷键 / 关于）。
+     *
+     * 和下拉菜单一样是**原生弹窗**（见 qml/components/SettingsPanel.qml 开头）：
+     * 左边是操作步骤、右边是具体内容，编辑区那个原生子窗口盖不住它。
+     */
+    SettingsPanel {
+        id: settingsPanel
+        parent: window
+        view: window.view
+        entries: window.shortcutItems
+        onCommandRequested: (act) => window.dispatch(act)
     }
 
     /*
@@ -173,6 +597,30 @@ ApplicationWindow {
 
         anchors.fill: parent
 
+        /*
+         * 最大化 / 还原的淡入。
+         *
+         * 窗口尺寸是一次到位的（见 src/WindowHelper.cpp 里为什么不做几何
+         * 动画），所以这里用一次短促的"压暗 -> 回全亮"把这次跳变盖过去。
+         *
+         * 从暗处淡入（而不是从亮处淡出）：界面本身是深色，压暗再回来
+         * 看起来是"刷新了一下"，比发白自然 —— 之前试过淡到 0.72 再回来，
+         * 屏幕上一片灰白，就是那个味道不对。
+         *
+         * 淡入只作用在这一层的 opacity 上，不参与布局，
+         * 所以内容再多（三千行文本也一样）都不会因此变慢。
+         */
+        property bool transitioning: Win.transitioned
+        opacity: 1.0
+
+        NumberAnimation on opacity {
+            running: interfaceRoot.transitioning
+            from: 0.45
+            to: 1.0
+            duration: 150
+            easing.type: Easing.OutCubic
+        }
+
         Rectangle {
             id: contentRoot
 
@@ -181,19 +629,14 @@ ApplicationWindow {
             // 卡片之外那圈底（编辑区右侧 5px 间隙、左树面板左侧的留白）
             color: "#313335"
 
-            layer.enabled: true
-            layer.effect: MultiEffect {
-
-                /*
-                 * 蒙版纹理和 contentRoot 位置一致（同为 0,0 且同尺寸），
-                 * 否则这条圆角裁剪会整体错位。
-                 */
-                maskEnabled: true
-                maskSource: maskTexture
-
-                // 圆角边缘抗锯齿，否则斜边会有台阶
-                antialiasing: true
-            }
+            /*
+             * 圆角不在这里做。
+             *
+             * 原来（QQuickWindow 时代）是把整棵子树渲染成纹理、再用蒙版裁圆角；
+             * 换成 QWidget + QQuickWidget 之后这套失效了 —— 内容不再由顶层
+             * QQuickWindow 直接合成，蒙版管不到窗口四角。
+             * 现在圆角由窗口自己负责，见 WindowHelper::applyRoundedMask()。
+             */
 
             ColumnLayout {
                 anchors.fill: parent; spacing: 0
@@ -210,11 +653,27 @@ ApplicationWindow {
             id: topBar
             Layout.fillWidth: true
             host: window
+            view: window.view
+            shortcuts: window.shortcutItems
             onOpenMenu: (anchor, items) => ddMenu.openFor(anchor, items)
             onSearchChanged: (text) => { window.searchText = text; window.refresh() }
         }
 
+        /*
+         * 工具栏那一行已经取消：所有命令都收进上面菜单栏的下拉菜单
+         * （文件 / 编辑 / 搜索 / 视图 / 语言 / 编码 / 换行 / 帮助），
+         * 菜单条目左边显示图标、右边显示快捷键（见 js/EditorMenus.js）。
+         */
+
         RowLayout {
+            /*
+             * 中间这一行（图标条 / 左树 / 5px 间隙 / 编辑区）。
+             *
+             * 它同时是分隔线热区的"容器"：热区高度只认这一行的上下边界
+             * （见文件末尾 splitterMouse），顶栏和底部状态栏都占不到。
+             */
+            id: midRow
+
             Layout.fillWidth: true; Layout.fillHeight: true
             spacing: 0
 
@@ -259,7 +718,12 @@ ApplicationWindow {
                     }
                     Item { width: 1; height: Math.max(1, parent.height - 300) }
 
-                    // 底部齿轮：导航条的收尾格子，同样给 hover（它不接点击）
+                    /*
+                     * 底部齿轮：打开设置面板（快捷键 / 关于）。
+                     *
+                     * 原来它只是个装饰格子（不接点击），现在接上 ——
+                     * 设置入口本来就该在这里，也省得再去菜单里找。
+                     */
                     Rectangle {
                         id: gearCell
                         width: 26; height: 26; x: 4; radius: 5
@@ -267,7 +731,13 @@ ApplicationWindow {
                         color: hot ? window.accentColor : "transparent"
                         AppIcon { anchors.centerIn: parent; provider: stripIcons; kind: "gear"
                                   tint: gearCell.hot ? "#ffffff" : "#9aa0a8"; size: 16 }
-                        MouseArea { id: gearHit; anchors.fill: parent; hoverEnabled: true }
+                        MouseArea {
+                            id: gearHit
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: window.showShortcuts()
+                        }
                     }
                 }
             }
@@ -326,22 +796,35 @@ ApplicationWindow {
                  */
                 Layout.rightMargin: 5
 
-                item: window.selectedItem
-                showWelcome: window.showWhatTab
+                /*
+                 * 图片条目走这里；文本条目直接进编辑器的标签。
+                 * （正文由 EditorView 的原生 QScintilla 渲染：
+                 *   同一条 66 万字符的条目，QML 侧 2.5~4.3 秒，
+                 *   原生 27ms —— 见 src/EditorViewItem.h）
+                 */
+                previewItem: {
+                    var it = window.selectedItem
+                    return (it && it.type === "image") ? it : null
+                }
+
+                onTabCloseRequested: (index) => window.closeTab(index)
+                onTabCloseAllRequested: window.closeAllTabs()
+                onNewTabRequested: window.newFile()
+                onClipboardRefreshRequested: window.refresh()
             }
         }
 
         /*
-         * 底部：原来的状态栏保持不变。
+         * 底部状态栏：行列号 / 选中 / 字符数 / 语言 / 编码 / 换行符 / 缩放。
          *
-         * 缩小 / 放大 / 关闭 不放这里 —— 它们和搜索框一起
-         * 在顶部那一行的最右边（见 TopBar.qml 末尾的 WindowControls）。
+         * 窗口按钮不在这里 —— 它们和搜索框一起在顶部那一行的最右边
+         * （见 TopBar.qml 末尾的 WindowControls）。
          */
         StatusBar {
+            id: statusBar
             Layout.fillWidth: true
-            title: window.selectedItem ? window.selectedItem.title : "README.md"
+            view: window.view
             count: cbm.entries.length
-            copied: window.selectedItem !== null
         }
             }
         }
@@ -483,7 +966,7 @@ ApplicationWindow {
             if (p.x <= corner) e |= Qt.LeftEdge
             if (p.x >= parent.width - corner) e |= Qt.RightEdge
 
-            host.startSystemResize(e)
+            Win.startSystemResize(e)
             mouse.accepted = true
         }
     }
@@ -523,6 +1006,18 @@ ApplicationWindow {
      * 光标稳定显示 Qt.SplitHCursor（左右两个箭头），
      * 而且落点正好在那条 5px 的间隙上。
      *
+     * 高度只认"中间那一行"（midRow：图标条 / 左树 / 间隙 / 编辑区）的
+     * 上下边界，不再铺满整个窗口：
+     *
+     *   原来写的是 y: 0 / height: parent.height，热区从窗口最顶上一直
+     *   拉到最底下，于是顶栏和底部状态栏那两条上也压着热区 ——
+     *   鼠标停在顶栏菜单上、停在底栏状态文字上，光标都会变成 <->，
+     *   那里也真的能拖动左树宽度，看着就是"分隔线溢出了上下两条栏"。
+     *
+     *   间隙本身只有 midRow 那么高，热区跟着它走就够了：
+     *   y 取 midRow.y、height 取 midRow.height（为什么不用 mapFromItem
+     *   换算，见下面 y 绑定那里的实测记录）。
+     *
      * 最大化时：拖动功能关掉（enabled: false），而且光标也要回到
      * 鼠标默认的箭头 —— 注意 enabled 挡不住 cursorShape（见上面
      * ResizeEdge 里的实测记录），所以这里把 cursorShape 也一起做成
@@ -538,9 +1033,24 @@ ApplicationWindow {
          * 位置直接取树面板的右边缘（= 间隙左边界），
          * 往左外扩 4px、往右盖住 5px 的间隙，落点就是那条缝。
          */
-        x: folderTree.panelRight - 4
+        x: Math.max(0, folderTree.panelRight - 4)
         width: 9
-        height: parent.height
+
+        // 纵向跟着中间那一行走（顶栏 / 底栏各占多少高度由布局决定）
+        /*
+         * 这里不要用 mapFromItem(..., 0, 0).y 去反推 midRow 的顶边。
+         *
+         * 实测（自检里量过）：同一个表达式写在 uiState() 里能算出 34，
+         * 写在这个 MouseArea 的 y 绑定里却一直是 0 —— 高度那条绑定
+         * （读的是 midRow.height）算得 840，两条绑定一个对一个不对，
+         * 于是热区还是从窗口最顶上铺下来。改成直接读 midRow.y，
+         * 不经过坐标换算，绑定就对得上。
+         *
+         * midRow 是顶栏下面那一行（ColumnLayout 里紧挨着 TopBar），
+         * 所以 midRow.y 就是顶栏的下沿。
+         */
+        y: midRow.y
+        height: midRow.height
 
         z: 2000
 

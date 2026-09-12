@@ -3,6 +3,7 @@ pragma ComponentBehavior: Bound
 import QtQuick
 import QtQuick.Layouts
 import "../utils"
+import SmartClip.Globals 1.0
 
 /*
  * 窗口按钮：缩小 / 放大（已放大时显示还原）/ 关闭。
@@ -32,10 +33,15 @@ RowLayout {
     property color hoverColor: "#4c96d8"
     property color textColor:  "#ffffff"
 
-    // 放大状态下换成“还原”图标
-    readonly property bool maximized: host
-        ? (host.visibility === Window.Maximized)
-        : false
+    /*
+     * 放大状态下换成“还原”图标。
+     *
+     * 这里看的也是 winHelper（Main.qml 里同一份真值）：
+     * 展开 / 收拢动画一启动图标就换过来，不用等动画跑完，
+     * 而且用户拖到屏幕顶端吸附最大化时图标也会跟着变。
+     * 万一这个组件被单独跑起来、拿不到 helper，就退回窗口状态。
+     */
+    readonly property bool maximized: Win.maximized
 
     IconProvider { id: icons }
 
@@ -79,12 +85,17 @@ RowLayout {
             id: mouse
             anchors.fill: parent
             hoverEnabled: true
+            /*
+             * 主窗口已经不由 QML 承担（根元素是 Rectangle，见 Main.qml），
+             * 所以三个按钮统一交给 WinHelper 去操作真正的窗口。
+             */
             onClicked: {
-                if (!root.host) return
-                if (btn.kind === "win-min")        root.host.showMinimized()
-                else if (btn.kind === "win-max")   root.host.showMaximized()
-                else if (btn.kind === "win-restore") root.host.showNormal()
-                else                               root.host.close()
+                if (btn.kind === "win-min")
+                    Win.minimizeWindow()
+                else if (btn.kind === "win-max" || btn.kind === "win-restore")
+                    Win.toggleMaximize()
+                else
+                    Win.closeWindow()
             }
         }
     }

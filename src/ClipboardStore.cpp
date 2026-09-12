@@ -5,6 +5,7 @@
 #include <QDir>
 #include <QGuiApplication>
 #include <QImage>
+#include <QPainter>
 #include <QSqlError>
 #include <QSqlQuery>
 #include <QStandardPaths>
@@ -60,6 +61,24 @@ bool ClipboardStore::addImage(const QImage &image) {
     return true;
 }
 
+QString ClipboardStore::previewFor(const QString &text) {
+    /*
+     * 列表摘要：压成单行 + 限长。
+     *
+     * 顺序很讲究：先截断再 simplified()。
+     * 反过来的话，一条 66 万字符的正文要先被 simplified() 全扫一遍，
+     * 虽然只是几十毫秒，但这是每一条都要付的成本。
+     * 先截到 400 字符再压，成本就与正文长度无关了。
+     */
+    constexpr int kProbe = 400;
+    constexpr int kPreview = 120;
+
+    QString head = text.left(kProbe).simplified();
+    if (head.size() > kPreview)
+        return head.left(kPreview) + QStringLiteral("…");
+    return head;
+}
+
 QVariantList ClipboardStore::items(const QString &queryText) const {
     QVariantList result;
     QSqlQuery query;
@@ -70,15 +89,31 @@ QVariantList ClipboardStore::items(const QString &queryText) const {
     query.addBindValue(pattern);
     if (!query.exec()) return result;
     while (query.next()) {
+        const QString type = query.value(1).toString();
+        const QString raw = query.value(3).toString();
+
         QVariantMap item;
         item["id"] = query.value(0);
-        item["type"] = query.value(1);
+        item["type"] = type;
         item["title"] = query.value(2);
-        item["content"] = query.value(3);
+        /*
+         * 只有文本条目给摘要；图片条目的 content 是文件路径，本来就很短。
+         * 正文本身一律不放进 QML —— 见 previewFor() 的说明。
+         */
+        item["content"] = (type == QStringLiteral("text")) ? previewFor(raw) : raw;
+        item["contentLength"] = raw.size();
         item["createdAt"] = query.value(4);
         result.append(item);
     }
     return result;
+}
+
+QString ClipboardStore::contentOf(qint64 id) const {
+    QSqlQuery query;
+    query.prepare("SELECT content FROM clipboard_items WHERE id = ?");
+    query.addBindValue(id);
+    if (!query.exec() || !query.next()) return QString();
+    return query.value(0).toString();
 }
 
 void ClipboardStore::copyItem(qint64 id) const {
@@ -86,9 +121,31 @@ void ClipboardStore::copyItem(qint64 id) const {
     query.prepare("SELECT type, content FROM clipboard_items WHERE id = ?");
     query.addBindValue(id);
     if (!query.exec() || !query.next()) return;
+
+    const QString type = query.value(0).toString();
+    const QString content = query.value(1).toString();
+
+    /*
+     * 超大内容不往系统剪贴板里塞。
+     *
+     * 用户点左侧列表是"看一眼"，不是"要复制"（真要复制有右键菜单的
+     * 复制全文/复制此行）。库里有一条 668K 字符的条目，
+     * 每次点开都把它写进系统剪贴板，那一趟是纯开销。
+     * 阈值取得比常见剪贴板内容大得多，正常复制完全不受影响。
+     */
+    constexpr int kAutoCopyLimit = 256 * 1024;
+    if (content.size() > kAutoCopyLimit && type != QStringLiteral("image"))
+        return;
+
     m_skipNextCapture = true;
-    if (query.value(0).toString() == "image") QGuiApplication::clipboard()->setImage(QImage(query.value(1).toString()));
-    else QGuiApplication::clipboard()->setText(query.value(1).toString());
+    if (type == QStringLiteral("image")) QGuiApplication::clipboard()->setImage(QImage(content));
+    else QGuiApplication::clipboard()->setText(content);
+}
+
+void ClipboardStore::copyText(const QString &text) const {
+    if (text.isEmpty()) return;
+    m_skipNextCapture = true;
+    QGuiApplication::clipboard()->setText(text);
 }
 
 bool ClipboardStore::takeSkipNextCapture() {

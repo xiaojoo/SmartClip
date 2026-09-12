@@ -11,6 +11,7 @@ QtObject {
         function p(d) { return '<path d="' + d + '" fill="none" stroke="' + c + '" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>' }
         function f(d) { return '<path d="' + d + '" fill="' + c + '"/>' }
         function ci(x, y, r) { return '<circle cx="' + x + '" cy="' + y + '" r="' + r + '" fill="' + c + '"/>' }
+        function co(x, y, r) { return '<circle cx="' + x + '" cy="' + y + '" r="' + r + '" fill="none" stroke="' + c + '" stroke-width="1.7"/>' }
         var s = ""
         if (kind === "chevron-down")   s = p('M4.4 6.4 L8 10 L11.6 6.4')
         else if (kind === "chevron-right") s = p('M6.4 4.4 L10 8 L6.4 11.6')
@@ -24,7 +25,7 @@ QtObject {
         else if (kind === "win-restore")   s = p('M6.2 4.2 H11.8 V9.8') + p('M4.2 6.2 H9.8 V11.8 H4.2 Z')
         else if (kind === "plus")          s = p('M8 3.6 L8 12.4 M3.6 8 L12.4 8')
         else if (kind === "refresh")       s = p('M14.4 9.4 A6.4 6.4 0 1 1 12.9 4.6') + p('M15.2 3.4 L15.2 6.8 L11.7 6.3')
-        else if (kind === "search")        s = '<circle cx="6.2" cy="6.2" r="4.1" fill="none" stroke="' + c + '" stroke-width="1.7"/>' + p('M9.4 9.4 L13.8 13.8')
+        else if (kind === "search")        s = co(6.2, 6.2, 4.1) + p('M9.4 9.4 L13.8 13.8')
         else if (kind === "gear")          s = p('M8 4.9 A3.1 3.1 0 1 0 8 11.1 A3.1 3.1 0 1 0 8 4.9') + (function(){ var t = ""; for (var a = 0; a < 360; a += 45) t += '<line x1="13.2" y1="8" x2="15.4" y2="8" stroke="' + c + '" stroke-width="1.6" stroke-linecap="round" transform="rotate(' + a + ' 8 8)"/>'; return t })()
         else if (kind === "more")          s = ci(8, 3.2, 1.5) + ci(8, 8, 1.5) + ci(8, 12.8, 1.5)
         else if (kind === "grid")          s = p('M3 3 H7 V7 H3 Z M9 3 H13 V7 H9 Z M3 9 H7 V13 H3 Z M9 9 H13 V13 H9 Z')
@@ -33,6 +34,32 @@ QtObject {
         else if (kind === "file")          s = p('M4 2.6 H8.9 L13.2 6.9 V12.8 A1.2 1.2 0 0 1 12 14 H4 A1.2 1.2 0 0 1 2.8 12.8 V3.8 A1.2 1.2 0 0 1 4 2.6 Z') + p('M8.9 2.6 V6.9 H13.2') + p('M5.8 10.1 H10.2 M5.8 12.1 H10.2')
         else if (kind === "image")         s = p('M2.6 3.6 H13.4 A1.2 1.2 0 0 1 14.6 4.8 V11.2 A1.2 1.2 0 0 1 13.4 12.4 H2.6 A1.2 1.2 0 0 1 1.4 11.2 V4.8 A1.2 1.2 0 0 1 2.6 3.6 Z') + ci(6, 7.1, 1.2) + p('M2 12.3 L6.3 8 L8.8 10.2 L11 8.4 L14 11.2')
         else if (kind === "trash")         s = p('M2.8 4.6 H13.2') + p('M5.3 4.6 V3.4 A1.2 1.2 0 0 1 6.5 2.2 H9.5 A1.2 1.2 0 0 1 10.7 3.4 V4.6') + p('M4.2 4.6 L4.9 12.9 A1.2 1.2 0 0 0 6.1 14 H9.9 A1.2 1.2 0 0 0 11.1 12.9 L11.8 4.6') + p('M6.6 7.6 V11.4 M9.4 7.6 V11.4')
+
+        // ---- 编辑器工具栏 ----
+        else if (kind === "new")           s = p('M4 2.6 H8.9 L13.2 6.9 V12.8 A1.2 1.2 0 0 1 12 14 H4 A1.2 1.2 0 0 1 2.8 12.8 V3.8 A1.2 1.2 0 0 1 4 2.6 Z') + p('M8.9 2.6 V6.9 H13.2') + p('M4.8 10.4 H8.2 M6.5 8.7 V12.1')
+        else if (kind === "open")          s = p('M2 5.4 A1.4 1.4 0 0 1 3.4 4 H6.4 L7.8 5.6 H12.4 A1.4 1.4 0 0 1 13.8 7 V8.2') + p('M2.2 7.8 H14.2 L12.9 12.6 A1.4 1.4 0 0 1 11.5 13.6 H4.3 A1.4 1.4 0 0 1 2.9 12.6 Z')
+        else if (kind === "save")          s = p('M3.2 2.6 H10.4 L13.4 5.6 V12.8 A1.2 1.2 0 0 1 12.2 14 H3.2 A1.2 1.2 0 0 1 2 12.8 V3.8 A1.2 1.2 0 0 1 3.2 2.6 Z') + p('M5.2 2.6 V6.2 H10 V2.6') + p('M4.4 9.2 H11 V13.8 H4.4 Z')
+        else if (kind === "save-as")       s = p('M3.2 2.6 H10.4 L13.4 5.6 V9.4') + p('M3.2 2.6 A1.2 1.2 0 0 0 2 3.8 V12.8 A1.2 1.2 0 0 0 3.2 14 H8.4') + p('M5.2 2.6 V6.2 H10 V2.6') + p('M10.6 12.4 L14 9 M11.6 8.6 H14.4 V11.4')
+        else if (kind === "undo")          s = p('M6.2 4.4 L3 7.6 L6.2 10.8') + p('M3 7.6 H9.4 A3.2 3.2 0 0 1 9.4 14')
+        else if (kind === "redo")          s = p('M9.8 4.4 L13 7.6 L9.8 10.8') + p('M13 7.6 H6.6 A3.2 3.2 0 0 0 6.6 14')
+        else if (kind === "cut")           s = co(4, 11.6, 2.1) + co(12, 11.6, 2.1) + p('M5.4 10.2 L11.2 2.4 M10.6 10.2 L4.8 2.4')
+        else if (kind === "copy")          s = p('M5.6 5.4 H12 A1.2 1.2 0 0 1 13.2 6.6 V12.8 A1.2 1.2 0 0 1 12 14 H5.6 A1.2 1.2 0 0 1 4.4 12.8 V6.6 A1.2 1.2 0 0 1 5.6 5.4 Z') + p('M2.8 10.6 V3.2 A1.2 1.2 0 0 1 4 2 H11.2')
+        else if (kind === "paste")         s = p('M5.8 3.6 H4.6 A1.2 1.2 0 0 0 3.4 4.8 V12.8 A1.2 1.2 0 0 0 4.6 14 H11.4 A1.2 1.2 0 0 0 12.6 12.8 V4.8 A1.2 1.2 0 0 0 11.4 3.6 H10.2') + p('M5.8 2.4 H10.2 V4.8 H5.8 Z')
+        else if (kind === "print")         s = p('M4.6 6.2 V2.6 H11.4 V6.2') + p('M4.6 12.4 H3 A1.2 1.2 0 0 1 1.8 11.2 V7.4 A1.2 1.2 0 0 1 3 6.2 H13 A1.2 1.2 0 0 1 14.2 7.4 V11.2 A1.2 1.2 0 0 1 13 12.4 H11.4') + p('M4.6 9.8 H11.4 V14 H4.6 Z')
+        else if (kind === "replace")       s = co(6, 6, 3.9) + p('M8.9 8.9 L11.4 11.4') + p('M7.6 13.2 H14 M12.6 11.6 L14.2 13.2 L12.6 14.8')
+        else if (kind === "goto")          s = p('M2.6 3.8 H13.4 M2.6 7 H8 M2.6 10.2 H8') + p('M10.6 8 V13.2 M9 11.6 L10.6 13.2 L12.2 11.6')
+        else if (kind === "zoom-in")       s = co(6.8, 6.8, 4.3) + p('M10 10 L14 14') + p('M4.8 6.8 H8.8 M6.8 4.8 V8.8')
+        else if (kind === "zoom-out")      s = co(6.8, 6.8, 4.3) + p('M10 10 L14 14') + p('M4.8 6.8 H8.8')
+        else if (kind === "zoom-reset")    s = co(6.8, 6.8, 4.3) + p('M10 10 L14 14') + ci(6.8, 6.8, 1.3)
+        else if (kind === "wrap")          s = p('M2.4 4.4 H13.6') + p('M2.4 8 H10.6 A2.6 2.6 0 0 1 10.6 13.2 H8.6') + p('M10.2 11.6 L8.2 13.2 L10.2 14.8')
+        else if (kind === "numbers")       s = p('M6.6 4.4 H14 M6.6 8 H14 M6.6 11.6 H14') + p('M2.4 3.6 L3.6 2.8 V7.4') + p('M2.4 10.6 H3.8 L2.4 13 H4.2')
+        else if (kind === "whitespace")    s = p('M6.4 3.2 V12.8') + p('M8.8 3.2 V12.8') + p('M6.4 3.2 H11.2 A2.6 2.6 0 0 1 11.2 8.4 H6.4')
+        else if (kind === "check")         s = p('M3.4 8.4 L6.4 11.4 L12.6 4.6')
+        else if (kind === "comment")       s = p('M6.2 3.4 L4.4 12.6 M9.8 3.4 L8 12.6 M3.4 6.6 H12.6 M2.8 9.4 H12')
+        else if (kind === "indent")        s = p('M6 3.8 H14 M6 8 H14 M6 12.2 H14') + p('M2.6 2.8 V13.2') + ci(2.6, 8, 0.7)
+        else if (kind === "select-all")    s = p('M3 4.6 H11 M3 8 H11 M3 11.4 H7.6') + p('M9.2 11.2 L10.8 12.8 L13.8 9.2')
+        else if (kind === "lock")          s = p('M4.6 7.4 H11.4 V13.4 H4.6 Z') + p('M6.4 7.4 V5.6 A1.6 1.6 0 0 1 9.6 5.6 V7.4') + ci(8, 10.4, 1)
+        else if (kind === "info")          s = co(8, 8, 6) + p('M8 7.4 V11.4') + ci(8, 4.9, 0.95)
         return "data:image/svg+xml;charset=utf-8," + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">' + s + '</svg>')
     }
 }
