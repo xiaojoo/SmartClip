@@ -99,12 +99,16 @@ class EditorViewItem : public QQuickItem {
     Q_PROPERTY(bool indentGuidesVisible READ indentGuidesVisible WRITE setIndentGuidesVisible NOTIFY indentGuidesChanged)
 
     /*
-     * 行号栏右侧那条分隔竖线（"序号右边加一条竖线"）。
+     * 紧贴正文左边的那条分隔竖线（"序号右边加一条竖线"）。
      *
-     * 实现：把一直空着的第 1 条边距（行号 = 第 0 列，折叠 = 第 2 列）留 1 像素
-     * 宽、背景刷成分隔色 —— 边距背景是整列一次填满的，所以它是一条从顶到底的
-     * 竖线，滚动 / 折叠 / 换语言都不影响（见 .cpp 的 applyMargins 与
+     * 实现：把最后一条边距（行号 = 第 0 列，折叠 = 第 1 列，它 = 第 2 列）留
+     * 1 像素宽、背景刷成分隔色 —— 边距背景是整列一次填满的，所以它是一条从顶
+     * 到底的竖线，滚动 / 折叠 / 换语言都不影响（见 .cpp 的 applyMargins 与
      * applyMarginTheme）。
+     *
+     * 摆在第 2 列（折叠栏**右边**、正文紧左边）：折叠栏是 14px 宽的一列，夹在
+     * 分隔线和正文之间的话，线和正文之间就空出那 14px。顺序因此是
+     *     行号 | 折叠箭头 | 分隔线 | 正文
      */
     Q_PROPERTY(bool gutterLineVisible READ gutterLineVisible WRITE setGutterLineVisible NOTIFY gutterLineChanged)
 
@@ -178,7 +182,7 @@ public:
     static EditorViewItem *instance() { return s_instance; }
 
     /*
-     * 代码折叠（第 2 列那个折叠边距）与当前行行号高亮，都在 applyMargins /
+     * 代码折叠（第 1 列那个折叠边距）与当前行行号高亮，都在 applyMargins /
      * applyMarginTheme 里落地，见 .cpp 里的说明。
      */
     bool foldingEnabled() const { return m_folding; }
@@ -207,7 +211,8 @@ public:
      *   [1] 折叠栏里的墨点（折叠标记）
      *   [2] 纯白像素个数（必须为 0 —— 白带就是它）
      *   [3] 行号栏右侧那条分隔竖线的像素（关掉开关就是 0）
-     *   [7][8][9] 三条边距的宽度；[12] 缩进参考线的像素
+     *   [7][8][9] 三条边距的宽度（0 行号 / 1 折叠 / 2 分隔线）；[10] 分隔线起始列
+     *   [12] 缩进参考线的像素
      *
      * 抓的是控件自己渲染出来的图，不依赖窗口是不是在前台 ——
      * 在真实窗口上截屏量像素会被别的窗口盖住，实测不可靠。

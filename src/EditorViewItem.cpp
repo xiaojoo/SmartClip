@@ -575,11 +575,11 @@ void EditorViewItem::applyMarginTheme() {
         m_sci->SendScintilla(QsciScintillaBase::SCI_SETMARGINBACKN, margin, paper);
 
     /*
-     * 第 1 条边距是"行号栏右侧的分隔竖线"，底色单独用分隔色。
+     * 第 2 条边距是"紧贴正文左边的那条分隔竖线"，底色单独用分隔色。
      * 上面那轮先把三条都刷成编辑区底色，这里再把它压回来 —— 顺序不能反。
      * 关掉这个开关时（宽度 0）颜色无所谓，跟着底色走就行。
      */
-    m_sci->SendScintilla(QsciScintillaBase::SCI_SETMARGINBACKN, 1L,
+    m_sci->SendScintilla(QsciScintillaBase::SCI_SETMARGINBACKN, 2L,
                          m_gutterLine ? scColor(kGutterLine) : paper);
 
     /* 折叠边距自己有颜色设置（0 = 跟随默认），改成跟底色一致 */
@@ -730,12 +730,17 @@ QVariantList EditorViewItem::marginPixelStats() const {
     const qreal scale =
         m_sciWidget->width() > 0 ? qreal(img.width()) / qreal(m_sciWidget->width()) : 1.0;
 
+    /*
+     * 三条边距从左到右：0 行号 / 1 折叠 / 2 分隔线。
+     * 所以 [numbersEnd, foldEnd) 是折叠栏，[foldEnd, gutterEnd) 是那条分隔线，
+     * 正文从 gutterEnd 开始。
+     */
     const int mw0 = int(m_sci->SendScintilla(QsciScintillaBase::SCI_GETMARGINWIDTHN, 0L) * scale);
     const int mw1 = int(m_sci->SendScintilla(QsciScintillaBase::SCI_GETMARGINWIDTHN, 1L) * scale);
     const int mw2 = int(m_sci->SendScintilla(QsciScintillaBase::SCI_GETMARGINWIDTHN, 2L) * scale);
     const int numbersEnd = qMin(img.width(), mw0);
-    const int foldStart = qMin(img.width(), numbersEnd + mw1);
-    const int foldEnd = qMin(img.width(), foldStart + mw2);
+    const int foldEnd = qMin(img.width(), numbersEnd + mw1);
+    const int gutterEnd = qMin(img.width(), foldEnd + mw2);
 
     const QColor paper = m_paperColor;
 
@@ -750,11 +755,11 @@ QVariantList EditorViewItem::marginPixelStats() const {
                          + qAbs(c.blue() - paper.blue()) > 90)
                 ++numberInk;
         }
-        for (int x = foldEnd; x < img.width(); ++x) {
+        for (int x = gutterEnd; x < img.width(); ++x) {
             if (img.pixelColor(x, y) == guide)
                 ++guideInk;
         }
-        for (int x = foldStart; x < foldEnd; ++x) {
+        for (int x = numbersEnd; x < foldEnd; ++x) {
             const QColor c = img.pixelColor(x, y);
             if (c == QColor(Qt::white))
                 ++white;
@@ -765,8 +770,8 @@ QVariantList EditorViewItem::marginPixelStats() const {
     }
 
     /*
-     * 行号栏右侧那条分隔竖线：**整幅图**扫它的颜色，而不是按"第 1 条边距的列"
-     * 去数。边距宽度是逻辑像素、抓图是设备像素，高 DPI 下两者差一个缩放系数，
+     * 那条分隔竖线：**整幅图**扫它的颜色，而不是按"第 2 条边距的列"去数。
+     * 边距宽度是逻辑像素、抓图是设备像素，高 DPI 下两者差一个缩放系数，
      * 按列算会正好错开那 1 像素（实测在 125% 下就这么白数了）。
      * 这个颜色（#333840）全编辑器只有它用，扫到的就是它。
      */
@@ -781,6 +786,28 @@ QVariantList EditorViewItem::marginPixelStats() const {
         }
     }
 
+    /*
+     * 分隔线右边缘到"正文区第一个墨迹列"的距离（设备像素）。
+     *
+     * 线和正文之间还有没有空档全看这个数：折叠栏（14px）原来夹在中间，加上
+     * 左留白，线和字之间空出 26px（用户圈着那段空白提过）。现在折叠栏挪到线的
+     * 左边，这个距离应该只剩左留白那几像素。
+     * 扫的是"任何不是底色、不是分隔线、不是缩进参考线的像素" —— 正文第一个
+     * 字形（有左侧留白，所以会差一两像素）。
+     */
+    int textInkX = -1;
+    if (gutterX >= 0) {
+        for (int x = gutterX + 2; x < img.width() && textInkX < 0; ++x) {
+            for (int y = 0; y < img.height(); ++y) {
+                const QColor c = img.pixelColor(x, y);
+                if (c == paper || c == kGutterLine || c == guide)
+                    continue;
+                textInkX = x;
+                break;
+            }
+        }
+    }
+
     out[0] = numberInk;
     out[1] = foldInk;
     out[2] = white;
@@ -789,6 +816,7 @@ QVariantList EditorViewItem::marginPixelStats() const {
     out[8] = mw1;
     out[9] = mw2;
     out[10] = gutterX;
+    out[11] = (textInkX >= 0 && gutterX >= 0) ? textInkX - (gutterX + 1) : -1;
     out[12] = guideInk;
     return out;
 }
@@ -994,7 +1022,7 @@ void EditorViewItem::applyViewOptions() {
                          scColor(QColor(0xd6, 0xd7, 0xda)));
 
     /*
-     * 代码折叠：第 2 列做成折叠边距（具体设置在 applyMargins 里）。
+     * 代码折叠：第 1 列做成折叠边距（具体设置在 applyMargins 里）。
      * 这里只在切换开关时重排一次边距。
      */
 
@@ -1075,26 +1103,35 @@ void EditorViewItem::applyMargins() {
                          m_lineNumbers ? long(width) : 0L);
 
     /*
-     * 代码折叠：第 2 列做成折叠边距。
+     * 代码折叠：第 1 列做成折叠边距（行号 = 第 0 列，分隔线 = 第 2 列）。
      *
-     * 用 QScintilla 现成的 BoxedTreeFoldStyle —— 它把 margin 2 设成
+     * 用 QScintilla 现成的 BoxedTreeFoldStyle —— 它把这条边距设成
      * SC_MARGIN_SYMBOL + SC_MASK_FOLDERS + 敏感（点击即可折叠），并配好
      * "方框 + 竖线"那套树形标记（和主流编辑器观感一致）。
      * 折叠层级是 lexer 着色时算出来的：QScintilla 的 setLexer() 会给文档设置
      * fold=1 属性，所以换了语言（装了 lexer）就有折叠点。
+     *
+     * 为什么折叠栏在**分隔线左边**（以前在右边）：折叠栏是 14px 宽的一列，
+     * 摆在分隔线和正文之间，线和正文之间就空出那 14px，看着像"线飘在沟里"
+     * （用户圈着那段空白提过）。挪到行号和分隔线之间之后，顺序就是
+     *     行号 | 折叠箭头 | 分隔线 | 正文
+     * —— 和 VS Code 的行号栏一样：折叠加号在数字右边，分隔线紧贴正文。
      */
     if (m_folding)
-        m_sci->setFolding(QsciScintilla::BoxedTreeFoldStyle, 2);
+        m_sci->setFolding(QsciScintilla::BoxedTreeFoldStyle, 1);
     else
-        m_sci->setFolding(QsciScintilla::NoFoldStyle, 2);
+        m_sci->setFolding(QsciScintilla::NoFoldStyle, 1);
 
     /*
-     * 第 1 条边距：行号栏右侧那条分隔竖线。
+     * 第 2 条边距：行号栏右侧、紧贴正文左边的那条分隔竖线。
      *
      * 留 1 像素宽、背景刷成分隔色（见 applyMarginTheme），就得到一条从顶到底
      * 的竖线。不用在 QML 里按边距宽度贴一个 Rectangle：边距宽度是随行号位数、
      * 字体、折叠开关变的，QML 那边算不准；而且编辑区是原生子窗口，QML 的浮层
      * 本来就盖不到它上面。
+     *
+     * 它**必须排在最后一条边距**：正文左边缘 = 各条边距宽度之和 + 左留白
+     * （SCI_SETMARGINLEFT），线要贴着正文，就只能放在正文的紧左边。
      *
      * 这条边距以前放过"当前行蓝色竖条"（3px 符号边距 + SC_MARK_FULLRECT），
      * 已按使用意见去掉 —— 当前行有正文那层底色加光标就够醒目了。
@@ -1120,9 +1157,9 @@ void EditorViewItem::applyMargins() {
      *    "改一次字号，编辑器就跟界面失联"，所以这条实现不能留。
      *    真要做，得另起一个原生 QWidget 自画行号栏，不动 Scintilla 的边距。
      */
-    m_sci->SendScintilla(QsciScintillaBase::SCI_SETMARGINTYPEN, 1L,
+    m_sci->SendScintilla(QsciScintillaBase::SCI_SETMARGINTYPEN, 2L,
                          QsciScintillaBase::SC_MARGIN_COLOUR);
-    m_sci->SendScintilla(QsciScintillaBase::SCI_SETMARGINWIDTHN, 1L,
+    m_sci->SendScintilla(QsciScintillaBase::SCI_SETMARGINWIDTHN, 2L,
                          m_gutterLine ? 1L : 0L);
 
     /* 颜色最后压：装 lexer 时那次 STYLECLEARALL 会把行号样式刷回白底 */

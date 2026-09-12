@@ -405,35 +405,50 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store) {
           QStringLiteral("装 lexer 后行号栏底色仍是编辑区底色（不是白的）"),
           QStringLiteral("实际 #%1").arg(unpacked(view->styleBack(33)), 6, 16, QLatin1Char('0')));
     check(view->marginBack(0) == packed(0x1e, 0x1f, 0x22)
-          && view->marginBack(2) == packed(0x1e, 0x1f, 0x22),
-          QStringLiteral("边距背景也压成编辑区底色"),
-          QStringLiteral("margin0=#%1 margin2=#%2")
+          && view->marginBack(1) == packed(0x1e, 0x1f, 0x22),
+          QStringLiteral("边距背景也压成编辑区底色（行号栏 / 折叠栏）"),
+          QStringLiteral("margin0=#%1 margin1=#%2")
               .arg(view->marginBack(0), 6, 16, QLatin1Char('0'))
-              .arg(view->marginBack(2), 6, 16, QLatin1Char('0')));
+              .arg(view->marginBack(1), 6, 16, QLatin1Char('0')));
 
-    /* 折叠边距在（第 2 列有宽度） */
-    check(view->marginWidth(2) > 0,
-          QStringLiteral("折叠边距已启用（第 2 列有宽度）"),
-          QStringLiteral("实际 %1").arg(view->marginWidth(2)));
+    /* 折叠边距在（第 1 列有宽度，夹在行号和分隔线之间） */
+    check(view->marginWidth(1) > 0,
+          QStringLiteral("折叠边距已启用（第 1 列有宽度，在行号右边）"),
+          QStringLiteral("实际 %1").arg(view->marginWidth(1)));
 
     /*
-     * 行号右边那条分隔竖线（第 1 条边距）。
+     * 紧贴正文左边那条分隔竖线（第 2 条边距，也是最后一条）。
      *
-     * 这条边距一直空着，现在专门用来画它：宽度 1px、底色是**分隔色**而不是
-     * 编辑区底色 —— 边距背景整列一次填满，所以它是一条从顶到底的竖线。
+     * 宽度 1px、底色是**分隔色**而不是编辑区底色 —— 边距背景整列一次填满，
+     * 所以它是一条从顶到底的竖线。放在最后一条边距上，正文左边缘就在它右边
+     * （正文左边缘 = 各条边距宽之和 + 左留白），也就是线和正文之间不再有空档。
      */
-    check(view->marginWidth(1) == 1 && view->marginBack(1) == packed(0x33, 0x38, 0x40),
-          QStringLiteral("行号栏右侧有 1px 分隔竖线（第 1 列）"),
+    check(view->marginWidth(2) == 1 && view->marginBack(2) == packed(0x33, 0x38, 0x40),
+          QStringLiteral("正文左边有 1px 分隔竖线（第 2 列，正文紧贴着它）"),
           QStringLiteral("宽 %1 / 底色 #%2")
-              .arg(view->marginWidth(1))
-              .arg(unpacked(view->marginBack(1)), 6, 16, QLatin1Char('0')));
+              .arg(view->marginWidth(2))
+              .arg(unpacked(view->marginBack(2)), 6, 16, QLatin1Char('0')));
+
+    /*
+     * 这两条竖线的开关和列号都存在 QSettings 里，自检启动时 Main.qml 会把用户
+     * 上次设的那份恢复出来（实测：用户把参考线点成 120 字之后，"默认 80"那条
+     * 断言就红了 —— 量到的是用户的设置，不是出厂值）。所以下面先把用户那份存
+     * 起来，用一组确定的值跑断言，最后原样放回去：自检不改用户的设置。
+     */
+    const bool savedGutterLine = view->gutterLineVisible();
+    const bool savedRulerVisible = view->rulerVisible();
+    const int savedRulerColumn = view->rulerColumn();
+    view->setGutterLineVisible(true);
+    view->setRulerVisible(true);
+    view->setRulerColumn(80);
+    QCoreApplication::processEvents();
 
     dispatch(QStringLiteral("toggleGutterLine"));
-    check(view->marginWidth(1) == 0,
+    check(view->marginWidth(2) == 0,
           QStringLiteral("dispatch(toggleGutterLine) 把分隔线关掉"),
-          QStringLiteral("实际宽 %1").arg(view->marginWidth(1)));
+          QStringLiteral("实际宽 %1").arg(view->marginWidth(2)));
     dispatch(QStringLiteral("toggleGutterLine"));
-    check(view->marginWidth(1) == 1 && view->gutterLineVisible(),
+    check(view->marginWidth(2) == 1 && view->gutterLineVisible(),
           QStringLiteral("再切一次分隔线回来"));
 
     /*
@@ -465,11 +480,26 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store) {
             out() << "        （分隔竖线像素：开着 " << on.value(3).toInt() << "（第 "
                   << on.value(10).toInt() << " 列起）/ 关掉 " << off.value(3).toInt()
                   << "；三条边距宽 " << on.value(7).toInt() << "+" << on.value(8).toInt()
-                  << "+" << on.value(9).toInt() << "）" << Qt::endl;
+                  << "+" << on.value(9).toInt()
+                  << "；线到正文 " << on.value(11).toInt() << " px）" << Qt::endl;
             check(on.value(3).toInt() > 100 && off.value(3).toInt() == 0,
-                  QStringLiteral("行号右侧那条分隔线真的画出来了（关掉就一个像素都没有）"),
+                  QStringLiteral("那条分隔线真的画出来了（关掉就一个像素都没有）"),
                   QStringLiteral("开着 %1 / 关掉 %2")
                       .arg(on.value(3).toInt()).arg(off.value(3).toInt()));
+
+            /*
+             * 线和正文之间不能有空档。
+             *
+             * 这是用户明确提过的那条：折叠栏（14px）原来夹在分隔线和正文之间，
+             * 加上 12px 左留白，线和字之间空了 26px。现在折叠栏在线**左边**、
+             * 左留白收到 2px，这个距离应该只剩个位数（字形的左侧留白也要算）。
+             * 上界给 12 设备像素：26px 那个版本在 125% 缩放下量出来是 30 以上，
+             * 这条能当场抓住"折叠栏又跑回线右边"。
+             */
+            check(on.value(11).toInt() >= 0 && on.value(11).toInt() <= 12,
+                  QStringLiteral("分隔线和正文之间没有空档（折叠栏在线左边）"),
+                  QStringLiteral("实测 %1 设备像素（-1 = 没扫到正文墨迹）")
+                      .arg(on.value(11).toInt()));
         }
 
         /*
@@ -503,7 +533,7 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store) {
         }
 
         check(view->rulerEdgeMode() == 1 && view->rulerEdgeColumn() == 80,
-              QStringLiteral("字数参考线默认在第 80 列（EDGE_LINE）"),
+              QStringLiteral("列号设成 80 后 Scintilla 那边就是第 80 列（EDGE_LINE）"),
               QStringLiteral("模式 %1 / 列号 %2")
                   .arg(view->rulerEdgeMode()).arg(view->rulerEdgeColumn()));
         check(view->rulerEdgeColor() == packed(0x4b, 0x51, 0x5a),
@@ -560,6 +590,16 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store) {
         dispatch(QStringLiteral("toggleRuler"));
         check(view->rulerVisible() && view->rulerEdgeMode() == 1,
               QStringLiteral("再切一次参考线回来"));
+
+        /* 自检不改用户的设置：把开头存的那份放回去 */
+        view->setGutterLineVisible(savedGutterLine);
+        view->setRulerVisible(savedRulerVisible);
+        view->setRulerColumn(savedRulerColumn);
+        QCoreApplication::processEvents();
+        out() << "        （用户设置已还原：分隔线 "
+              << (savedGutterLine ? "开" : "关") << " / 参考线 "
+              << (savedRulerVisible ? "开" : "关") << " / 列号 " << savedRulerColumn
+              << "）" << Qt::endl;
     }
 
     /*
@@ -1230,7 +1270,7 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store) {
      * 贴到卡片边上。
      *
      * 左边后来也收到 2px：编辑器最左边那一条就是行号栏，"序号贴紧左边"
-     * 只能靠这个左边距（Scintilla 的 SCI_SETMARGINLEFT 落在折叠栏和正文
+     * 只能靠这个左边距（Scintilla 的 SCI_SETMARGINLEFT 落在**分隔竖线和正文**
      * 之间，跟行号位置无关）。正文离卡片左边缘的余量由行号栏 + 折叠栏的
      * 宽度顶着，不再靠这里。
      *
