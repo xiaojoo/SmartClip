@@ -596,29 +596,27 @@ Rectangle {
                 anchors.fill: parent
 
                 /*
-                 * 和卡片边缘留出内边距，四个角的圆角交给卡片自己。
+                 * 和卡片边缘留出内边距。
                  *
-                 * 编辑器是原生子控件，它自己的矩形角是直角，贴到卡片角上就会把
-                 * contentArea（radius: 10）画出来的圆角啃成直角；给它自己裁角又会
-                 * 把竖向滚动条一起裁掉（滑块点不到）。所以圆角只能靠**让开**：
+                 * 编辑器是原生子控件，它自己的矩形角是直角：贴着卡片的角就会把
+                 * contentArea（radius: 10）画出来的圆角盖成直角。四边留一点就行，
+                 * 留多少只看**那边有没有滚动条** —— 滚动条是贴在编辑器边缘上的：
                  *
-                 *   左右各让开 cardInset = 10，正好等于卡片圆角半径 ——
-                 *  卡片左右那两段圆弧整个落在编辑器矩形的左右之外，编辑器啃不到，
-                 *  左下 / 右下两个圆角就是这么保住的。
+                 *   右边 / 底边各 2px：竖向、横向滚动条就在右边缘 / 下边缘上，
+                 *  让开一个圆角（10px）等于让滚动条离卡片边一个圆角，白空一条。
+                 *  2px 既保证方角压不到卡片的圆角上（两边底色本来就是同一个，
+                 *  见下面 paperColor: root.editorBg），又给坐标取整留了余量
+                 *  （EditorViewItem::applyGeometry 里是 qRound）。
+                 *  实测（截图逐像素比对）：2px 和原来 10px 画出来的圆角一模一样。
                  *
-                 * 底部因此不用再让开一整个圆角：横向滚动条跟着编辑器沉到卡片底边
-                 * （滑块自己还有 3px margin），原来横条下面那 10px 的空档没了。
+                 *   左边 10px：正文别贴着卡片左边缘，行号栏外面留点气。
                  */
                 readonly property int cardInset: 10
-                /*
-                 * 底部只留 2px：给"QML 几何 -> 原生控件坐标"那一趟取整留点余量
-                 * （见 EditorViewItem::applyGeometry 的 qRound），不让编辑器的
-                 * 方角冒到卡片底边下面去。
-                 */
+                readonly property int cardRightInset: 2
                 readonly property int cardBottomInset: 2
 
                 anchors.leftMargin: cardInset
-                anchors.rightMargin: cardInset
+                anchors.rightMargin: cardRightInset
                 anchors.bottomMargin: cardBottomInset
 
                 /*

@@ -926,18 +926,22 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store) {
     }
 
     /*
-     * ============ 正文卡片：横条贴着底边，两角圆角不能被啃 ============
+     * ============ 正文卡片：两条滚动条都要贴着卡片边 ============
      *
-     * 用户提的两件事其实是一对矛盾：
-     *   1) 横向滚动条离卡片底边太远（原来编辑器四周都让开 10px，横条下面
+     * 用户提的是两条滚动条的位置：
+     *   1) 横向滚动条离卡片底边太远（原来编辑器四边都让开 10px，横条下面
      *      就空出一条）；
-     *   2) 但编辑器是**原生子控件**，它自己的矩形角是直角，一旦贴到卡片角上
-     *      就会把 contentArea（radius: 10）画出来的圆角啃成直角。
+     *   2) 竖向滚动条离卡片右边太远（同理，右边也让开 10px）。
      *
-     * 解法是只让开该让的那一边：左右各让开一个圆角半径（10px），
-     * 那两段圆弧整个落在编辑器矩形之外 —— 左下 / 右下都是圆角；底部则只留 2px，
-     * 横条跟着沉到卡边上。这里把这两条一起钉住，免得以后谁又把底边改回 10px
-     * （横条又浮起来）或者把左右改小（圆角被啃掉）。
+     * 让开的理由本来只有一个：编辑器是**原生子控件**，自己的矩形角是直角，
+     * 贴着卡片的角会把 contentArea（radius: 10）画出来的圆角盖成直角。
+     * 但**实测（截图逐像素比对）2px 的余量就够了** —— 编辑器底色和卡片底色
+     * 本来就是同一个（paperColor: root.editorBg），角上那一两个像素看不出来，
+     * 2px 和 10px 画出来的圆角一模一样。所以右边 / 底边都收到 2px，滚动条跟着
+     * 贴到卡片边上；左边仍留 10px（正文不贴左边缘）。
+     *
+     * 这里钉住：两条边都只留一点点（>0 且 ≤4px，给坐标取整留余量）、
+     * 编辑器整体不出卡片。改回 10px 或者改成 0 都会在这里红。
      */
     {
         /* 需要编辑器在场（visible）时量，所以先开一个文档 */
@@ -951,11 +955,12 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store) {
         const double leftGap = card.value(QStringLiteral("leftGap")).toDouble();
         const double rightGap = card.value(QStringLiteral("rightGap")).toDouble();
         const double viewBottom = card.value(QStringLiteral("viewBottom")).toDouble();
+        const double viewRight = card.value(QStringLiteral("viewRight")).toDouble();
         const double cardH = card.value(QStringLiteral("cardHeight")).toDouble();
+        const double cardW = card.value(QStringLiteral("cardWidth")).toDouble();
         const QString geom =
             QStringLiteral("卡片 %1x%2 圆角 %3 / 编辑器 %4,%5 %6x%7 / 下留 %8 左留 %9 右留 %10")
-                .arg(card.value(QStringLiteral("cardWidth")).toDouble())
-                .arg(cardH).arg(radius)
+                .arg(cardW).arg(cardH).arg(radius)
                 .arg(card.value(QStringLiteral("viewX")).toDouble())
                 .arg(card.value(QStringLiteral("viewY")).toDouble())
                 .arg(card.value(QStringLiteral("viewWidth")).toDouble())
@@ -964,12 +969,14 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store) {
 
         out() << "        （" << geom << "）" << Qt::endl;
 
-        check(bottomGap > 0 && bottomGap <= 4.0,
+        check(bottomGap >= 1.0 && bottomGap <= 4.0,
               QStringLiteral("编辑器贴着卡片底边（横向滚动条不再浮在半空）"), geom);
-        check(viewBottom <= cardH + 0.5,
-              QStringLiteral("编辑器没有溢出卡片底边（不压状态栏）"), geom);
-        check(leftGap >= radius - 0.5 && rightGap >= radius - 0.5,
-              QStringLiteral("左右各让开一个圆角半径，卡片下方两角圆角保得住"), geom);
+        check(rightGap >= 1.0 && rightGap <= 4.0,
+              QStringLiteral("编辑器贴着卡片右边（竖向滚动条不再浮在中间）"), geom);
+        check(leftGap >= 1.0,
+              QStringLiteral("左边仍留着余量（正文不贴卡片左边缘）"), geom);
+        check(viewBottom <= cardH + 0.5 && viewRight <= cardW + 0.5,
+              QStringLiteral("编辑器没有溢出卡片（不压状态栏、不出画布）"), geom);
 
         dispatch(QStringLiteral("closeAllTabs"));
     }
