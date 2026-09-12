@@ -2028,6 +2028,41 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store) {
           QStringLiteral("子菜单里的条目（lang:python）能执行"));
 
     /*
+     * ================= 编辑区的右键菜单 =================
+     *
+     * 编辑器里按右键弹的必须是 **QML 那套菜单**（和菜单栏"编辑"同一份构造），
+     * 不是 Scintilla 自带的 QtWidgets 菜单 —— 后者英文、观感也和界面不搭。
+     *
+     * C++ 侧点不出右键，所以走 Main.openEditorContextMenu（编辑器那个
+     * contextMenuRequested 信号最终就是调它）。要钉两件事：
+     *   1) 菜单真的弹在了右键那一点上；
+     *   2) 弹出的是"编辑"菜单那一份（条目总高对得上）。
+     */
+    const double editProbeX = 620.0;
+    const double editProbeY = 260.0;
+    QMetaObject::invokeMethod(qmlRoot, "openEditorContextMenu",
+                              Q_ARG(QVariant, QVariant(editProbeX)),
+                              Q_ARG(QVariant, QVariant(editProbeY)));
+    {
+        const QVariantMap ui = uiState();
+        const double mx = ui.value(QStringLiteral("menuX")).toDouble();
+        const double my = ui.value(QStringLiteral("menuY")).toDouble();
+        const double contentH = ui.value(QStringLiteral("menuContentHeight")).toDouble();
+        check(ui.value(QStringLiteral("menuOpened")).toBool(),
+              QStringLiteral("编辑区右键弹出 QML 菜单"));
+        check(qAbs(mx - editProbeX) < 0.5 && qAbs(my - editProbeY) < 0.5,
+              QStringLiteral("右键菜单左上角紧贴鼠标点（620,260）"),
+              QStringLiteral("实际 (%1, %2)").arg(mx).arg(my));
+        /* 12 条命令 + 4 条分隔线：12*28 + 4*9 + 上下各 4px 内缩 = 380 */
+        check(qAbs(contentH - 380.0) < 0.5,
+              QStringLiteral("弹的就是\"编辑\"菜单那一份（12 项 + 4 分隔线）"),
+              QStringLiteral("内容高 %1").arg(contentH));
+        check(ui.value(QStringLiteral("menuHasIcons")).toBool(),
+              QStringLiteral("右键菜单条目也带图标（和菜单栏一致）"));
+    }
+    QMetaObject::invokeMethod(qmlRoot, "closeMenu");
+
+    /*
      * 长下拉菜单必须限高 + 可滚动（老路子：直接把语言列表当整个菜单弹出来）。
      *
      * dispatch("menu:语言") 这条仍然可用 —— 它不管子菜单那套，直接把列表

@@ -81,20 +81,41 @@ int main(int argc, char *argv[]) {
     QQuickStyle::setStyle("Fusion");
 
     /*
-     * 工具提示（ToolTip）的全局配色。
+     * 工具提示（ToolTip）+ QtWidgets 对话框的全局配色。
      *
      * 界面整个是深色的，但 Fusion 那个 ToolTip 模板的背景取的是调色板里的
      * toolTipBase、文字取 toolTipText（见 Qt 的 Fusion/ToolTip.qml），不设的话
      * 就是系统默认的浅色底 —— 鼠标停在按钮上弹出一块白，跟界面完全不搭
      * （用户报的就是"收起替换"上面那个"显示 / 隐藏替换行"）。
      *
-     * 只动这两个角色，别的角色一概不碰：这是**应用级**调色板，改了会影响所有控件
-     * （QScintilla、对话框、菜单、QML 里的 Controls…），范围越小越安全。
-     * 想更黑就把这里的 ToolTipBase 换成 #1e1f22（编辑区底色）或纯黑。
+     * 下面这几组角色管的是 QtWidgets 那几样东西：QMessageBox（Cmd.alert）、
+     * QInputDialog（转到行 / 自定义参考线列）这类对话框。不设的话它们也是
+     * 系统浅色，深色界面里点一下弹出一块白。
+     *
+     * 注意：编辑区那个右键菜单**不再**依赖这里 —— 它已经换成 QML 那套菜单
+     * （见 src/EditorViewItem.cpp 的 eventFilter 和 Main.qml 的
+     * openEditorContextMenu），颜色由 DropdownMenu.qml 自己写死。
+     * 想更黑就把下面这几处换成 #1e1f22（编辑区底色）或纯黑。
      */
     QPalette tipPalette = app.palette();
     tipPalette.setColor(QPalette::ToolTipBase, QColor(0x2b, 0x2d, 0x30));
     tipPalette.setColor(QPalette::ToolTipText, QColor(0xd6, 0xd7, 0xda));
+
+    /* 菜单 / 对话框面板 */
+    tipPalette.setColor(QPalette::Window, QColor(0x2b, 0x2d, 0x30));
+    tipPalette.setColor(QPalette::WindowText, QColor(0xc8, 0xcc, 0xd1));
+    tipPalette.setColor(QPalette::Base, QColor(0x2b, 0x2d, 0x30));
+    tipPalette.setColor(QPalette::AlternateBase, QColor(0x31, 0x33, 0x35));
+    tipPalette.setColor(QPalette::Text, QColor(0xc8, 0xcc, 0xd1));
+    tipPalette.setColor(QPalette::Button, QColor(0x2b, 0x2d, 0x30));
+    tipPalette.setColor(QPalette::ButtonText, QColor(0xc8, 0xcc, 0xd1));
+    tipPalette.setColor(QPalette::Highlight, QColor(0x21, 0x42, 0x83));
+    tipPalette.setColor(QPalette::HighlightedText, QColor(0xff, 0xff, 0xff));
+    /* 置灰项（菜单里当前不可用的命令）：和界面其它地方的次要文字一个色 */
+    tipPalette.setColor(QPalette::Disabled, QPalette::WindowText, QColor(0x6f, 0x73, 0x7a));
+    tipPalette.setColor(QPalette::Disabled, QPalette::Text, QColor(0x6f, 0x73, 0x7a));
+    tipPalette.setColor(QPalette::Disabled, QPalette::ButtonText, QColor(0x6f, 0x73, 0x7a));
+
     app.setPalette(tipPalette);
 
     /* 弹框不再响那一声，见 ModalBeepSilencer 的说明 */

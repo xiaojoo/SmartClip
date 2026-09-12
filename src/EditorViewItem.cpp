@@ -317,6 +317,16 @@ void EditorViewItem::ensureWrapped() {
     m_sci = new QsciScintilla(m_sciWidget);
 
     /*
+     * 盯着右键事件：编辑器里那个菜单要换成 QML 那套（见 eventFilter）。
+     *
+     * 装在控件**和它的 viewport** 上：右键是先落到 viewport 上的（QAbstractScrollArea
+     * 的规矩），而 Scintilla 自己的菜单就是从那条路上弹出来的。
+     */
+    m_sci->installEventFilter(this);
+    if (m_sci->viewport())
+        m_sci->viewport()->installEventFilter(this);
+
+    /*
      * 底下那条"补线"控件：横向滚动条出现时，用它把两条竖线补到控件底边
      * （见 BottomLines 的说明）。挂在编辑控件上、排在最后创建，所以它画在
      * 滚动条之上；又因为只画那两条线，滚动条照常看得见。
@@ -1780,6 +1790,36 @@ void EditorViewItem::geometryChange(const QRectF &newGeometry,
      */
     if (newGeometry != oldGeometry)
         applyGeometry();
+}
+
+/*
+ * 编辑区右键：把 Scintilla 自带那个菜单换成 QML 的下拉菜单。
+ *
+ * 为什么不用 Scintilla 那个（原来的样子）：它是 QtWidgets 的 QsciSciPopup，
+ * 英文条目（Undo / Redo / Cut…）、QtWidgets 样式画出来的观感，和整个深色
+ * QML 界面是两套东西（用户截图报过两轮）。QML 那边本来就有一份"编辑"菜单
+ * （qml/components/DropdownMenu.qml + js/EditorMenus.js 的 editMenu），
+ * 条目、图标、快捷键、可用状态都是现成的 —— 直接拿它当右键菜单，
+ * 观感和菜单栏那个"编辑"一模一样。
+ *
+ * 拦截点：右键事件先落到编辑控件的 viewport 上（QAbstractScrollArea 的规矩），
+ * Scintilla 就是在那儿把自己的菜单弹出来的。事件过滤器比控件自己的事件处理
+ * **先**跑，所以在这里吃掉它、改发一个信号给 QML 就行。
+ *
+ * 坐标：先换算成控件局部坐标（控件正好铺在这个 Item 上，两者原点相同），
+ * 再交给 Qt Quick 的 mapToItem 换成场景坐标 —— 场景坐标就是 QML 窗口内容区
+ * 坐标，和 Popup 的 x/y 同一套（DropdownMenu.openAtPoint 要的就是它）。
+ */
+bool EditorViewItem::eventFilter(QObject *watched, QEvent *event) {
+    if (event->type() == QEvent::ContextMenu && m_sci && isVisible() && isEnabled()) {
+        auto *ce = static_cast<QContextMenuEvent *>(event);
+        const QPointF inItem = m_sci->mapFromGlobal(ce->globalPos());
+        const QPointF scene = mapToItem(nullptr, inItem);
+        emit contextMenuRequested(scene.x(), scene.y());
+        return true;    /* 吃掉：别让 Scintilla 再弹它自己那个原生菜单 */
+    }
+
+    return QQuickItem::eventFilter(watched, event);
 }
 
 void EditorViewItem::itemChange(ItemChange change, const ItemChangeData &value) {

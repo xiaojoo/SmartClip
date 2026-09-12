@@ -661,6 +661,21 @@ Rectangle {
     function closeMenu() { ddMenu.close() }
 
     /*
+     * 编辑区里的右键菜单。
+     *
+     * 用的就是菜单栏那份"编辑"菜单（Menus.editMenu，条目 / 图标 / 快捷键 /
+     * 可用状态都是现成的），所以右键弹出来的观感和点"编辑"完全一致 ——
+     * 原来那是 Scintilla 自带的 QtWidgets 菜单，英文、风格也不搭。
+     *
+     * (x, y) 是场景坐标（= QML 窗口内容区坐标），由 EditorView 的
+     * contextMenuRequested 信号给（见 src/EditorViewItem.cpp 的 eventFilter）。
+     * anchor 传 null：坐标直接按宿主坐标用（见 DropdownMenu.openAtPoint）。
+     */
+    function openEditorContextMenu(x, y) {
+        ddMenu.openAtPoint(null, x, y, Menus.editMenu(view, shortcutOverrides()))
+    }
+
+    /*
      * 自检用：模拟"鼠标停到子菜单里第 index 条上"，返回停完之后子菜单还开着没。
      *
      * 这一步界面上就是鼠标往右挪进子菜单，C++ 侧悬停不出来；
@@ -1126,6 +1141,11 @@ Rectangle {
              */
             if (!Cmd.selfTestMode)
                 Cmd.alert("出错了", message)
+        }
+
+        /* 编辑区里按下右键：弹 QML 那套"编辑"菜单（见 openEditorContextMenu） */
+        function onContextMenuRequested(x, y) {
+            window.openEditorContextMenu(x, y)
         }
     }
 

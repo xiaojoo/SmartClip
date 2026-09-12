@@ -555,9 +555,23 @@ signals:
     void saved(const QString &path);
     void fileDropped(const QString &path);
 
+    /*
+     * 编辑区里按下了右键。
+     *
+     * 坐标是**场景坐标**（等于 QML 窗口内容区坐标，和 DropdownMenu 的 x/y 同一套），
+     * 由 Main.qml 拿它去弹 QML 那套下拉菜单（见 .cpp 的 eventFilter 说明）。
+     */
+    void contextMenuRequested(qreal x, qreal y);
+
 protected:
     void geometryChange(const QRectF &newGeometry, const QRectF &oldGeometry) override;
     void itemChange(ItemChange change, const ItemChangeData &value) override;
+
+    /*
+     * 拦住编辑区的右键事件，换成 QML 的下拉菜单 —— 不让 Scintilla 弹它自己
+     * 那个 QtWidgets 菜单（英文、和界面风格不搭，用户报了）。见 .cpp 的说明。
+     */
+    bool eventFilter(QObject *watched, QEvent *event) override;
 
 private:
     /* 一条打开的文档（正文在 Scintilla 那边，这里放元信息 + 视图位置） */
