@@ -1845,6 +1845,22 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store) {
                       QStringLiteral("选中的 id %1").arg(s.value(QStringLiteral("selectedId")).toLongLong()));
                 check(s.value(QStringLiteral("openFolders")).toInt() >= 1,
                       QStringLiteral("定位用例：它所在的那一组被展开了"));
+
+                /*
+                 * 蓝底只给选中的条目：一级菜单（分组）不亮。
+                 *
+                 * 量的是委托自己报的 rowHighlight（见 FolderTree.highlightCounts），
+                 * 不是把 QML 里那个表达式在 C++ 这侧再算一遍。
+                 */
+                const QVariantMap hl = s.value(QStringLiteral("highlighted")).toMap();
+                check(hl.value(QStringLiteral("folders")).toInt() == 0,
+                      QStringLiteral("一级菜单不亮蓝底（今天/昨天/近 7 天/更早）"),
+                      QStringLiteral("亮着的分组行 %1")
+                          .arg(hl.value(QStringLiteral("folders")).toInt()));
+                check(hl.value(QStringLiteral("items")).toInt() == 1,
+                      QStringLiteral("蓝底只留在选中的那一条上"),
+                      QStringLiteral("亮着的条目行 %1")
+                          .arg(hl.value(QStringLiteral("items")).toInt()));
             }
 
             /*

@@ -16,7 +16,6 @@ Rectangle {
     anchors.rightMargin: 6
 
     property var rows: []
-    property string activeKey: "today"
     property var selected: null
 
     signal folderClicked(string key)
@@ -91,6 +90,31 @@ Rectangle {
             }
         }
         return false
+    }
+
+    /*
+     * 现在亮着蓝底的行有几个（自检用）。
+     *
+     * 直接问**委托自己**的 rowHighlight —— 量的是界面上真画出来的高亮，
+     * 不是把 delegate 里那个表达式在这里再算一遍（那种断言自己证明自己，
+     * 表达式改了它跟着改，什么也钉不住）。
+     *
+     * 只数已经实例化的行（列表是虚拟化的，屏幕外的行没有委托）——
+     * 对"一级菜单不许亮"这条足够：分组行就在列表顶部，永远看得见。
+     */
+    function highlightCounts() {
+        var folderRows = 0
+        var itemRows = 0
+        for (var i = 0; i < rows.length; ++i) {
+            var it = view.itemAtIndex(i)
+            if (!it || it.rowHighlight !== true)
+                continue
+            if (rows[i].kind === "folder")
+                ++folderRows
+            else
+                ++itemRows
+        }
+        return { folders: folderRows, items: itemRows }
     }
 
     readonly property color borderColor: "#43454a"
@@ -283,10 +307,16 @@ Rectangle {
                 x: 12
                 width: view.width - 18
 
-                rowHighlight: modelData.kind === "folder"
-                              ? root.activeKey === modelData.key
-                              : (root.selected &&
-                                 root.selected.id === modelData.item.id)
+                /*
+                 * 蓝底只给**选中的条目**。
+                 *
+                 * 分组（今天 / 昨天 / 近 7 天 / 更早）原来也会跟着 activeKey
+                 * 亮一条蓝底（照 IDE "当前工具窗口"来的）。实际看着太抢眼：
+                 * 一级菜单是容器，点它只是展开 / 收起，不该比里面选中的条目还显眼。
+                 * 现在分组一律不亮，"选中的是哪一个条目"一眼就能看出来。
+                 */
+                rowHighlight: modelData.kind === "item" && root.selected
+                              && root.selected.id === modelData.item.id
 
                 onRowClicked: modelData.kind === "folder"
                               ? root.folderClicked(modelData.key)

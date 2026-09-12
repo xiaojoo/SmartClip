@@ -66,6 +66,14 @@ Rectangle {
 
     property string searchText: ""
     property var selectedItem: null
+    /*
+     * 当前分组（点哪个分组就是哪个）。
+     *
+     * 注意它**不再**用来画高亮：一级菜单不亮蓝底，只有选中的条目亮
+     * （见 FolderTree.qml 里 delegate 的 rowHighlight）。
+     * 留着它是因为"当前是哪一组"这件事本身还有用 ——
+     * dispatch("folder:<key>") 那条命令就落在它上面，以后按分组做操作也认它。
+     */
     property string activeFolder: "today"
     property var treeRows: []
     /* 欢迎页 / 编辑器：现在由"有没有打开的标签"决定，见 EditorArea */
@@ -620,7 +628,9 @@ Rectangle {
                  locateEnabled: canLocateCurrent(),
                  selectedId: selectedItem ? selectedItem.id : -1,
                  /* 定位的最后一步（滚进可视区）有没有真的生效 */
-                 locatedVisible: folderTree.rowVisible(selectedItem ? selectedItem.id : -1) }
+                 locatedVisible: folderTree.rowVisible(selectedItem ? selectedItem.id : -1),
+                 /* 亮着蓝底的行：分组必须恒为 0，条目最多 1（见 FolderTree.highlightCounts） */
+                 highlighted: folderTree.highlightCounts() }
     }
 
     function showFind(replace) {
@@ -1314,7 +1324,6 @@ Rectangle {
                 readonly property real panelRight: mapToItem(window.contentItem, width, 0).x
 
                 rows: window.treeRows
-                activeKey: window.activeFolder
                 selected: window.selectedItem
                 onFolderClicked: (key) => window.toggleFolder(key)
                 onItemClicked: (item) => window.selectItem(item)
