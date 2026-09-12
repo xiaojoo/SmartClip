@@ -646,7 +646,7 @@ Popup {
                                         }
                                     }
     
-                                    /* 撞键告警：红点 + 悬浮说明 */
+                                    /* 撞键告警：红点 + 悬浮说明（深色提示框，见 AppToolTip） */
                                     AppIcon {
                                         x: modifyLabel.x + modifyLabel.implicitWidth + 106
                                         anchors.verticalCenter: parent.verticalCenter
@@ -655,8 +655,10 @@ Popup {
                                         kind: "info"
                                         size: 13
                                         tint: root.warnColor
-                                        ToolTip.visible: conflictHit.containsMouse
-                                        ToolTip.text: "这个组合键和另一个命令重复，实际不会生效"
+                                        AppToolTip {
+                                            hovered: conflictHit.containsMouse
+                                            text: "这个组合键和另一个命令重复，实际不会生效"
+                                        }
                                         MouseArea {
                                             id: conflictHit
                                             anchors.fill: parent

@@ -4,6 +4,8 @@
 #include "EditorViewItem.h"
 
 #include <QApplication>
+#include <QColor>
+#include <QPalette>
 #include <QCoreApplication>
 #include <QDir>
 #include <QFile>
@@ -914,6 +916,48 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store) {
     dispatch(QStringLiteral("find"));
     check(uiState().value(QStringLiteral("findOpened")).toBool(),
           QStringLiteral("dispatch(find) 打开查找栏"));
+
+    /*
+     * 提示框是深底浅字。
+     *
+     * 分两头：
+     *   * main.cpp 设的应用调色板 —— 管**原生（QWidget）**那侧的提示框；
+     *   * QML 那侧真正的提示框走 AppToolTip 组件（自己画的 Popup）——
+     *     样式 Fusion 那套取的是平台主题的浅色调色板（#FFFFE1），应用调色板
+     *     和 QML 调色板都压不住它，所以那边只能自己画。这里量的是组件报出来的
+     *     配色，以及"这份调色板确实也到了 QML"。
+     */
+    {
+        const QColor cppBase = QApplication::palette().color(QPalette::ToolTipBase);
+        const QColor cppText = QApplication::palette().color(QPalette::ToolTipText);
+        const QVariantMap ui = uiState();
+        const QColor qmlBase = ui.value(QStringLiteral("toolTipBase")).value<QColor>();
+        const QColor qmlText = ui.value(QStringLiteral("toolTipText")).value<QColor>();
+        const QColor tipBg = ui.value(QStringLiteral("tipBackground")).value<QColor>();
+        const QColor tipFg = ui.value(QStringLiteral("tipTextColor")).value<QColor>();
+        const QString tip =
+            QStringLiteral("调色板 底 %1 字 %2（QML 看到 %3 / %4）/ 提示框组件 底 %5 字 %6 "
+                           "圆角 %7 延迟 %8ms")
+                .arg(cppBase.name(), cppText.name(), qmlBase.name(), qmlText.name(),
+                     tipBg.name(), tipFg.name())
+                .arg(ui.value(QStringLiteral("tipRadius")).toInt())
+                .arg(ui.value(QStringLiteral("tipDelay")).toInt());
+        out() << "        （提示框：" << tip << "）" << Qt::endl;
+
+        check(cppBase.lightness() < 90 && cppText.lightness() > 150,
+              QStringLiteral("原生提示框用的是深底浅字"), tip);
+        check(qmlBase == cppBase && qmlText == cppText,
+              QStringLiteral("这份调色板也传到了 QML 那侧"), tip);
+        check(tipBg.lightness() < 90 && tipFg.lightness() > 150,
+              QStringLiteral("QML 提示框（AppToolTip）是深底浅字"), tip);
+        check(tipBg != QColor(0xff, 0xff, 0xe1),
+              QStringLiteral("QML 提示框不再是系统那种浅黄底（#FFFFE1）"), tip);
+        check(ui.value(QStringLiteral("tipRadius")).toInt() >= 3,
+              QStringLiteral("提示框是圆角的"), tip);
+        check(ui.value(QStringLiteral("tipDelay")).toInt() == 420,
+              QStringLiteral("悬停 420ms 才弹（和原来附加属性的 delay 一致）"), tip);
+    }
+
     dispatch(QStringLiteral("replace"));
     check(uiState().value(QStringLiteral("findReplaceVisible")).toBool(),
           QStringLiteral("dispatch(replace) 展开替换行"));

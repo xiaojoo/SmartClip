@@ -7,7 +7,9 @@
 
 #include <QApplication>
 #include <QAbstractNativeEventFilter>
+#include <QColor>
 #include <QGuiApplication>
+#include <QPalette>
 #include <QQmlContext>
 #include <QQmlEngine>
 #include <QQuickStyle>
@@ -77,6 +79,23 @@ int main(int argc, char *argv[]) {
     app.setOrganizationName("SmartClip");
     app.setApplicationName("SmartClip");
     QQuickStyle::setStyle("Fusion");
+
+    /*
+     * 工具提示（ToolTip）的全局配色。
+     *
+     * 界面整个是深色的，但 Fusion 那个 ToolTip 模板的背景取的是调色板里的
+     * toolTipBase、文字取 toolTipText（见 Qt 的 Fusion/ToolTip.qml），不设的话
+     * 就是系统默认的浅色底 —— 鼠标停在按钮上弹出一块白，跟界面完全不搭
+     * （用户报的就是"收起替换"上面那个"显示 / 隐藏替换行"）。
+     *
+     * 只动这两个角色，别的角色一概不碰：这是**应用级**调色板，改了会影响所有控件
+     * （QScintilla、对话框、菜单、QML 里的 Controls…），范围越小越安全。
+     * 想更黑就把这里的 ToolTipBase 换成 #1e1f22（编辑区底色）或纯黑。
+     */
+    QPalette tipPalette = app.palette();
+    tipPalette.setColor(QPalette::ToolTipBase, QColor(0x2b, 0x2d, 0x30));
+    tipPalette.setColor(QPalette::ToolTipText, QColor(0xd6, 0xd7, 0xda));
+    app.setPalette(tipPalette);
 
     /* 弹框不再响那一声，见 ModalBeepSilencer 的说明 */
     static ModalBeepSilencer beepSilencer;

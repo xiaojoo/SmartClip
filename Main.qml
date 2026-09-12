@@ -624,6 +624,30 @@ Rectangle {
             findBarHeight: editor.findBar.barHeight,
 
             /*
+             * 工具提示的配色（自检用）。
+             *
+             * main.cpp 里给应用调色板设了 ToolTipBase / ToolTipText，Fusion 的
+             * ToolTip 模板就是读这两个角色画的 —— 这里读的是 **QML 这侧**看到的
+             * 值，用来确认那份调色板真的传到了界面上（不是只设了 C++ 那一份）。
+             * 注意：QML 这侧的提示框已经不走 ToolTip 控件了（见 AppToolTip.qml），
+             * 这两个值只是"调色板确实到了 QML"的证据。
+             */
+            toolTipBase: window.palette.toolTipBase,
+            toolTipText: window.palette.toolTipText,
+
+            /*
+             * 深色提示框组件自己的配色（见 AppToolTip.qml）。
+             *
+             * 界面上真正的提示都用那个组件画 —— 样式（Fusion）那套取的是平台主题
+             * 的浅色调色板，应用调色板 / QML 调色板都压不住（实测还是 #FFFFE1）。
+             * 这里挂一个不显示的实例，只为把它的配色报给自检。
+             */
+            tipBackground: tipProbe.tipBackground,
+            tipTextColor: tipProbe.tipTextColor,
+            tipRadius: tipProbe.background.radius,
+            tipDelay: tipProbe.appearDelay,
+
+            /*
              * 分隔线热区的纵向范围（自检里量它有没有越界）。
              *
              * splitterTop / splitterBottom 必须和中间行（midRow）的上下边界
@@ -762,6 +786,15 @@ Rectangle {
         id: ddMenu
         parent: window
         onSelected: (act) => window.dispatch(act)
+    }
+
+    /*
+     * 自检用：界面上真正的提示框都是 AppToolTip 这个组件（深色，自己画的
+     * Popup），这里挂一个不显示的实例，只为把那套配色报给自检（见 uiState）。
+     */
+    AppToolTip {
+        id: tipProbe
+        visible: false
     }
 
     /*

@@ -50,6 +50,7 @@ qt_add_qml_module(SmartClip
     VERSION 1.0
     QML_FILES
         Main.qml
+        qml/components/AppToolTip.qml
         qml/components/DropdownMenu.qml
         qml/components/EditorArea.qml
         qml/components/FindBar.qml

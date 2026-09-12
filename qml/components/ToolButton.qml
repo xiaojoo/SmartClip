@@ -77,7 +77,9 @@ Rectangle {
         onClicked: root.clicked()
     }
 
-    ToolTip.visible: hit.containsMouse && root.tip !== ""
-    ToolTip.text: root.shortcut !== "" ? root.tip + "  (" + root.shortcut + ")" : root.tip
-    ToolTip.delay: 420
+    /* 深色提示框：外观和弹出时机都在 AppToolTip.qml 里 */
+    AppToolTip {
+        hovered: hit.containsMouse && root.tip !== ""
+        text: root.shortcut !== "" ? root.tip + "  (" + root.shortcut + ")" : root.tip
+    }
 }
