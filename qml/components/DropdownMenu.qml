@@ -22,14 +22,46 @@ import "../utils"
  *   Popup.Window —— 独立原生窗口，内容还是这份 QML（本文件用的）
  *   Popup.Native —— 平台原生菜单
  *
- * 条目格式（见 js/EditorMenus.js）：
- *   { label, act, shortcut, checked, disabled }   普通项
- *   { separator: true }                           分隔线
+ * ===========================================================================
+ * 子菜单：同一个窗口里的第二块面板
+ * ===========================================================================
+ * "视图 -> 语言 / 编码 / 换行符" 这三条点开要在右边再来一块面板
+ * （条目数据见 js/EditorMenus.js 里带 submenu: true + items 的那几条）。
+ *
+ * 两条关键规矩：
+ *
+ *  1) **只开一个原生弹窗**。两个 Popup 会互相抢焦点：点右边那块对左边来说
+ *     就是"点了外面"，CloseOnPressOutside 会先关掉父菜单，子菜单跟着没，
+ *     点击就丢了。做在同一个窗口里，鼠标在两边走都是"菜单内部"。
+ *
+ *  2) 两栏**各画各的面板**（各自的底、边框、圆角），不是共用一块底 ——
+ *     子菜单的顶边要对齐"鼠标停的那一条"所在的行（见 openSubmenu），
+ *     两栏高度本来就不一样；共用一个底会在父菜单下面拖出一大块空白。
+ *
+ * ===========================================================================
+ * 条目格式（见 js/EditorMenus.js）
+ * ===========================================================================
+ *   { label, act, shortcut, checked, disabled }             普通项
+ *   { label, submenu: true, items: [ ...同上... ] }          子菜单项（右边带 >）
+ *   { separator: true }                                     分隔线
  */
 Popup {
     id: root
 
     property var entries: []
+    /*
+     * 子菜单那一栏的条目（非空时右边多出一块面板）。
+     * 由 openSubmenu() 填；条目自己带的 items 就是它。
+     */
+    property var subEntries: []
+    /*
+     * 子菜单那块面板的顶边（相对弹窗内容区）—— openSubmenu 时按"父级那一条
+     * 所在的行"算出来，所以它和 submenuRowY 应该正好相等（自检量这个）。
+     */
+    property real submenuTop: 0
+    /* 父级那一条所在行的 y（对齐的目标值，只用于自检对照） */
+    property real submenuRowY: 0
+
     signal selected(string act)
 
     readonly property color bgColor:     "#3c3f41"
@@ -42,15 +74,50 @@ Popup {
 
     readonly property real itemHeight: 28
     readonly property real separatorHeight: 9
-    readonly property real menuWidth: 244
+    /* 面板四周给条目留的内缩（原来挂在弹窗的 padding 上，现在各面板自己留） */
+    readonly property real panePadding: 4
 
-    /* 所有条目撑开后的总高度（分隔线更矮）。注意不能叫 contentHeight —— Popup 自己已经有这个名字的 FINAL 属性 */
-    readonly property real entriesHeight: {
-        var h = 8
-        for (var i = 0; i < (entries ? entries.length : 0); ++i)
-            h += entries[i] && entries[i].separator ? separatorHeight : itemHeight
+    /*
+     * 一块面板的宽度。
+     *
+     * menuWidth 保留成"只有主菜单时弹窗有多宽"，openFor / openAtPoint 的
+     * 贴边夹取和老的自检值都还用这个数（两者现在相等）。
+     */
+    readonly property real paneWidth: 244
+    readonly property real menuWidth: paneWidth
+
+    /*
+     * 两块面板之间的间隙。
+     *
+     * 子菜单是**一块独立面板**（JetBrains 那种），不是贴死在父菜单上：
+     * 留一点缝，两边的圆角才都看得见 —— 贴在一起时为了不留豁口只能把
+     * 相邻的两个角切成方的（试过），看着就是"圆角没了"。
+     */
+    readonly property real paneGap: 6
+
+    /*
+     * 一栏条目撑开后的总高度（分隔线更矮，含上下各 4px 内缩）。
+     * 注意不能叫 contentHeight —— Popup 自己已经有这个名字的 FINAL 属性。
+     */
+    function paneHeight(items) {
+        var h = 2 * panePadding
+        for (var i = 0; i < (items ? items.length : 0); ++i)
+            h += items[i] && items[i].separator ? separatorHeight : itemHeight
         return h
     }
+
+    /* 这一栏里有没有带图标的条目（决定要不要留出图标列） */
+    function paneHasIcons(items) {
+        if (!items)
+            return false
+        for (var i = 0; i < items.length; ++i)
+            if (items[i] && items[i].icon)
+                return true
+        return false
+    }
+
+    readonly property real entriesHeight: paneHeight(entries)
+    readonly property real subEntriesHeight: paneHeight(subEntries)
 
     /*
      * 菜单最高能有多高。
@@ -65,9 +132,23 @@ Popup {
     readonly property real hostHeight: root.parent ? root.parent.height : 800
     readonly property real maxMenuHeight: Math.max(168, Math.min(hostHeight - 24, 460))
 
-    /* 实际画出来的高度 */
+    /* 主菜单那块面板实际画出来的高度 */
     readonly property real menuHeight: Math.min(entriesHeight, maxMenuHeight)
     readonly property bool scrollable: entriesHeight > menuHeight + 1
+
+    /* ---- 子菜单那一栏 ---- */
+    readonly property bool submenuOpened: subEntries !== undefined && subEntries !== null
+                                          && subEntries.length > 0
+    readonly property real submenuHeight: submenuOpened
+                                          ? Math.min(subEntriesHeight, maxMenuHeight) : 0
+    readonly property bool submenuScrollable: subEntriesHeight > submenuHeight + 1
+    readonly property bool submenuHasIcons: paneHasIcons(subEntries)
+
+    /*
+     * 子菜单那一块面板在主菜单右边多远（相对弹窗内容区）= 主栏宽 + 那条缝。
+     * 自检据此确认"子菜单确实在右边、而且和主菜单之间留着缝"。
+     */
+    readonly property real submenuInset: paneWidth + paneGap
 
     /*
      * 这组菜单里有没有带图标的条目。
@@ -75,25 +156,38 @@ Popup {
      * 语言 / 编码这种纯值列表没有图标，那就别留出图标列的位置；
      * 有图标的菜单（文件 / 编辑 / …）统一留出，保证所有文字左对齐。
      */
-    readonly property bool hasIcons: {
-        if (!entries)
-            return false
-        for (var i = 0; i < entries.length; ++i)
-            if (entries[i] && entries[i].icon)
-                return true
-        return false
-    }
+    readonly property bool hasIcons: paneHasIcons(entries)
 
     /* 勾选列 + 图标列的宽度（条目标签的左缩进就是它们之和） */
     readonly property real checkColumn: 14
     readonly property real iconColumn: hasIcons ? 17 : 0
     readonly property real leadColumn: checkColumn + iconColumn
 
-    width: menuWidth
-    height: menuHeight
-    /* 4px 内缩：条目的圆角高亮块不要贴到弹窗边缘（弹窗自己也有 5px 圆角） */
-    padding: 4
+    /*
+     * 弹窗尺寸 = 两块面板的**外接矩形**。
+     *
+     * 宽度：开着子菜单时两栏并排；高度：子栏顶边在 submenuTop，所以是
+     * max(主栏高, submenuTop + 子栏高) —— 子栏从中间某一行往下伸，
+     * 比主栏矮/高都正常，不再强行"一样高"。
+     *
+     * 写的是 implicit*，不是 width / height：Popup 打开时自己会去摆
+     * width / height（QQuickPopup 内部要算位置和贴边），显式 width 那条绑定
+     * 会被它赋一次值给打断 —— 之后再开子菜单，弹窗尺寸就不跟着走了
+     * （实测：子菜单那一栏已经画出来，弹窗还是 244 宽）。
+     */
+    implicitWidth: submenuOpened ? paneWidth * 2 + paneGap : paneWidth
+    implicitHeight: Math.max(menuHeight, submenuOpened ? submenuTop + submenuHeight : 0)
+
+    /*
+     * 弹窗自己**不画底**：两块面板各画各的（见 contentItem）。
+     *
+     * 这层还是留一个空 Item 而不是设成 null —— Main.menuTopLeft() 拿
+     * background 去反推菜单左上角（自检量菜单落点用），margins: 0 时它正好
+     * 铺满整个弹窗。
+     */
+    background: Item {}
     margins: 0
+    padding: 0
     modal: false
     focus: true
     closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
@@ -103,10 +197,16 @@ Popup {
 
     IconProvider { id: menuIcons }
 
-    background: Rectangle {
-        color: root.bgColor
-        radius: 5
-        border.color: root.borderColor
+    /*
+     * 菜单关掉时把子菜单那一栏也清掉。
+     *
+     * 不清的话下次 openFor() 之前它会一直挂在那儿（虽然看不见），
+     * uiState 之类的读数也会跟着虚报。
+     */
+    onClosed: {
+        subEntries = []
+        submenuTop = 0
+        submenuRowY = 0
     }
 
     /*
@@ -120,6 +220,9 @@ Popup {
      */
     function openFor(anchor, items) {
         entries = items
+        subEntries = []
+        submenuTop = 0
+        submenuRowY = 0
         list.contentY = 0
 
         var host = root.parent
@@ -157,6 +260,9 @@ Popup {
      */
     function openAtPoint(anchor, px, py, items) {
         entries = items
+        subEntries = []
+        submenuTop = 0
+        submenuRowY = 0
         list.contentY = 0
 
         var host = root.parent
@@ -167,219 +273,455 @@ Popup {
         root.open()
     }
 
+    /*
+     * 在右边展开子菜单（条目 hover / 点上去时调，见下面 MenuEntryItem）。
+     *
+     * fromItem 是**父级那一条**（委托自己）：子菜单面板的顶边要和它所在的行
+     * 对齐，所以这里量它的 y。行 y 要减去列表的滚动量 —— 列表滚过之后，
+     * 条目在面板里的位置是 entry.y - contentY（委托的 y 是内容坐标）。
+     * 再加上面板那条 4px 内缩，就是面板坐标里的行顶边。
+     *
+     * 展开之后弹窗要往下长（见 implicitHeight），可能顶出宿主窗口下沿 ——
+     * 那就整体往上挪（和菜单自己贴边时的处理一致，两栏一起挪，相对关系不动）。
+     *
+     * 返回有没有展开（没条目 / 空列表就当没这回事）。
+     */
+    function openSubmenu(items, fromItem) {
+        if (!items || items.length === 0)
+            return false
+
+        subEntries = items
+        subList.contentY = 0
+
+        var rowY = fromItem ? Math.max(0, fromItem.y - list.contentY) : 0
+        submenuRowY = Math.round(rowY + panePadding)
+        submenuTop = submenuRowY
+
+        var host = root.parent
+        if (host && root.y + implicitHeight > host.height - 4)
+            root.y = Math.max(2, host.height - implicitHeight - 4)
+        if (host && root.x + implicitWidth > host.width - 4)
+            root.x = Math.max(2, host.width - implicitWidth - 4)
+        return true
+    }
+
+    /* 收起子菜单那一栏（鼠标移到普通条目上时调） */
+    function clearSubmenu() {
+        subEntries = []
+        submenuTop = 0
+        submenuRowY = 0
+    }
+
+    /*
+     * 鼠标停到某一条上（委托的 onEntered 调它）。
+     *
+     * 子菜单条目 -> 展开右边那块；普通条目 -> 把右边那块收掉，免得鼠标移开
+     * 之后它还挂在那儿、和当前高亮的那条对不上。
+     *
+     * **子菜单自己那栏里的条目不算"普通条目"**：鼠标从父级那一条往右挪进
+     * 子菜单时，先进入的就是子菜单里的第一条，那时候要是把子菜单收掉，
+     * 面板会在鼠标底下消失 —— 手感就是"还没移上去它就没了"（用户报的就是这个）。
+     *
+     * 抽成组件上的函数而不是写在委托里，是为了让自检也能走同一条判断：
+     * 悬停 C++ 侧点不出来，见 hoverSubmenuEntry()。
+     */
+    function hoverEntry(entry) {
+        if (!entry || entry.isDisabled || entry.isSeparator)
+            return
+        if (entry.hasSubItems)
+            openSubmenu(entry.modelData.items, entry)
+        else if (!entry.inSubmenu && submenuOpened)
+            clearSubmenu()
+    }
+
+    /* 子菜单里第 index 条委托（自检用；跳过 Column 里那个 Repeater） */
+    function submenuEntry(index) {
+        var n = 0
+        for (var i = 0; i < subCol.children.length; ++i) {
+            var item = subCol.children[i]
+            if (!item || item.modelData === undefined)
+                continue
+            if (n === index)
+                return item
+            ++n
+        }
+        return null
+    }
+
+    /*
+     * 自检用：模拟"鼠标停到子菜单里第 index 条上"。
+     * 返回停完之后子菜单是不是还开着（这正是当初出 bug 的地方）。
+     */
+    function hoverSubmenuEntry(index) {
+        var item = submenuEntry(index === undefined ? 0 : index)
+        if (!item)
+            return false
+        hoverEntry(item)
+        return submenuOpened
+    }
+
+    /*
+     * 按动作名找主菜单里那一条的**委托**（自检用，见 Main.openSubmenuFor）。
+     *
+     * 界面上展开子菜单是"鼠标停到某一条上"，委托会把自己（连同自己的 y）
+     * 交给 openSubmenu；C++ 侧悬停不出来，自检就靠这个把同一个委托找出来，
+     * 走的是同一条路、同一个 y —— 而不是在测试里另算一遍行的位置。
+     */
+    function entryItemFor(act) {
+        for (var i = 0; i < col.children.length; ++i) {
+            var item = col.children[i]
+            if (item && item.modelData && item.modelData.act === act)
+                return item
+        }
+        return null
+    }
+
     contentItem: Item {
-        Flickable {
-            id: list
+        id: contentArea
 
-            anchors.fill: parent
-            contentWidth: width
-            contentHeight: col.height
-            clip: true
-            boundsBehavior: Flickable.StopAtBounds
-            interactive: root.scrollable
+        /* ---------------- 主菜单面板 ---------------- */
+        Item {
+            id: mainPane
 
-            /* 滚轮也能滚：Flickable 自己处理 wheel 事件 */
-            ScrollBar.vertical: ThinScrollBar {
-                anchors.right: parent.right
-                anchors.top: parent.top
-                anchors.bottom: parent.bottom
+            x: 0
+            y: 0
+            width: root.paneWidth
+            height: root.menuHeight
+
+            /*
+             * 面板自己的底和边框。四个角都是圆的 —— 子菜单那块隔着 paneGap
+             * 站在右边，不再和这一块贴死，所以这边不用再切方角。
+             */
+            Rectangle {
+                anchors.fill: parent
+                color: root.bgColor
+                border.color: root.borderColor
+                radius: 5
             }
 
-            Column {
-                id: col
+            Flickable {
+                id: list
 
-                /* 有滚动条时给右边让出一点位置，免得文字压在滚动条上 */
-                width: list.width - (root.scrollable ? 6 : 0)
-                spacing: 0
+                anchors.fill: parent
+                anchors.margins: root.panePadding
+                contentWidth: width
+                contentHeight: col.height
+                clip: true
+                boundsBehavior: Flickable.StopAtBounds
+                interactive: root.scrollable
 
-                Repeater {
-                    model: root.entries
+                /* 滚轮也能滚：Flickable 自己处理 wheel 事件 */
+                ScrollBar.vertical: ThinScrollBar {
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    anchors.bottom: parent.bottom
+                }
 
-                    delegate: Item {
-                        id: entry
+                Column {
+                    id: col
 
-                        required property var modelData
+                    /* 有滚动条时给右边让出一点位置，免得文字压在滚动条上 */
+                    width: list.width - (root.scrollable ? 6 : 0)
+                    spacing: 0
 
-                        readonly property bool isSeparator: modelData
-                                                            && modelData.separator === true
-                        readonly property bool isDisabled: modelData
-                                                           && modelData.disabled === true
-
-                        width: col.width
-                        height: entry.isSeparator ? root.separatorHeight : root.itemHeight
-
-                        /* ---- 分隔线 ---- */
-                        Rectangle {
-                            anchors.left: parent.left
-                            anchors.right: parent.right
-                            anchors.verticalCenter: parent.verticalCenter
-                            anchors.leftMargin: 8
-                            anchors.rightMargin: 8
-                            height: 1
-                            color: root.borderColor
-                            opacity: 0.8
-                            visible: entry.isSeparator
-                        }
-
-                        /* ---- 普通条目 ---- */
-                        Rectangle {
-                            id: itemRect
-
-                            anchors.fill: parent
-                            visible: !entry.isSeparator
-                            radius: 4
-                            color: itemHit.containsMouse && !entry.isDisabled
-                                   ? root.hoverColor : "transparent"
-
-                            Row {
-                                anchors.fill: parent
-                                anchors.leftMargin: 8
-                                anchors.rightMargin: 10
-                                spacing: 6
-
-                                /* 勾选列（当前语言 / 当前编码这类"选中项"打勾） */
-                                Item {
-                                    width: root.checkColumn
-                                    height: parent.height
-
-                                    AppIcon {
-                                        anchors.centerIn: parent
-                                        provider: menuIcons
-                                        kind: "check"
-                                        size: 13
-                                        visible: entry.modelData
-                                                 && entry.modelData.checked === true
-                                        tint: root.accentColor
-                                    }
-                                }
-
-                                /*
-                                 * 图标列：图标在**左边**，快捷键在右边。
-                                 *
-                                 * 工具栏那一整行已经去掉，命令全部收进这些下拉菜单，
-                                 * 图标就是它们的"脸"。
-                                 */
-                                Item {
-                                    width: root.iconColumn
-                                    height: parent.height
-
-                                    AppIcon {
-                                        anchors.left: parent.left
-                                        anchors.verticalCenter: parent.verticalCenter
-                                        provider: menuIcons
-                                        kind: entry.modelData && entry.modelData.icon
-                                              ? entry.modelData.icon : ""
-                                        size: 14
-                                        /* 和工具栏原来那套图标一个色：平时灰、悬停转亮 */
-                                        tint: entry.isDisabled ? "#4d5157"
-                                                               : (itemHit.containsMouse
-                                                                  ? root.textHot
-                                                                  : "#9aa0a8")
-                                    }
-                                }
-
-                                Text {
-                                    id: itemLabel
-                                    anchors.verticalCenter: parent.verticalCenter
-                                    width: parent.width - root.leadColumn - 6
-                                            - (shortcutLabel.visible
-                                               ? shortcutLabel.implicitWidth + 12 : 0)
-                                    /*
-                                     * 分隔线条目里没有 label / shortcut，取值前必须
-                                     * 判存在：直接取会得到 undefined，赋给 QString
-                                     * 属性会刷 "Unable to assign [undefined] to QString"。
-                                     */
-                                    text: entry.modelData
-                                          && entry.modelData.label !== undefined
-                                          ? entry.modelData.label : ""
-                                    color: entry.isDisabled ? root.mutedColor
-                                                            : (itemHit.containsMouse
-                                                               ? root.textHot : root.textColor)
-                                    font.pixelSize: 13
-                                    elide: Text.ElideRight
-                                    verticalAlignment: Text.AlignVCenter
-                                }
-
-                                Text {
-                                    id: shortcutLabel
-                                    anchors.verticalCenter: parent.verticalCenter
-                                    text: entry.modelData && entry.modelData.shortcut
-                                          ? entry.modelData.shortcut : ""
-                                    visible: text !== ""
-                                    color: entry.isDisabled ? "#55585d" : root.mutedColor
-                                    font.pixelSize: 11
-                                    verticalAlignment: Text.AlignVCenter
-                                }
-                            }
-
-                            MouseArea {
-                                id: itemHit
-                                anchors.fill: parent
-                                hoverEnabled: true
-                                cursorShape: entry.isDisabled ? Qt.ArrowCursor
-                                                              : Qt.PointingHandCursor
-                                onClicked: {
-                                    if (entry.isDisabled || entry.isSeparator)
-                                        return
-
-                                    /*
-                                     * 子菜单（js/EditorMenus.js 里标了 submenu: true 的
-                                     * "语言 / 编码 / 换行符"）：**不关菜单**，命令自己会
-                                     * 把它换一批条目、挪到新锚点重新摆出来
-                                     * （Main.dispatch -> TopBar.openGroup -> openFor）。
-                                     *
-                                     * 为什么不能关：close() 紧接着再 open() 在同一次事件里
-                                     * 弹不回来（实测菜单直接消失）；而"先 selected 再
-                                     * close"更糟 —— 子菜单刚换好内容就被这一句关掉了，
-                                     * 界面上点"视图 -> 语言"一直是什么都没有。
-                                     */
-                                    if (entry.modelData.submenu === true) {
-                                        root.selected(entry.modelData.act)
-                                        return
-                                    }
-
-                                    /*
-                                     * 其余命令：**先收菜单，再发命令**。
-                                     *
-                                     * 反过来（先发命令再 close）碰上"打开…" "保存"
-                                     * "另存为…" "打印…" 这种会弹**模态**原生对话框的命令
-                                     * 就露馅了：QFileDialog 是同步的，它在自己的嵌套事件
-                                     * 循环里把整条 JS 调用栈堵住，后面那句 close() 要等
-                                     * 用户关掉对话框才轮得到 —— 于是菜单一直挂在对话框
-                                     * 上面（用户截图报的就是这个）。
-                                     */
-                                    root.close()
-                                    root.selected(entry.modelData.act)
-                                }
-                            }
-                        }
+                    Repeater {
+                        model: root.entries
+                        delegate: MenuEntryItem {}
                     }
                 }
             }
+
+            /* 上面 / 下面还有内容时给个小箭头提示（长菜单才出现） */
+            AppIcon {
+                anchors.horizontalCenter: list.horizontalCenter
+                anchors.top: list.top
+                anchors.topMargin: 1
+                provider: menuIcons
+                kind: "chevron-up"
+                size: 10
+                tint: root.mutedColor
+                visible: root.scrollable && list.contentY > 1
+            }
+
+            AppIcon {
+                anchors.horizontalCenter: list.horizontalCenter
+                anchors.bottom: list.bottom
+                anchors.bottomMargin: 1
+                provider: menuIcons
+                kind: "chevron-down"
+                size: 10
+                tint: root.mutedColor
+                visible: root.scrollable
+                         && list.contentY < list.contentHeight - list.height - 1
+            }
         }
 
-        /* 上面 / 下面还有内容时给个小箭头提示（长菜单才出现） */
-        AppIcon {
-            anchors.horizontalCenter: parent.horizontalCenter
-            anchors.top: parent.top
-            anchors.topMargin: 1
-            provider: menuIcons
-            kind: "chevron-up"
-            size: 10
-            tint: root.mutedColor
-            visible: root.scrollable && list.contentY > 1
+        /* ---------------- 子菜单面板（右边那一块） ---------------- */
+        Item {
+            id: subPane
+
+            visible: root.submenuOpened
+            /* 右边那块面板：和主菜单之间留着 paneGap 那条缝 */
+            x: root.submenuInset
+            /* 顶边 = 父级那一条所在的行（用户要的效果：从那条旁边伸出来） */
+            y: root.submenuTop
+            width: root.paneWidth
+            height: root.submenuHeight
+
+            /* 独立一块面板：四个角都是圆的（和主菜单之间隔着那条缝） */
+            Rectangle {
+                anchors.fill: parent
+                color: root.bgColor
+                border.color: root.borderColor
+                radius: 5
+            }
+
+            Flickable {
+                id: subList
+
+                anchors.fill: parent
+                anchors.margins: root.panePadding
+                contentWidth: width
+                contentHeight: subCol.height
+                clip: true
+                boundsBehavior: Flickable.StopAtBounds
+                interactive: root.submenuScrollable
+
+                ScrollBar.vertical: ThinScrollBar {
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    anchors.bottom: parent.bottom
+                }
+
+                Column {
+                    id: subCol
+
+                    width: subList.width - (root.submenuScrollable ? 6 : 0)
+                    spacing: 0
+
+                    Repeater {
+                        model: root.subEntries
+                        delegate: MenuEntryItem { inSubmenu: true }
+                    }
+                }
+            }
+
+            AppIcon {
+                anchors.horizontalCenter: subList.horizontalCenter
+                anchors.top: subList.top
+                anchors.topMargin: 1
+                provider: menuIcons
+                kind: "chevron-up"
+                size: 10
+                tint: root.mutedColor
+                visible: root.submenuScrollable && subList.contentY > 1
+            }
+
+            AppIcon {
+                anchors.horizontalCenter: subList.horizontalCenter
+                anchors.bottom: subList.bottom
+                anchors.bottomMargin: 1
+                provider: menuIcons
+                kind: "chevron-down"
+                size: 10
+                tint: root.mutedColor
+                visible: root.submenuScrollable
+                         && subList.contentY < subList.contentHeight - subList.height - 1
+            }
+        }
+    }
+
+    /*
+     * 一条菜单条目 —— 主菜单和子菜单**共用这一份绘制**。
+     *
+     * 用 inline component 而不是复制两份：两栏的条目长得一模一样，
+     * 只有两点不同，靠 inSubmenu 区分：
+     *   * 图标列留不留位置（语言 / 编码这种纯值列表没有图标）；
+     *   * 右边显示的是快捷键，还是"会展开子菜单"的那个 >。
+     */
+    component MenuEntryItem: Item {
+        id: entry
+
+        required property var modelData
+        /* 这条属于右边那块面板（子菜单）吗 */
+        property bool inSubmenu: false
+
+        readonly property bool isSeparator: modelData && modelData.separator === true
+        readonly property bool isDisabled: modelData && modelData.disabled === true
+        /* 点开会往右边再展开一块面板的条目（EditorMenus.js 里标了 submenu: true） */
+        readonly property bool isSubmenu: !!(modelData && modelData.submenu === true)
+        readonly property bool hasSubItems: isSubmenu && modelData.items !== undefined
+                                            && modelData.items !== null
+                                            && modelData.items.length > 0
+        /* 勾选列 + 图标列：本栏没有图标条目时就不留图标列的位置 */
+        readonly property real leadWidth: root.checkColumn
+                                          + ((inSubmenu ? root.submenuHasIcons
+                                                        : root.hasIcons) ? root.iconColumn : 0)
+
+        width: parent ? parent.width : 0
+        height: entry.isSeparator ? root.separatorHeight : root.itemHeight
+
+        /* ---- 分隔线 ---- */
+        Rectangle {
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            anchors.leftMargin: 8
+            anchors.rightMargin: 8
+            height: 1
+            color: root.borderColor
+            opacity: 0.8
+            visible: entry.isSeparator
         }
 
-        AppIcon {
-            anchors.horizontalCenter: parent.horizontalCenter
-            anchors.bottom: parent.bottom
-            anchors.bottomMargin: 1
-            provider: menuIcons
-            kind: "chevron-down"
-            size: 10
-            tint: root.mutedColor
-            visible: root.scrollable
-                     && list.contentY < list.contentHeight - list.height - 1
+        /* ---- 普通条目 ---- */
+        Rectangle {
+            id: itemRect
+
+            anchors.fill: parent
+            visible: !entry.isSeparator
+            radius: 4
+            color: itemHit.containsMouse && !entry.isDisabled
+                   ? root.hoverColor : "transparent"
+
+            Row {
+                anchors.fill: parent
+                anchors.leftMargin: 8
+                anchors.rightMargin: 10
+                spacing: 6
+
+                /* 勾选列（当前语言 / 当前编码这类"选中项"打勾） */
+                Item {
+                    width: root.checkColumn
+                    height: parent.height
+
+                    AppIcon {
+                        anchors.centerIn: parent
+                        provider: menuIcons
+                        kind: "check"
+                        size: 13
+                        visible: entry.modelData
+                                 && entry.modelData.checked === true
+                        tint: root.accentColor
+                    }
+                }
+
+                /*
+                 * 图标列：图标在**左边**，快捷键在右边。
+                 *
+                 * 工具栏那一整行已经去掉，命令全部收进这些下拉菜单，
+                 * 图标就是它们的"脸"。
+                 */
+                Item {
+                    width: entry.leadWidth - root.checkColumn
+                    height: parent.height
+
+                    AppIcon {
+                        anchors.left: parent.left
+                        anchors.verticalCenter: parent.verticalCenter
+                        provider: menuIcons
+                        kind: entry.modelData && entry.modelData.icon
+                              ? entry.modelData.icon : ""
+                        size: 14
+                        /* 和工具栏原来那套图标一个色：平时灰、悬停转亮 */
+                        tint: entry.isDisabled ? "#4d5157"
+                                               : (itemHit.containsMouse
+                                                  ? root.textHot
+                                                  : "#9aa0a8")
+                    }
+                }
+
+                Text {
+                    id: itemLabel
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: parent.width - entry.leadWidth - 6
+                            - (shortcutLabel.visible
+                               ? shortcutLabel.implicitWidth + 12 : 0)
+                            - (submenuArrow.visible ? submenuArrow.width + 8 : 0)
+                    /*
+                     * 分隔线条目里没有 label / shortcut，取值前必须
+                     * 判存在：直接取会得到 undefined，赋给 QString
+                     * 属性会刷 "Unable to assign [undefined] to QString"。
+                     */
+                    text: entry.modelData
+                          && entry.modelData.label !== undefined
+                          ? entry.modelData.label : ""
+                    color: entry.isDisabled ? root.mutedColor
+                                            : (itemHit.containsMouse
+                                               ? root.textHot : root.textColor)
+                    font.pixelSize: 13
+                    elide: Text.ElideRight
+                    verticalAlignment: Text.AlignVCenter
+                }
+
+                Text {
+                    id: shortcutLabel
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: entry.modelData && entry.modelData.shortcut
+                          ? entry.modelData.shortcut : ""
+                    visible: text !== ""
+                    color: entry.isDisabled ? "#55585d" : root.mutedColor
+                    font.pixelSize: 11
+                    verticalAlignment: Text.AlignVCenter
+                }
+
+                /*
+                 * 子菜单标记：这一条点开会在右边再来一块面板（参考图里那个 >）。
+                 *
+                 * 位置和快捷键是同一个位置 —— 两条同时在的条目不存在
+                 * （子菜单条目本来就不挂快捷键）。
+                 */
+                AppIcon {
+                    id: submenuArrow
+                    anchors.verticalCenter: parent.verticalCenter
+                    visible: entry.isSubmenu
+                    provider: menuIcons
+                    kind: "chevron-right"
+                    size: 11
+                    tint: entry.isDisabled ? "#55585d"
+                                           : (itemHit.containsMouse ? root.textHot
+                                                                    : root.mutedColor)
+                }
+            }
+
+            MouseArea {
+                id: itemHit
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: entry.isDisabled ? Qt.ArrowCursor
+                                              : Qt.PointingHandCursor
+
+                /*
+                 * 鼠标停到条目上：交给 root.hoverEntry() 判断（子菜单条目展开
+                 * 右边那块、普通条目把右边那块收掉，子菜单**里面**的条目
+                 * 两个都不做 —— 原因见 hoverEntry 的说明）。
+                 */
+                onEntered: root.hoverEntry(entry)
+
+                onClicked: {
+                    if (entry.isDisabled || entry.isSeparator)
+                        return
+
+                    /* 子菜单条目：点 = 展开（悬停已经展开过一次，这里兜底） */
+                    if (entry.hasSubItems) {
+                        root.openSubmenu(entry.modelData.items, entry)
+                        return
+                    }
+
+                    /*
+                     * 其余命令：**先收菜单，再发命令**。
+                     *
+                     * 反过来（先发命令再 close）碰上"打开…" "保存"
+                     * "另存为…" "打印…" 这种会弹**模态**原生对话框的命令
+                     * 就露馅了：QFileDialog 是同步的，它在自己的嵌套事件
+                     * 循环里把整条 JS 调用栈堵住，后面那句 close() 要等
+                     * 用户关掉对话框才轮得到 —— 于是菜单一直挂在对话框
+                     * 上面（用户截图报的就是这个）。
+                     */
+                    root.close()
+                    root.selected(entry.modelData.act)
+                }
+            }
         }
     }
 }

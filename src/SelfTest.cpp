@@ -1917,10 +1917,21 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store) {
     }
 
     /*
-     * 长下拉菜单必须限高 + 可滚动。
+     * ================= 子菜单（视图 -> 语言 / 编码 / 换行符） =================
      *
-     * 语言菜单有 27 项（约 764px），不限高就会一路盖住左侧导航栏 ——
-     * 这是界面上实际报过的问题。放在最后做：菜单开着直接退出进程。
+     * 这三条要在主菜单**右边**再展开一栏（条目就在 js/EditorMenus.js 里挂着
+     * submenu: true + items 的那几条）。要钉三件事：
+     *
+     *  1) 真的多出一栏，而且那一栏在主栏右边（量位置，不是量"展开了"这个标志）；
+     *  2) 长列表（语言 27 项）照样限高 + 可滚动；
+     *  3) 两条入口都能通：菜单栏那条（dispatch("menu:视图") 开主菜单）
+     *     和条目自己的 items。
+     *
+     * 悬停那一下 C++ 点不出来，所以走 Main.openSubmenuFor —— 它和界面用的是
+     * 同一份 Menus.menuItems("视图") 构造、同一个 ddMenu.openSubmenu()。
+     *
+     * 先开一个空白标签：语言 / 编码 两张表是按**当前文档**算出来的
+     * （没文档时 languageItems() 直接返回空表，子菜单也就没什么可展开的）。
      */
     dispatch(QStringLiteral("new"));
 
@@ -1934,6 +1945,94 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store) {
               QStringLiteral("文件菜单条目带图标（图标在左、快捷键在右）"));
     }
 
+    dispatch(QStringLiteral("menu:视图"));
+    /*
+     * 等一帧：菜单条目的 y 是 Column（positioner）算的，下一帧才摆到位 ——
+     * 同一轮事件里读，每条都还是 y = 0，子菜单就会"对齐到第一行"。
+     */
+    settle();
+    {
+        const QVariantMap ui = uiState();
+        check(ui.value(QStringLiteral("menuOpened")).toBool(),
+              QStringLiteral("dispatch(menu:视图) 打开\"视图\"菜单"));
+        check(!ui.value(QStringLiteral("submenuOpened")).toBool(),
+              QStringLiteral("刚打开时右边还没有子菜单那一栏"));
+    }
+
+    {
+        QVariant opened;
+        QMetaObject::invokeMethod(qmlRoot, "openSubmenuFor", Q_RETURN_ARG(QVariant, opened),
+                                  Q_ARG(QVariant, QVariant(QStringLiteral("menu:语言"))));
+        check(opened.toBool(), QStringLiteral("openSubmenuFor(menu:语言) 展开了子菜单"));
+
+        const QVariantMap ui = uiState();
+        const double subH = ui.value(QStringLiteral("submenuHeight")).toDouble();
+        const double subContentH = ui.value(QStringLiteral("submenuContentHeight")).toDouble();
+        const double paneW = ui.value(QStringLiteral("menuPaneWidth")).toDouble();
+        const double inset = ui.value(QStringLiteral("submenuInset")).toDouble();
+        const double totalW = ui.value(QStringLiteral("menuTotalWidth")).toDouble();
+        const double totalH = ui.value(QStringLiteral("menuTotalHeight")).toDouble();
+        const double mainH = ui.value(QStringLiteral("menuHeight")).toDouble();
+        const double subTop = ui.value(QStringLiteral("submenuTop")).toDouble();
+        const double subRowY = ui.value(QStringLiteral("submenuRowY")).toDouble();
+        const double gap = ui.value(QStringLiteral("menuPaneGap")).toDouble();
+
+        check(ui.value(QStringLiteral("submenuOpened")).toBool(),
+              QStringLiteral("语言子菜单那一块真的画出来了"));
+        check(qAbs(inset - (paneW + gap)) < 0.5,
+              QStringLiteral("子菜单在主菜单右边，中间留着一条缝"),
+              QStringLiteral("子栏 x %1 / 主栏宽 %2 / 缝 %3").arg(inset).arg(paneW).arg(gap));
+        check(gap >= 3.0, QStringLiteral("那条缝够看得见两块面板各自的圆角"),
+              QStringLiteral("缝 %1").arg(gap));
+        check(qAbs(totalW - (paneW * 2 + gap)) < 0.5,
+              QStringLiteral("弹窗宽度 = 两块面板 + 中间那条缝"),
+              QStringLiteral("弹窗宽 %1").arg(totalW));
+        /*
+         * 顶边对齐"父级那一条所在的行"，不是贴到菜单顶上 ——
+         * "语言"在"视图"菜单里靠下（y 远大于 0），所以这两条一量就能分清。
+         */
+        check(qAbs(subTop - subRowY) < 0.5,
+              QStringLiteral("子菜单顶边 = 父级那一条所在的行（没被夹到菜单顶上）"),
+              QStringLiteral("子栏顶边 %1 / 那一行 %2").arg(subTop).arg(subRowY));
+        check(subRowY > 100.0, QStringLiteral("对的是菜单靠下的那一条（不是第一行）"),
+              QStringLiteral("行 y %1").arg(subRowY));
+        check(totalH > mainH + 0.5,
+              QStringLiteral("弹窗往下长高，把从中间那一行伸出来的子栏装下"),
+              QStringLiteral("弹窗高 %1 / 主栏高 %2").arg(totalH).arg(mainH));
+        check(subContentH > 700, QStringLiteral("语言子菜单条目总高 > 700px（27 项）"),
+              QStringLiteral("实际 %1").arg(subContentH));
+        check(subH < subContentH, QStringLiteral("长子菜单被限高，不再整块铺下去"),
+              QStringLiteral("画出来 %1 / 内容 %2").arg(subH).arg(subContentH));
+        check(subH <= 461, QStringLiteral("子菜单高度夹在 maxMenuHeight 以内"),
+              QStringLiteral("实际 %1").arg(subH));
+        check(ui.value(QStringLiteral("submenuScrollable")).toBool(),
+              QStringLiteral("长子菜单标记为可滚动"));
+
+        /*
+         * 鼠标往右挪进子菜单：进的是子菜单里第一条，**不能**把子菜单收掉。
+         *
+         * 这一步原来错了 —— 委托把"普通条目"的收子菜单逻辑也用在子菜单自己的
+         * 条目上，于是鼠标刚移进去面板就没了（用户报的"还没移上去就消失了"）。
+         * 这里走的是 DropdownMenu.hoverEntry()，和真实悬停同一份判断。
+         */
+        QVariant stillOpen;
+        QMetaObject::invokeMethod(qmlRoot, "hoverSubmenuEntry", Q_RETURN_ARG(QVariant, stillOpen),
+                                  Q_ARG(QVariant, QVariant(0)));
+        check(stillOpen.toBool() && uiState().value(QStringLiteral("submenuOpened")).toBool(),
+              QStringLiteral("鼠标移进子菜单里第一条，子菜单不会自己收掉"));
+    }
+
+    /* 子菜单里的条目照样能点：选一门语言，菜单自己也收掉 */
+    dispatch(QStringLiteral("lang:python"));
+    check(view->language() == QLatin1String("python"),
+          QStringLiteral("子菜单里的条目（lang:python）能执行"));
+
+    /*
+     * 长下拉菜单必须限高 + 可滚动（老路子：直接把语言列表当整个菜单弹出来）。
+     *
+     * dispatch("menu:语言") 这条仍然可用 —— 它不管子菜单那套，直接把列表
+     * 当主菜单摆出来。放在最后做：菜单开着直接退出进程。
+     */
     dispatch(QStringLiteral("menu:语言"));
     {
         const QVariantMap ui = uiState();
@@ -1949,7 +2048,19 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store) {
               QStringLiteral("实际 %1").arg(menuH));
         check(ui.value(QStringLiteral("menuScrollable")).toBool(),
               QStringLiteral("长菜单标记为可滚动"));
+        check(!ui.value(QStringLiteral("submenuOpened")).toBool(),
+              QStringLiteral("当主菜单弹出来时右边不留上一个子菜单"));
     }
+
+    /*
+     * 收尾：把菜单关掉再退出。
+     *
+     * 弹窗是独立原生窗口（见 DropdownMenu.qml 开头），留着它在进程退出时拆，
+     * 偶尔会踩到拆除顺序的竞态 —— 实测有过一次 0xC0000005（访问冲突），
+     * 报出来的却是"自检崩了"，而检查项其实一条没挂。
+     * 在事件循环还活着的时候正常 close()，这个假故障就没了。
+     */
+    QMetaObject::invokeMethod(qmlRoot, "closeMenu");
 
     out() << Qt::endl
           << "通过 " << gPassed << " 项，失败 " << gFailed << " 项" << Qt::endl;

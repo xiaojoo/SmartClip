@@ -633,6 +633,43 @@ Rectangle {
                  highlighted: folderTree.highlightCounts() }
     }
 
+    /*
+     * 展开"视图"菜单里的某个子菜单（自检用，见 src/SelfTest.cpp）。
+     *
+     * 界面上这一步是"鼠标停到 语言 / 编码 / 换行符 上"（见 DropdownMenu.qml 里
+     * MenuEntryItem 的 onEntered），C++ 侧悬停不出来 —— 但走的是同一条路：
+     * 用同一份 Menus.menuItems("视图") 构造，找到那条带 items 的子菜单条目，
+     * 把它交给 ddMenu.openSubmenu()。
+     */
+    function openSubmenuFor(act) {
+        var items = Menus.menuItems("视图", view, shortcutOverrides())
+        for (var i = 0; i < items.length; ++i) {
+            if (items[i] && items[i].submenu === true && items[i].act === act) {
+                /*
+                 * 找出界面上那一条的委托，把它交给 openSubmenu ——
+                 * 和鼠标悬停走的是同一条路（连"子菜单顶边对齐哪一行"用的
+                 * 都是同一个 y），不是在测试里另算一遍。
+                 */
+                var entryItem = ddMenu.entryItemFor(act)
+                return entryItem ? ddMenu.openSubmenu(items[i].items, entryItem) : false
+            }
+        }
+        return false
+    }
+
+    /* 关掉下拉菜单（自检收尾用，见 src/SelfTest.cpp） */
+    function closeMenu() { ddMenu.close() }
+
+    /*
+     * 自检用：模拟"鼠标停到子菜单里第 index 条上"，返回停完之后子菜单还开着没。
+     *
+     * 这一步界面上就是鼠标往右挪进子菜单，C++ 侧悬停不出来；
+     * 走的是 DropdownMenu.hoverEntry()，和委托的 onEntered 同一份判断。
+     */
+    function hoverSubmenuEntry(index) {
+        return ddMenu.hoverSubmenuEntry(index === undefined ? 0 : index)
+    }
+
     function showFind(replace) {
         if (!view.hasDocument)
             return
@@ -861,6 +898,27 @@ Rectangle {
             menuScrollable: ddMenu.scrollable,
             /* 有图标的菜单：图标在左、快捷键在右（工具栏已取消） */
             menuHasIcons: ddMenu.hasIcons,
+
+            /*
+             * 子菜单（视图 -> 语言 / 编码 / 换行符）：右边那一块面板。
+             *
+             * submenuInset 是那一块相对弹窗内容区的位置，必须等于主栏宽度
+             * ——自检据此确认子菜单在**右边**，不是又盖在主菜单上；
+             * submenuTop 是它的顶边，必须等于父级那一条所在的行
+             * （submenuRowY），也就是"从鼠标停的那一条旁边伸出来"；
+             * menuTotalWidth / menuTotalHeight 是弹窗实际尺寸。
+             */
+            submenuOpened: ddMenu.submenuOpened,
+            submenuHeight: ddMenu.submenuHeight,
+            submenuContentHeight: ddMenu.subEntriesHeight,
+            submenuScrollable: ddMenu.submenuScrollable,
+            submenuInset: ddMenu.submenuInset,
+            submenuTop: ddMenu.submenuTop,
+            submenuRowY: ddMenu.submenuRowY,
+            menuPaneWidth: ddMenu.paneWidth,
+            menuPaneGap: ddMenu.paneGap,
+            menuTotalWidth: ddMenu.width,
+            menuTotalHeight: ddMenu.height,
 
             /*
              * 内容区 tab 的右键菜单落在哪。

@@ -194,14 +194,19 @@ function viewMenu(view, ov) {
           disabled: !hasDoc || !(!!view && view.foldingEnabled) },
         { separator: true },
         /*
-         * 这三条是**子菜单**：点它们不是执行命令，而是把菜单换一批条目
-         * 重新摆出来（Main.dispatch 的 "menu:<名>" 分支 -> TopBar.openGroup）。
-         * submenu: true 就是给 DropdownMenu 看的：这种条目点完**不能关菜单**，
-         * 关了就再也弹不回来了（原因见 DropdownMenu.qml 的条目点击处理）。
+         * 这三条是**子菜单**：右边带一个 >，鼠标停上去（或点一下）在菜单右边
+         * 再展开一栏，条目就是这里的 items —— 渲染和交互全在 DropdownMenu.qml
+         * 的 MenuEntryItem 里，不再绕 dispatch 一圈。
+         *
+         * items 在**菜单弹出时**现算（本函数就是那时候调的），所以
+         * "当前语言/编码打勾"、以及没打开文档时整条置灰，都是最新的状态。
          */
-        { label: "语言", act: "menu:语言", submenu: true, disabled: !hasDoc },
-        { label: "编码", act: "menu:编码", submenu: true, disabled: !hasDoc },
-        { label: "换行符", act: "menu:换行", submenu: true }
+        { label: "语言", act: "menu:语言", submenu: true, items: languageItems(view),
+          disabled: !hasDoc },
+        { label: "编码", act: "menu:编码", submenu: true, items: encodingItems(view),
+          disabled: !hasDoc },
+        { label: "换行符", act: "menu:换行", submenu: true, items: eolItems(view),
+          disabled: !hasDoc }
     ], ov)
 }
 
