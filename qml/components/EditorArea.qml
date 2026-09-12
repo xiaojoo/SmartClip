@@ -109,6 +109,34 @@ Rectangle {
         }
     }
 
+    /*
+     * 正文卡片（contentArea）和里面那个原生编辑器的几何（自检读它）。
+     *
+     * 要钉的是这两条约束，它们是一对：
+     *   * 编辑器底边离卡片底边只有一点点（cardBottomInset）—— 横向滚动条
+     *     跟着编辑器走，留一个圆角的空档就会在横条下面空出一条；
+     *   * 左右各让开**至少一个卡片圆角半径**（见 editorView 的 cardInset）——
+     *     编辑器是原生子控件、矩形角是直角，让开这么多，卡片左下 / 右下那两段
+     *     圆弧才整个落在它矩形之外，两角的圆角才保得住。
+     */
+    function editorCardState() {
+        return {
+            radius: contentArea.radius,
+            visible: editorView.visible,
+            cardWidth: contentArea.width,
+            cardHeight: contentArea.height,
+            viewX: editorView.x,
+            viewY: editorView.y,
+            viewWidth: editorView.width,
+            viewHeight: editorView.height,
+            viewBottom: editorView.y + editorView.height,
+            viewRight: editorView.x + editorView.width,
+            bottomGap: contentArea.height - (editorView.y + editorView.height),
+            leftGap: editorView.x,
+            rightGap: contentArea.width - (editorView.x + editorView.width)
+        }
+    }
+
     function imageSource() {
         if (!root.previewItem || root.previewItem.type !== "image")
             return ""
@@ -568,18 +596,30 @@ Rectangle {
                 anchors.fill: parent
 
                 /*
-                 * 和卡片边缘留出内边距，下面两角的圆角交给卡片自己。
+                 * 和卡片边缘留出内边距，四个角的圆角交给卡片自己。
                  *
-                 * 编辑器是原生子控件，它自己的矩形角是直角，会盖住
-                 * contentArea（radius: 10）的圆角。给它自己裁角会把竖向
-                 * 滚动条一起裁掉（滑块点不到）；撑到窗口底边又会超出容器
-                 * 压住状态栏。留内边距是最稳的。
+                 * 编辑器是原生子控件，它自己的矩形角是直角，贴到卡片角上就会把
+                 * contentArea（radius: 10）画出来的圆角啃成直角；给它自己裁角又会
+                 * 把竖向滚动条一起裁掉（滑块点不到）。所以圆角只能靠**让开**：
+                 *
+                 *   左右各让开 cardInset = 10，正好等于卡片圆角半径 ——
+                 *  卡片左右那两段圆弧整个落在编辑器矩形的左右之外，编辑器啃不到，
+                 *  左下 / 右下两个圆角就是这么保住的。
+                 *
+                 * 底部因此不用再让开一整个圆角：横向滚动条跟着编辑器沉到卡片底边
+                 * （滑块自己还有 3px margin），原来横条下面那 10px 的空档没了。
                  */
                 readonly property int cardInset: 10
+                /*
+                 * 底部只留 2px：给"QML 几何 -> 原生控件坐标"那一趟取整留点余量
+                 * （见 EditorViewItem::applyGeometry 的 qRound），不让编辑器的
+                 * 方角冒到卡片底边下面去。
+                 */
+                readonly property int cardBottomInset: 2
 
                 anchors.leftMargin: cardInset
                 anchors.rightMargin: cardInset
-                anchors.bottomMargin: cardInset
+                anchors.bottomMargin: cardBottomInset
 
                 /*
                  * 没有标签时**必须真的隐藏**：原生子窗口不受 QML 的

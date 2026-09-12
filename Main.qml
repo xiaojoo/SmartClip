@@ -537,6 +537,13 @@ Rectangle {
             tabBar: editor.tabBarState(),
 
             /*
+             * 正文卡片和里面那个原生编辑器的几何。
+             * 自检量的是"横条离卡片底边有多远"和"左右有没有让开一个圆角半径"
+             * （让开才是卡片下方两角圆角的保命条件，见 EditorArea.editorCardState）。
+             */
+            editorCard: editor.editorCardState(),
+
+            /*
              * 分隔线热区的纵向范围（自检里量它有没有越界）。
              *
              * splitterTop / splitterBottom 必须和中间行（midRow）的上下边界

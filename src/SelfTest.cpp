@@ -925,6 +925,55 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store) {
         dispatch(QStringLiteral("closeAllTabs"));
     }
 
+    /*
+     * ============ 正文卡片：横条贴着底边，两角圆角不能被啃 ============
+     *
+     * 用户提的两件事其实是一对矛盾：
+     *   1) 横向滚动条离卡片底边太远（原来编辑器四周都让开 10px，横条下面
+     *      就空出一条）；
+     *   2) 但编辑器是**原生子控件**，它自己的矩形角是直角，一旦贴到卡片角上
+     *      就会把 contentArea（radius: 10）画出来的圆角啃成直角。
+     *
+     * 解法是只让开该让的那一边：左右各让开一个圆角半径（10px），
+     * 那两段圆弧整个落在编辑器矩形之外 —— 左下 / 右下都是圆角；底部则只留 2px，
+     * 横条跟着沉到卡边上。这里把这两条一起钉住，免得以后谁又把底边改回 10px
+     * （横条又浮起来）或者把左右改小（圆角被啃掉）。
+     */
+    {
+        /* 需要编辑器在场（visible）时量，所以先开一个文档 */
+        check(view->newDocument() >= 0, QStringLiteral("卡片几何用例：新建文档"));
+        for (int i = 0; i < 3; ++i)
+            QCoreApplication::processEvents();
+
+        const QVariantMap card = uiState().value(QStringLiteral("editorCard")).toMap();
+        const double radius = card.value(QStringLiteral("radius")).toDouble();
+        const double bottomGap = card.value(QStringLiteral("bottomGap")).toDouble();
+        const double leftGap = card.value(QStringLiteral("leftGap")).toDouble();
+        const double rightGap = card.value(QStringLiteral("rightGap")).toDouble();
+        const double viewBottom = card.value(QStringLiteral("viewBottom")).toDouble();
+        const double cardH = card.value(QStringLiteral("cardHeight")).toDouble();
+        const QString geom =
+            QStringLiteral("卡片 %1x%2 圆角 %3 / 编辑器 %4,%5 %6x%7 / 下留 %8 左留 %9 右留 %10")
+                .arg(card.value(QStringLiteral("cardWidth")).toDouble())
+                .arg(cardH).arg(radius)
+                .arg(card.value(QStringLiteral("viewX")).toDouble())
+                .arg(card.value(QStringLiteral("viewY")).toDouble())
+                .arg(card.value(QStringLiteral("viewWidth")).toDouble())
+                .arg(card.value(QStringLiteral("viewHeight")).toDouble())
+                .arg(bottomGap).arg(leftGap).arg(rightGap);
+
+        out() << "        （" << geom << "）" << Qt::endl;
+
+        check(bottomGap > 0 && bottomGap <= 4.0,
+              QStringLiteral("编辑器贴着卡片底边（横向滚动条不再浮在半空）"), geom);
+        check(viewBottom <= cardH + 0.5,
+              QStringLiteral("编辑器没有溢出卡片底边（不压状态栏）"), geom);
+        check(leftGap >= radius - 0.5 && rightGap >= radius - 0.5,
+              QStringLiteral("左右各让开一个圆角半径，卡片下方两角圆角保得住"), geom);
+
+        dispatch(QStringLiteral("closeAllTabs"));
+    }
+
     /* ---- 收尾 ---- */
     dispatch(QStringLiteral("closeAllTabs"));
     check(view->documents().isEmpty(), QStringLiteral("closeAllTabs 之后没有标签"));
