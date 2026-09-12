@@ -121,19 +121,18 @@ inline long scColor(const QColor &c) {
 /* 主题色（用的时候过 scColor 打包） */
 const QColor kAccent(0x4c, 0x96, 0xd8);         // 强调蓝
 /*
- * 行号栏右侧那条分隔竖线的颜色。
+ * 编辑器里所有竖线的颜色：行号右边那条分隔线、字数参考线、缩进参考线，**同一个色**。
  *
- * 比底色（#1e1f22）亮一点点就够：它的作用是"把行号栏和正文分开"，不是抢眼。
- * 拿缩进参考线的 #3e4247 试过，配 1px 宽度看起来偏重，往回收了一档。
- */
-const QColor kGutterLine(0x33, 0x38, 0x40);
-/*
- * 字数参考线（"一行 80 字"）的颜色。
+ * 以前是三套色号（分隔线 #333840、字数参考线 #4b515a、缩进参考线 #3e4247），
+ * 用户的要求是"这些竖线跟行号右边那条一样"，于是统一成这一个常量。
+ * 比底色（#1e1f22）亮一点点：看得出层次，又不跟正文抢注意力。
  *
- * 比缩进参考线（#3e4247）再亮一档：缩进参考线满地都是，这条是"列标尺"，
- * 要能一眼认出来是人为画的那条。
+ * 注意：颜色统一之后，"是哪条线"只能按**位置**分辨 —— 分隔线在边距里（正文区
+ * 左边），字数参考线在正文区第 N 列，缩进参考线在正文区各缩进位上。自检里的
+ * 像素统计也是按位置分开数的（见 marginPixelStats / rulerPixelStats），
+ * 别再写成"扫到这个颜色就是那条线"。
  */
-const QColor kRulerLine(0x4b, 0x51, 0x5a);
+const QColor kGuideLine(0x33, 0x38, 0x40);
 /*
  * 折叠箭头两边各留多少空隙。
  *
@@ -590,7 +589,7 @@ void EditorViewItem::applyMarginTheme() {
      * 关掉这个开关时（宽度 0）颜色无所谓，跟着底色走就行。
      */
     m_sci->SendScintilla(QsciScintillaBase::SCI_SETMARGINBACKN, 2L,
-                         m_gutterLine ? scColor(kGutterLine) : paper);
+                         m_gutterLine ? scColor(kGuideLine) : paper);
 
     /* 折叠边距自己有颜色设置（0 = 跟随默认），改成跟底色一致 */
     m_sci->setFoldMarginColors(m_paperColor, m_paperColor);
@@ -599,12 +598,12 @@ void EditorViewItem::applyMarginTheme() {
      * 缩进参考线的颜色。
      *
      * 它走的是 STYLE_INDENTGUIDE(37) 的前景色，而 STYLECLEARALL 会把它刷成
-     * 正文色（#d6d7da）—— 那样竖线亮得跟正文一样抢眼。这里压成一个比底色亮
-     * 一点点的灰，正好是"看得出层级、又不打扰读代码"的强度。
+     * 正文色（#d6d7da）—— 那样竖线亮得跟正文一样抢眼。这里压成和另外两条竖线
+     * 一样的 kGuideLine（用户要的就是"这几条竖线一个样"）。
      */
     m_sci->SendScintilla(QsciScintillaBase::SCI_STYLESETFORE,
                          QsciScintillaBase::STYLE_INDENTGUIDE,
-                         scColor(QColor(0x3e, 0x42, 0x47)));
+                         scColor(kGuideLine));
     m_sci->SendScintilla(QsciScintillaBase::SCI_STYLESETBACK,
                          QsciScintillaBase::STYLE_INDENTGUIDE, paper);
 
@@ -854,8 +853,16 @@ QVariantList EditorViewItem::marginPixelStats() const {
 
     const QColor paper = m_paperColor;
 
+    /*
+     * 缩进参考线的墨迹：只数**正文区**里那些"竖线色"的像素。
+     *
+     * 三条竖线同一个颜色（见 kGuideLine），所以不能"扫到这个颜色就算"，得按位置分：
+     *   * 分隔线在 [foldEnd, gutterEnd)，那是边距，不算缩进参考线；
+     *   * 字数参考线是正文区里**通到底**的那一列（整幅图高都亮），单独排掉 ——
+     *     不然"关掉缩进参考线后一个像素都没有"那条断言会被它顶红。
+     */
     int numberInk = 0, foldInk = 0, white = 0, guideInk = 0;
-    const QColor guide(0x3e, 0x42, 0x47);   // 缩进参考线的颜色
+    const int fullHeight = qMax(1, img.height() * 4 / 5);   // 通到底的判据：8 成高
     for (int y = 0; y < img.height(); ++y) {
         for (int x = 0; x < numbersEnd; ++x) {
             const QColor c = img.pixelColor(x, y);
@@ -864,10 +871,6 @@ QVariantList EditorViewItem::marginPixelStats() const {
             else if (qAbs(c.red() - paper.red()) + qAbs(c.green() - paper.green())
                          + qAbs(c.blue() - paper.blue()) > 90)
                 ++numberInk;
-        }
-        for (int x = gutterEnd; x < img.width(); ++x) {
-            if (img.pixelColor(x, y) == guide)
-                ++guideInk;
         }
         for (int x = numbersEnd; x < foldEnd; ++x) {
             const QColor c = img.pixelColor(x, y);
@@ -878,17 +881,26 @@ QVariantList EditorViewItem::marginPixelStats() const {
                 ++foldInk;
         }
     }
+    for (int x = gutterEnd + 1; x < img.width(); ++x) {
+        int ink = 0;
+        for (int y = 0; y < img.height(); ++y) {
+            if (img.pixelColor(x, y) == kGuideLine)
+                ++ink;
+        }
+        if (ink > 0 && ink < fullHeight)   // 通到底的那一列是字数参考线，不算
+            guideInk += ink;
+    }
 
     /*
-     * 那条分隔竖线：**整幅图**扫它的颜色，而不是按"第 2 条边距的列"去数。
+     * 那条分隔竖线：在**边距那一带**（正文区左边）扫它的颜色，而不是整幅图扫。
+     * 三条竖线颜色一样之后，整幅图扫会把缩进参考线 / 字数参考线一起数进来。
      * 边距宽度是逻辑像素、抓图是设备像素，高 DPI 下两者差一个缩放系数，
-     * 按列算会正好错开那 1 像素（实测在 125% 下就这么白数了）。
-     * 这个颜色（#333840）全编辑器只有它用，扫到的就是它。
+     * 所以这里按"正文区左边"当上界，不去抠那 1 像素。
      */
     int gutterInk = 0, gutterX = -1;
     for (int y = 0; y < img.height(); ++y) {
-        for (int x = 0; x < img.width(); ++x) {
-            if (img.pixelColor(x, y) == kGutterLine) {
+        for (int x = 0; x <= gutterEnd; ++x) {
+            if (img.pixelColor(x, y) == kGuideLine) {
                 ++gutterInk;
                 if (gutterX < 0)
                     gutterX = x;
@@ -910,7 +922,7 @@ QVariantList EditorViewItem::marginPixelStats() const {
         for (int x = gutterX + 2; x < img.width() && textInkX < 0; ++x) {
             for (int y = 0; y < img.height(); ++y) {
                 const QColor c = img.pixelColor(x, y);
-                if (c == paper || c == kGutterLine || c == guide)
+                if (c == paper || c == kGuideLine)
                     continue;
                 textInkX = x;
                 break;
@@ -1911,7 +1923,7 @@ void EditorViewItem::applyRuler() {
         return;
 
     m_sci->setEdgeColumn(m_rulerColumn);
-    m_sci->setEdgeColor(kRulerLine);
+    m_sci->setEdgeColor(kGuideLine);
     m_sci->setEdgeMode(m_rulerVisible ? QsciScintilla::EdgeLine
                                       : QsciScintilla::EdgeNone);
 }
@@ -1965,20 +1977,31 @@ QVariantList EditorViewItem::rulerPixelStats() const {
         int(qRound(double(margins + m_paddingLeft + m_rulerColumn * space) * scale));
 
     /*
-     * 扫中间那一行找线。竖线是 FillRectangle 填的纯色整列，所以扫一行就够；
-     * 通道容差留 6 —— 高 DPI 下 1px 的线落在半像素上会被轻微混色，
-     * 而缩进参考线（#3e4247）和它每通道差 13 以上，不会认错。
+     * 在算出来的位置附近找那一条：要求它是**通到底**的一列（整幅图高都亮）。
+     *
+     * 不能"从最左边扫到的第一个竖线色就是它"：三条竖线颜色一样（见 kGuideLine），
+     * 分隔线和缩进参考线都会先被扫到。字数参考线是通到底的（正文下方也画，
+     * EditView.cpp 的 rcBeyondEOF 那一支），缩进参考线只跟到缩进块结束，用这个
+     * 区分。容差留 6：高 DPI 下 1px 的线落在半像素上会被轻微混色。
      */
-    const int y = img.height() / 2;
+    const int fullHeight = qMax(1, img.height() * 4 / 5);
     int found = -1;
-    for (int x = 0; x < img.width(); ++x) {
-        const QColor c = img.pixelColor(x, y);
-        if (qAbs(c.red() - kRulerLine.red()) <= 6
-            && qAbs(c.green() - kRulerLine.green()) <= 6
-            && qAbs(c.blue() - kRulerLine.blue()) <= 6) {
-            found = x;
-            break;
+    const int from = qMax(0, expected - 6);
+    const int to = qMin(img.width() - 1, expected + 6);
+    auto isRulerColumn = [&img, fullHeight](int x) {
+        int ink = 0;
+        for (int yy = 0; yy < img.height(); ++yy) {
+            const QColor c = img.pixelColor(x, yy);
+            if (qAbs(c.red() - kGuideLine.red()) <= 6
+                && qAbs(c.green() - kGuideLine.green()) <= 6
+                && qAbs(c.blue() - kGuideLine.blue()) <= 6)
+                ++ink;
         }
+        return ink >= fullHeight;
+    };
+    for (int x = from; x <= to && found < 0; ++x) {
+        if (isRulerColumn(x))
+            found = x;
     }
 
     out[0] = found;

@@ -572,10 +572,18 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store) {
               QStringLiteral("列号设成 80 后 Scintilla 那边就是第 80 列（EDGE_LINE）"),
               QStringLiteral("模式 %1 / 列号 %2")
                   .arg(view->rulerEdgeMode()).arg(view->rulerEdgeColumn()));
-        check(view->rulerEdgeColor() == packed(0x4b, 0x51, 0x5a),
-              QStringLiteral("参考线用的是主题里的颜色（不是 Scintilla 默认）"),
-              QStringLiteral("实际 #%1")
-                  .arg(unpacked(view->rulerEdgeColor()), 6, 16, QLatin1Char('0')));
+        /*
+         * 三条竖线一个颜色：分隔线（边距底色）、字数参考线（edge）、缩进参考线
+         * （STYLE_INDENTGUIDE 前景色）—— 用户要的"这些竖线跟行号右边那条一样"。
+         */
+        check(view->rulerEdgeColor() == packed(0x33, 0x38, 0x40)
+                  && view->marginBack(2) == packed(0x33, 0x38, 0x40)
+                  && view->styleFore(37) == packed(0x33, 0x38, 0x40),   // 37 = STYLE_INDENTGUIDE
+              QStringLiteral("分隔线 / 字数参考线 / 缩进参考线是同一个颜色"),
+              QStringLiteral("参考线 #%1 / 分隔线 #%2 / 缩进 #%3")
+                  .arg(unpacked(view->rulerEdgeColor()), 6, 16, QLatin1Char('0'))
+                  .arg(unpacked(view->marginBack(2)), 6, 16, QLatin1Char('0'))
+                  .arg(unpacked(view->styleFore(37)), 6, 16, QLatin1Char('0')));
 
         QVariantList rulerPixels = view->rulerPixelStats();
         out() << "        （参考线：扫到 x=" << rulerPixels.value(0).toInt()
@@ -1095,10 +1103,10 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store) {
         }
     }
 
-    /* 缩进参考线：默认开、颜色是压过的灰（不是正文色） */
+    /* 缩进参考线：默认开、颜色和另外两条竖线一样（不是正文色、不是 Scintilla 默认） */
     check(view->indentGuidesVisible(), QStringLiteral("缩进参考线默认开启"));
-    check(view->styleFore(37) == packed(0x3e, 0x42, 0x47),   // 37 = STYLE_INDENTGUIDE
-          QStringLiteral("缩进参考线的颜色是压过的灰（不是正文色）"),
+    check(view->styleFore(37) == packed(0x33, 0x38, 0x40),   // 37 = STYLE_INDENTGUIDE
+          QStringLiteral("缩进参考线是压过的灰，和行号右边那条竖线一个颜色"),
           QStringLiteral("实际 #%1").arg(unpacked(view->styleFore(37)), 6, 16, QLatin1Char('0')));
 
     /* ---- 代码折叠：单独开一个带大括号的临时文件，别动前面那些断言的行号 ---- */
