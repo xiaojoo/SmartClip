@@ -193,9 +193,15 @@ function viewMenu(view, ov) {
         { label: "展开全部", act: "unfoldAll", icon: "chevron-down",
           disabled: !hasDoc || !(!!view && view.foldingEnabled) },
         { separator: true },
-        { label: "语言", act: "menu:语言", disabled: !hasDoc },
-        { label: "编码", act: "menu:编码", disabled: !hasDoc },
-        { label: "换行符", act: "menu:换行" }
+        /*
+         * 这三条是**子菜单**：点它们不是执行命令，而是把菜单换一批条目
+         * 重新摆出来（Main.dispatch 的 "menu:<名>" 分支 -> TopBar.openGroup）。
+         * submenu: true 就是给 DropdownMenu 看的：这种条目点完**不能关菜单**，
+         * 关了就再也弹不回来了（原因见 DropdownMenu.qml 的条目点击处理）。
+         */
+        { label: "语言", act: "menu:语言", submenu: true, disabled: !hasDoc },
+        { label: "编码", act: "menu:编码", submenu: true, disabled: !hasDoc },
+        { label: "换行符", act: "menu:换行", submenu: true }
     ], ov)
 }
 

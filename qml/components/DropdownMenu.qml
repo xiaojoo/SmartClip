@@ -321,8 +321,35 @@ Popup {
                                 onClicked: {
                                     if (entry.isDisabled || entry.isSeparator)
                                         return
-                                    root.selected(entry.modelData.act)
+
+                                    /*
+                                     * 子菜单（js/EditorMenus.js 里标了 submenu: true 的
+                                     * "语言 / 编码 / 换行符"）：**不关菜单**，命令自己会
+                                     * 把它换一批条目、挪到新锚点重新摆出来
+                                     * （Main.dispatch -> TopBar.openGroup -> openFor）。
+                                     *
+                                     * 为什么不能关：close() 紧接着再 open() 在同一次事件里
+                                     * 弹不回来（实测菜单直接消失）；而"先 selected 再
+                                     * close"更糟 —— 子菜单刚换好内容就被这一句关掉了，
+                                     * 界面上点"视图 -> 语言"一直是什么都没有。
+                                     */
+                                    if (entry.modelData.submenu === true) {
+                                        root.selected(entry.modelData.act)
+                                        return
+                                    }
+
+                                    /*
+                                     * 其余命令：**先收菜单，再发命令**。
+                                     *
+                                     * 反过来（先发命令再 close）碰上"打开…" "保存"
+                                     * "另存为…" "打印…" 这种会弹**模态**原生对话框的命令
+                                     * 就露馅了：QFileDialog 是同步的，它在自己的嵌套事件
+                                     * 循环里把整条 JS 调用栈堵住，后面那句 close() 要等
+                                     * 用户关掉对话框才轮得到 —— 于是菜单一直挂在对话框
+                                     * 上面（用户截图报的就是这个）。
+                                     */
                                     root.close()
+                                    root.selected(entry.modelData.act)
                                 }
                             }
                         }
