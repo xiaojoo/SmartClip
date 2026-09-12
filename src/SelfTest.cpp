@@ -938,9 +938,14 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store) {
      * 但**实测（截图逐像素比对）2px 的余量就够了** —— 编辑器底色和卡片底色
      * 本来就是同一个（paperColor: root.editorBg），角上那一两个像素看不出来，
      * 2px 和 10px 画出来的圆角一模一样。所以右边 / 底边都收到 2px，滚动条跟着
-     * 贴到卡片边上；左边仍留 10px（正文不贴左边缘）。
+     * 贴到卡片边上。
      *
-     * 这里钉住：两条边都只留一点点（>0 且 ≤4px，给坐标取整留余量）、
+     * 左边后来也收到 2px：编辑器最左边那一条就是行号栏，"序号贴紧左边"
+     * 只能靠这个左边距（Scintilla 的 SCI_SETMARGINLEFT 落在折叠栏和正文
+     * 之间，跟行号位置无关）。正文离卡片左边缘的余量由行号栏 + 折叠栏的
+     * 宽度顶着，不再靠这里。
+     *
+     * 这里钉住：三条边都只留一点点（>0 且 ≤4px，给坐标取整留余量）、
      * 编辑器整体不出卡片。改回 10px 或者改成 0 都会在这里红。
      */
     {
@@ -973,8 +978,8 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store) {
               QStringLiteral("编辑器贴着卡片底边（横向滚动条不再浮在半空）"), geom);
         check(rightGap >= 1.0 && rightGap <= 4.0,
               QStringLiteral("编辑器贴着卡片右边（竖向滚动条不再浮在中间）"), geom);
-        check(leftGap >= 1.0,
-              QStringLiteral("左边仍留着余量（正文不贴卡片左边缘）"), geom);
+        check(leftGap >= 1.0 && leftGap <= 4.0,
+              QStringLiteral("编辑器贴着卡片左边（行号栏不再浮在中间）"), geom);
         check(viewBottom <= cardH + 0.5 && viewRight <= cardW + 0.5,
               QStringLiteral("编辑器没有溢出卡片（不压状态栏、不出画布）"), geom);
 

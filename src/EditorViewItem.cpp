@@ -997,7 +997,21 @@ void EditorViewItem::applyMargins() {
     const int lines = qMax(1, lineCount());
     const int digits = QString::number(lines).size() + 1;
     const QFontMetrics fm(uiFont());
-    const int width = 10 + digits * fm.horizontalAdvance(QLatin1Char('9'));
+
+    /*
+     * 行号栏宽度 = 一点左边空档 + 位数 × 字符宽。
+     *
+     * 位数写「实际位数 + 1」：多预留一位，行数从 9 涨到 10、99 涨到 100 时
+     * 栏宽不跳，正文不会跟着挪一下（跳变只发生在跨过预留的那一位时）。
+     *
+     * 前面那个常数原来是 10，现在收到 4：行号要贴着卡片左边缘（见
+     * EditorArea 的 cardLeftInset），这一段空档直接决定行号离左边有多远。
+     * 数字在栏里是**右对齐**画的（MarginView.cpp：xpos = 栏右边 -
+     * 数字宽 - marginNumberPadding），所以实际看到的左边空档 =
+     * 这个常数 + marginNumberPadding 里那 3px + 没用到的那几位（每位约 7px）。
+     * 实测（48 行的文件）：两位数行号的墨点左边缘离编辑器左边缘约 10px。
+     */
+    const int width = 4 + digits * fm.horizontalAdvance(QLatin1Char('9'));
 
     m_sci->SendScintilla(QsciScintillaBase::SCI_SETMARGINWIDTHN, 0,
                          m_lineNumbers ? long(width) : 0L);

@@ -47,7 +47,13 @@ class ClipboardStore;
 class EditorViewItem : public QQuickItem {
     Q_OBJECT
 
-    /* 正文左边缘距离（和外壳留白对齐） */
+    /*
+     * 正文左边缘距离（和外壳留白对齐）。
+     *
+     * 别把它当成"行号栏外面的留白"：Scintilla 画边距是从编辑器左边缘起算的
+     * （Editor::PaintMargin：rcMargin.left = 0），这个值实际落在**折叠栏和
+     * 正文之间**。行号离编辑器左边缘多远只看 applyMargins() 里算的边距宽。
+     */
     Q_PROPERTY(int paddingLeft READ paddingLeft WRITE setPaddingLeft NOTIFY paddingChanged)
     Q_PROPERTY(int paddingTop READ paddingTop WRITE setPaddingTop NOTIFY paddingChanged)
     Q_PROPERTY(int paddingRight READ paddingRight WRITE setPaddingRight NOTIFY paddingChanged)

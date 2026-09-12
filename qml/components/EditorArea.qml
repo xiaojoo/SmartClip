@@ -115,9 +115,10 @@ Rectangle {
      * 要钉的是这两条约束，它们是一对：
      *   * 编辑器底边离卡片底边只有一点点（cardBottomInset）—— 横向滚动条
      *     跟着编辑器走，留一个圆角的空档就会在横条下面空出一条；
-     *   * 左右各让开**至少一个卡片圆角半径**（见 editorView 的 cardInset）——
-     *     编辑器是原生子控件、矩形角是直角，让开这么多，卡片左下 / 右下那两段
-     *     圆弧才整个落在它矩形之外，两角的圆角才保得住。
+     *   * 左右各让开一点点（见 editorView 的 cardLeftInset / cardRightInset）——
+     *     编辑器是原生子控件、矩形角是直角，让开这一点，卡片左下 / 右下那两段
+     *     圆弧就整个落在它矩形之外，两角的圆角保得住（实测 2px 就够，
+     *     见下面 editorView 那段注释里的逐像素比对）。
      */
     function editorCardState() {
         return {
@@ -609,13 +610,16 @@ Rectangle {
                  *  （EditorViewItem::applyGeometry 里是 qRound）。
                  *  实测（截图逐像素比对）：2px 和原来 10px 画出来的圆角一模一样。
                  *
-                 *   左边 10px：正文别贴着卡片左边缘，行号栏外面留点气。
+                 *   左边也收到 2px：编辑器最左边那一条就是行号栏，左边留多少，
+                 *  行号就离卡片左边缘多远（用户要的是"序号贴紧左边"）。
+                 *  正文不贴卡片左边缘这件事改由行号栏 + 折叠栏的宽度顶着，
+                 *  不再靠这里的左边距（见下面 paddingLeft 的说明）。
                  */
-                readonly property int cardInset: 10
+                readonly property int cardLeftInset: 2
                 readonly property int cardRightInset: 2
                 readonly property int cardBottomInset: 2
 
-                anchors.leftMargin: cardInset
+                anchors.leftMargin: cardLeftInset
                 anchors.rightMargin: cardRightInset
                 anchors.bottomMargin: cardBottomInset
 
@@ -625,6 +629,16 @@ Rectangle {
                  */
                 visible: root.view.hasDocument
 
+                /*
+                 * 正文的左右留白（Scintilla 的 SCI_SETMARGINLEFT / RIGHT）。
+                 *
+                 * 注意这个左边距**不落在行号栏左边**：Scintilla 画边距是从编辑器
+                 * 左边缘起算的（Editor::PaintMargin 里 rcMargin.left = 0），
+                 * 这里给的 12px 实际落在**折叠栏和正文之间**（实测，48 行的文件：
+                 * 行号栏宽 24、折叠栏 14，正文左边缘 = 2 + 24 + 14 + 12 = 52）。
+                 * 所以行号贴不贴左边只由 cardLeftInset 和边距宽决定，
+                 * 跟这个值无关；它管的是正文别贴着折叠栏。
+                 */
                 paddingLeft: 12
                 paddingRight: 12
 

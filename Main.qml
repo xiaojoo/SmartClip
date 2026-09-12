@@ -538,8 +538,8 @@ Rectangle {
 
             /*
              * 正文卡片和里面那个原生编辑器的几何。
-             * 自检量的是"横条离卡片底边有多远"和"左右有没有让开一个圆角半径"
-             * （让开才是卡片下方两角圆角的保命条件，见 EditorArea.editorCardState）。
+             * 自检量的是"横条离卡片底边有多远"和"左右有没有留一点点余量"
+             * （让开一点点才是卡片下方两角圆角的保命条件，见 EditorArea.editorCardState）。
              */
             editorCard: editor.editorCardState(),
 
