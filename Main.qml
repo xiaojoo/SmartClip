@@ -613,6 +613,17 @@ Rectangle {
             editorCard: editor.editorCardState(),
 
             /*
+             * 查找栏几何（自检量"两个输入框一样长、圆角、左右有间隙"）。
+             * 从 FindBar 自己报上来 —— 布局是 QML 算的，只有它知道最终宽度。
+             */
+            findFieldWidth: editor.findBar.findFieldWidth,
+            findReplaceFieldWidth: editor.findBar.replaceFieldWidth,
+            findPanelLeftGap: editor.findBar.panelLeftGap,
+            findPanelRightGap: editor.findBar.panelRightGap,
+            findPanelRadius: editor.findBar.panelRadius,
+            findBarHeight: editor.findBar.barHeight,
+
+            /*
              * 分隔线热区的纵向范围（自检里量它有没有越界）。
              *
              * splitterTop / splitterBottom 必须和中间行（midRow）的上下边界

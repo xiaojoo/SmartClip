@@ -904,6 +904,42 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store) {
     check(uiState().value(QStringLiteral("findReplaceVisible")).toBool(),
           QStringLiteral("dispatch(replace) 展开替换行"));
 
+    /*
+     * 查找 / 替换栏的外观（照样例改的那三条）：
+     *   * 两个输入框一样长；
+     *   * 圆角面板，左右各留出间隙（不再是从左铺到右的长条）；
+     *   * 面板是圆的。
+     * 布局是 QML 算的，所以量的是 FindBar 报上来的实际宽度（见 uiState）。
+     */
+    {
+        /*
+         * 先让 QML 重新布局一次：宽度是布局算出来的，dispatch 之后立刻读还是 0
+         * （实测第一次读就是 0/0）。跑两轮事件循环，网格布局收敛后再量。
+         */
+        QCoreApplication::processEvents();
+        QCoreApplication::processEvents();
+
+        const QVariantMap ui = uiState();
+        const double findW = ui.value(QStringLiteral("findFieldWidth")).toDouble();
+        const double replW = ui.value(QStringLiteral("findReplaceFieldWidth")).toDouble();
+        const double gapL = ui.value(QStringLiteral("findPanelLeftGap")).toDouble();
+        const double gapR = ui.value(QStringLiteral("findPanelRightGap")).toDouble();
+        const double radius = ui.value(QStringLiteral("findPanelRadius")).toDouble();
+        const double barH = ui.value(QStringLiteral("findBarHeight")).toDouble();
+        const QString geom = QStringLiteral("栏高 %1 / 查找框 %2 / 替换框 %3 / 左 %4 右 %5 / 圆角 %6")
+                                 .arg(barH).arg(findW).arg(replW).arg(gapL).arg(gapR).arg(radius);
+
+        out() << "        （查找栏：" << geom << "）" << Qt::endl;
+        /* 高度为 0 说明 implicitHeight 那个绑定炸了（踩过：绑到已删掉的 id），
+           这时候整个栏什么都不画，但别的断言照样能过，所以单独钉一条 */
+        check(barH >= 60, QStringLiteral("展开替换行后查找栏有高度（不是 0）"), geom);
+        check(findW > 100 && qAbs(findW - replW) <= 1,
+              QStringLiteral("查找框和替换框一样长"), geom);
+        check(gapL >= 6 && gapR >= 6 && qAbs(gapL - gapR) <= 1,
+              QStringLiteral("面板左右各有间隙（不再顶到卡片两边）"), geom);
+        check(radius >= 6, QStringLiteral("面板是圆角的"), geom);
+    }
+
     dispatch(QStringLiteral("toggleWrap"));
     check(view->wrapEnabled(), QStringLiteral("dispatch(toggleWrap) 生效"));
     dispatch(QStringLiteral("toggleWrap"));
