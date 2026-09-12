@@ -1153,16 +1153,55 @@ void EditorViewItem::applyPadding() {
                          static_cast<long>(m_paddingRight));
 }
 
+/*
+ * Scintilla 眼里的“一页文本宽” —— 也正是它判横向滚动条显隐用的那个数。
+ *
+ * 出处（third/qscintilla/src/ScintillaQt.cpp 的 ModifyScrollBars）：
+ *     int hNewPage = GetTextRectangle().Width();
+ *     hMax = (scrollWidth > hNewPage) ? scrollWidth - hNewPage : 0;
+ * 横条是 AsNeeded 策略，"hMax > 0 就露出来"。
+ *
+ * 优先直接读横条自己的 pageStep：那正是上面那个 hNewPage，每次 SetScrollBars
+ * 都会写进去。滚动条还没摆过（pageStep 还是 QAbstractSlider 的默认值 10）时
+ * 按 Scintilla 的公式兜个底：
+ *     GetTextRectangle().Width() = viewport 宽 - fixedColumnWidth - 右留白
+ *     fixedColumnWidth = 左留白(SCI_SETMARGINLEFT) + 各条边距宽度之和
+ *                       （ViewStyle::CalculateMarginWidthAndMask）
+ * 注意它**比 viewport 窄**：差的是行号/折叠那几条边距 + 左右留白。
+ */
+long EditorViewItem::horizontalPageWidth() const {
+    if (!m_sci)
+        return 0;
+
+    if (auto *hb = m_sci->horizontalScrollBar()) {
+        const int step = hb->pageStep();
+        if (step > 1)
+            return step;
+    }
+
+    const long viewWidth = m_sci->viewport() ? m_sci->viewport()->width() : 0;
+    if (viewWidth <= 1)
+        return 0;
+
+    long fixed = m_paddingLeft + m_paddingRight;
+    for (int m = 0; m < 3; ++m) {   // 0 行号 / 1 空 / 2 折叠
+        const int w = marginWidth(m);
+        if (w > 0)
+            fixed += w;
+    }
+    return qMax(1L, viewWidth - fixed);
+}
+
 void EditorViewItem::updateHorizontalScroll() {
     if (!m_sci)
         return;
 
     /*
-     * 只有内容真的比视口宽时才显示横向滚动条。
+     * 只有内容真的放不下时才显示横向滚动条。
      *
      * 为什么不能偷懒：
      *   * Scintilla 的 scrollWidth 默认是 2000 像素（Editor.cpp:155），
-     *     横向范围 = scrollWidth - 视口宽度，只要视口比 2000 窄就恒 > 0，
+     *     横向范围 = scrollWidth - 一页宽，只要一页比 2000 窄就恒 > 0，
      *     于是短内容也一直挂着横条；
      *   * SCI_SETSCROLLWIDTH 要求 wParam > 0（Editor.cpp:6659），
      *     传 0 无效；
@@ -1171,22 +1210,30 @@ void EditorViewItem::updateHorizontalScroll() {
      * 做法：**实际量**最长行的像素宽度。
      *   1) 先按字符数找最长行（只比长度，很便宜）；
      *   2) 只对那一行量一次实际像素宽度；
-     *   3) 放得下 -> scrollWidth 设成视口宽（范围 0，横条隐藏）；
-     *      超了   -> 设成内容宽度（横条出现）。
+     *   3) 放得下 -> scrollWidth 设成**一页文本宽**（hMax = 0，横条隐藏）；
+     *      超了   -> 设成内容宽度（hMax > 0，横条出现）。
      *
      * 注意不能用"字符数 × 字符宽 × 系数"估算：那个系数会多算一截，
      * 结果就是横条出现、还能向右滚正好多算的那些像素（实测过）。
+     *
+     * 也别拿 **viewport 宽度**当"放得下"的界 —— 这里踩过坑：
+     * 短内容时把 scrollWidth 设成 viewport 宽，它仍然比 hNewPage
+     * （GetTextRectangle().Width()）大一截，多出来的正好是行号栏 + 左右留白
+     * 那几十像素：hMax 恒 > 0，于是"正文只有几个字，横条却一直在，还能向右滚
+     * 一点点"（用户报的就是这个）。判据要用同一个口径，见 horizontalPageWidth()。
      */
-    const long viewWidth = m_sci->viewport() ? m_sci->viewport()->width() : 0;
-    if (viewWidth <= 0)
-        return;
+    const long pageWidth = horizontalPageWidth();
 
-    /* 自动换行时内容永远不超过视口宽度，横条恒隐藏 */
+    /* 自动换行时内容折起来，永远不超过一页宽，横条恒隐藏
+       （Scintilla 自己也会把横条策略设成 AlwaysOff） */
     if (m_wrap) {
         m_sci->SendScintilla(QsciScintillaBase::SCI_SETSCROLLWIDTH,
-                             (unsigned long)qMax(1L, viewWidth));
+                             (unsigned long)qMax(1L, pageWidth));
         return;
     }
+
+    if (pageWidth <= 1)
+        return;
 
     const long lineCountNow =
         m_sci->SendScintilla(QsciScintillaBase::SCI_GETLINECOUNT);
@@ -1221,16 +1268,24 @@ void EditorViewItem::updateHorizontalScroll() {
         const QString line = m_sci->text(int(longestLine));
         if (!line.isEmpty()) {
             const QFontMetrics fm(uiFont());
+            /*
+             * 末尾那 8px 是"量出来的"和"画出来的"之间的余量（斜体出格、字体回退
+             * 之类的零头）。留着它是为了让"其实差一点点"的长行仍然出现横条 ——
+             * 横条该多出现一次，也不能让正文尾巴够不着。反过来多出来的这点余量
+             * 只有 8px，撑不满屏幕的内容不会因为它挂上横条。
+             */
             contentWidth = (long)fm.horizontalAdvance(line) + 8;
         }
     }
+    m_lastContentWidth = contentWidth;
 
     /*
-     * 放得下：把 scrollWidth 设成视口宽度，横向范围为 0 -> 横条自动隐藏。
-     * 需要横滚：设成内容宽度。
+     * 放得下：把 scrollWidth 设成**一页文本宽**（= Scintilla 的 hNewPage），
+     * 横向范围 hMax = scrollWidth - hNewPage 正好是 0 -> 横条自动隐藏。
+     * 需要横滚：设成内容宽度，hMax = 内容宽 - 一页宽 > 0 -> 横条出现。
      * 两个分支都 > 0，满足 Scintilla 的断言要求。
      */
-    const long scrollWidth = (contentWidth <= viewWidth) ? viewWidth
+    const long scrollWidth = (contentWidth <= pageWidth) ? pageWidth
                                                          : contentWidth;
     m_sci->SendScintilla(QsciScintillaBase::SCI_SETSCROLLWIDTH,
                          (unsigned long)qMax(1L, scrollWidth));
@@ -2863,6 +2918,35 @@ int EditorViewItem::whiteBackgroundPixels() const {
     }
     return count;
 }
+
+/* 自检用：横向滚动条的状态（见头文件里的说明） */
+QVariantMap EditorViewItem::horizontalScrollState() const {
+    QVariantMap state;
+    if (!m_sci)
+        return state;
+
+    auto *hb = m_sci->horizontalScrollBar();
+    const long viewWidth = m_sci->viewport() ? m_sci->viewport()->width() : 0;
+
+    long fixed = m_paddingLeft + m_paddingRight;
+    for (int m = 0; m < 3; ++m) {
+        const int w = marginWidth(m);
+        if (w > 0)
+            fixed += w;
+    }
+
+    state[QStringLiteral("visible")] = hb ? hb->isVisible() : false;
+    state[QStringLiteral("maximum")] = hb ? hb->maximum() : -1;
+    state[QStringLiteral("pageStep")] = hb ? hb->pageStep() : -1;
+    state[QStringLiteral("pageWidthComputed")] = int(qMax(1L, viewWidth - fixed));
+    state[QStringLiteral("viewportWidth")] = int(viewWidth);
+    state[QStringLiteral("scrollWidth")] =
+        int(m_sci->SendScintilla(QsciScintillaBase::SCI_GETSCROLLWIDTH));
+    state[QStringLiteral("contentWidth")] = int(m_lastContentWidth);
+    state[QStringLiteral("wrap")] = m_wrap;
+    return state;
+}
+
 void EditorViewItem::releaseEditorFocus() {
     /*
      * 把焦点从原生控件交还 QQuickWidget。

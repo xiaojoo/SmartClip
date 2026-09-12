@@ -804,6 +804,127 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store) {
         view->closeDocument(view->currentIndex());
     }
 
+    /*
+     * ============ 横向滚动条：内容没撑满就不该有 ============
+     *
+     * 用户报的："内容区只有几个字，但是横向有滚动条"。
+     *
+     * 根因在 Scintilla 判显隐的口径（third/qscintilla/src/ScintillaQt.cpp
+     * 的 ModifyScrollBars）：
+     *     hNewPage = GetTextRectangle().Width();          // 一页**文本**宽
+     *     hMax     = scrollWidth > hNewPage ? scrollWidth - hNewPage : 0;
+     * 横条是 AsNeeded 策略，hMax > 0 就露出来。而 GetTextRectangle() 是 viewport
+     * 再扣掉行号/折叠那几条边距和左右留白之后的宽度，**比 viewport 窄几十像素**。
+     * updateHorizontalScroll() 原来拿 viewport 宽当"放得下"的界：短内容时
+     * scrollWidth = viewport 宽，仍比 hNewPage 大一截 -> hMax 恒 > 0 ->
+     * 正文只有几个字也一直挂着横条，还能向右滚那几十像素（正好是边距 + 留白）。
+     *
+     * 这里钉三件事：
+     *   1) 短内容：横条不出现（maximum = 0），scrollWidth 没超过一页文本宽；
+     *   2) 长内容：横条出现（maximum > 0），能向右滚到底；
+     *   3) 口径一致：自己按公式算的一页宽 == Scintilla 的 pageStep（hNewPage），
+     *      免得以后两边又各算一份、慢慢走样。
+     */
+    {
+        const QString shortPath = dir.filePath(QStringLiteral("hscroll-short.txt"));
+        const QString longPath = dir.filePath(QStringLiteral("hscroll-long.txt"));
+
+        /* 几个汉字 / 一个字都不换行的长行（400 字符，必然比编辑区宽） */
+        check(writeFile(shortPath, QString::fromUtf8("换承载方式\n").toUtf8()),
+              QStringLiteral("准备短内容文件"));
+        check(writeFile(longPath,
+                        QByteArray("LINE ") + QByteArray(390, 'x') + QByteArray("\n")),
+              QStringLiteral("准备长行文件"));
+
+        auto hState = [view]() { return view->horizontalScrollState(); };
+        auto detail = [](const QVariantMap &s) {
+            return QStringLiteral("可见 %1 / maximum %2 / pageStep %3 / 算出来 %4"
+                                  " / viewport %5 / scrollWidth %6 / 内容 %7")
+                .arg(s.value(QStringLiteral("visible")).toBool())
+                .arg(s.value(QStringLiteral("maximum")).toInt())
+                .arg(s.value(QStringLiteral("pageStep")).toInt())
+                .arg(s.value(QStringLiteral("pageWidthComputed")).toInt())
+                .arg(s.value(QStringLiteral("viewportWidth")).toInt())
+                .arg(s.value(QStringLiteral("scrollWidth")).toInt())
+                .arg(s.value(QStringLiteral("contentWidth")).toInt());
+        };
+
+        /* ---- 短内容 ---- */
+        check(view->openFile(shortPath) >= 0, QStringLiteral("打开短内容文件"),
+              view->lastError());
+        for (int i = 0; i < 3; ++i)
+            QCoreApplication::processEvents();
+
+        const QVariantMap small = hState();
+        out() << "        （短内容：" << detail(small) << "）" << Qt::endl;
+        check(small.value(QStringLiteral("maximum")).toInt() == 0
+              && !small.value(QStringLiteral("visible")).toBool(),
+              QStringLiteral("短内容：没有横向滚动条（maximum = 0）"), detail(small));
+        check(small.value(QStringLiteral("scrollWidth")).toInt()
+              <= small.value(QStringLiteral("pageStep")).toInt(),
+              QStringLiteral("短内容：scrollWidth 没超过一页文本宽"), detail(small));
+        check(small.value(QStringLiteral("contentWidth")).toInt() > 0,
+              QStringLiteral("短内容：量到了内容宽（不是没量）"), detail(small));
+
+        /*
+         * 一页宽的两种算法必须一致：公式（viewport - 边距 - 左右留白）对
+         * Scintilla 自己写进 pageStep 的那个值。差一点点就说明口径又开始分家了
+         * —— 这正是原来那条 bug 的来源。
+         */
+        check(qAbs(small.value(QStringLiteral("pageStep")).toInt()
+                   - small.value(QStringLiteral("pageWidthComputed")).toInt()) <= 1,
+              QStringLiteral("一页文本宽：自己算的和 Scintilla 的一致"), detail(small));
+
+        /* ---- 长内容 ---- */
+        check(view->openFile(longPath) >= 0, QStringLiteral("打开长行文件"),
+              view->lastError());
+        for (int i = 0; i < 3; ++i)
+            QCoreApplication::processEvents();
+
+        const QVariantMap big = hState();
+        out() << "        （长内容：" << detail(big) << "）" << Qt::endl;
+        check(big.value(QStringLiteral("maximum")).toInt() > 0
+              && big.value(QStringLiteral("visible")).toBool(),
+              QStringLiteral("长行：横向滚动条出现"), detail(big));
+        check(big.value(QStringLiteral("contentWidth")).toInt()
+              > big.value(QStringLiteral("pageStep")).toInt(),
+              QStringLiteral("长行：量出来的内容宽确实超过了一页"), detail(big));
+
+        /*
+         * 自动换行开着时内容折起来，横条必须收回去；关掉换行又得立刻回来 ——
+         * 切"换行"开关会走一趟 updateHorizontalScroll，这里量的是那趟有没有
+         * 把 scrollWidth 算拧（换行时 hNewPage 是折行宽度，不是原来那个）。
+         */
+        view->setWrapEnabled(true);
+        for (int i = 0; i < 3; ++i)
+            QCoreApplication::processEvents();
+        const QVariantMap wrapped = hState();
+        check(!wrapped.value(QStringLiteral("visible")).toBool(),
+              QStringLiteral("自动换行：长行折起来，横条收回去"), detail(wrapped));
+
+        view->setWrapEnabled(false);
+        for (int i = 0; i < 3; ++i)
+            QCoreApplication::processEvents();
+        const QVariantMap unwrapped = hState();
+        check(unwrapped.value(QStringLiteral("maximum")).toInt() > 0
+              && unwrapped.value(QStringLiteral("visible")).toBool(),
+              QStringLiteral("关掉自动换行：长行又把横条要回来"), detail(unwrapped));
+
+        /* ---- 再回到短内容：横条要收回去 ---- */
+        view->closeDocument(view->currentIndex());
+        check(view->filePath() == QFileInfo(shortPath).absoluteFilePath(),
+              QStringLiteral("关掉长行文件后回到短内容文件"), view->filePath());
+        for (int i = 0; i < 3; ++i)
+            QCoreApplication::processEvents();
+
+        const QVariantMap again = hState();
+        check(again.value(QStringLiteral("maximum")).toInt() == 0
+              && !again.value(QStringLiteral("visible")).toBool(),
+              QStringLiteral("又切回短内容：横条收回去"), detail(again));
+
+        dispatch(QStringLiteral("closeAllTabs"));
+    }
+
     /* ---- 收尾 ---- */
     dispatch(QStringLiteral("closeAllTabs"));
     check(view->documents().isEmpty(), QStringLiteral("closeAllTabs 之后没有标签"));

@@ -393,6 +393,20 @@ public:
      */
     Q_INVOKABLE int whiteBackgroundPixels() const;
 
+    /*
+     * 自检用：横向滚动条的状态。
+     *
+     * 钉的是"内容没撑满就不该有横条"这条（见 .cpp 里 updateHorizontalScroll
+     * 那段说明）：Scintilla 判显隐用的是**一页文本宽** GetTextRectangle().Width()
+     * —— viewport 扣掉行号/折叠那几条边距和左右留白之后的宽度，不是 viewport 宽。
+     * 拿后者当界，短内容也会一直挂着一条横条、还能向右滚几十像素。
+     *
+     * 返回 visible / maximum / pageStep（Scintilla 的一页宽）/ pageWidthComputed
+     * （自己按公式算的一页宽，用来核口径）/ viewportWidth / scrollWidth /
+     * contentWidth（最近一次量到的最长行宽）/ wrap。
+     */
+    Q_INVOKABLE QVariantMap horizontalScrollState() const;
+
 signals:
     void paddingChanged();
     void fontChanged();
@@ -469,12 +483,20 @@ private:
     /*
      * 按内容宽度决定要不要显示横向滚动条。
      *
-     * Scintilla 的 scrollWidth 默认 2000，横向范围 = scrollWidth - 视口宽，
-     * 只要视口比 2000 窄就恒 > 0 —— 短内容也会一直挂着横条。
-     * 这里自己算内容宽度：放得下就把 scrollWidth 设成视口宽（范围 0），
+     * Scintilla 的 scrollWidth 默认 2000，横向范围 = scrollWidth - **一页文本宽**
+     * （GetTextRectangle().Width()，见 horizontalPageWidth），只要一页比 2000 窄
+     * 就恒 > 0 —— 短内容也会一直挂着横条。
+     * 这里自己算内容宽度：放得下就把 scrollWidth 设成一页文本宽（hMax = 0），
      * 真的超宽才设成内容宽度。
      */
     void updateHorizontalScroll();
+
+    /*
+     * Scintilla 判横条显隐用的"一页文本宽"（就是 QsciScintillaQt::ModifyScrollBars
+     * 里的 hNewPage）。注意它**比 viewport 窄**：差的正是行号/折叠那几条边距
+     * 和左右留白 —— 拿 viewport 宽当界，短内容也会挂横条。
+     */
+    long horizontalPageWidth() const;
 
     /* 和 QML contentArea 的 radius: 10 对齐 */
     static constexpr int kCardRadius = 10;
@@ -565,6 +587,9 @@ private:
     int m_paddingTop = 0;
     int m_paddingRight = 0;
     int m_paddingBottom = 0;
+
+    /* 最近一次量到的最长行宽（像素），自检诊断用，见 horizontalScrollState() */
+    long m_lastContentWidth = 0;
 
     int m_fontPixelSize = 12;
     /* 正文字体家族；注释字号 0 = 跟随正文 */
