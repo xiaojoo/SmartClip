@@ -269,6 +269,57 @@ function fontFamilyItems(view) {
     return out
 }
 
+/*
+ * 行高倍数（单位是"倍"，不是像素）。
+ *
+ * 1.0 = 跟随字体：就是字体自带的那个行高（Consolas 12px 约 15px），
+ * 不再额外加空。往上是把行拉开 —— Scintilla 侧是按倍数把差额平均加到
+ * 每行的上下两侧（见 EditorViewItem::applyLineSpacing）。
+ * 只给 ≥ 1.0 的值：比字体自带的还紧会压字。
+ */
+var kLineHeightFactors = [1.0, 1.15, 1.3, 1.5, 1.75, 2.0, 2.5]
+
+function lineHeightItems(view) {
+    var current = view ? view.lineHeightFactor : 1.0
+    /* 自然行高：菜单上顺手把"这一档大概多高"写出来，改字号后它自己跟着变 */
+    var base = view ? view.naturalLineHeight : 0
+    var out = []
+    for (var i = 0; i < kLineHeightFactors.length; ++i) {
+        var f = kLineHeightFactors[i]
+        var px = base > 0 ? "（" + Math.round(base * f) + " px）" : ""
+        out.push({
+            label: (i === 0 ? "跟随字体" : f + " 倍") + px,
+            act: "lineHeight:" + f,
+            checked: Math.abs(current - f) < 0.001
+        })
+    }
+    return out
+}
+
+/*
+ * 设置面板上"行高 − / 行高 +"用：在 kLineHeightFactors 里往前 / 往后走一格。
+ *
+ * 当前值不在表里（手改过设置文件之类）就取最近的一格当起点 —— 否则
+ * "减一档"会直接跳到最后或最前一格。
+ */
+function stepLineHeight(current, dir) {
+    var idx = 0
+    var best = 1e9
+    for (var i = 0; i < kLineHeightFactors.length; ++i) {
+        var d = Math.abs(kLineHeightFactors[i] - current)
+        if (d < best) {
+            best = d
+            idx = i
+        }
+    }
+    idx += dir > 0 ? 1 : -1
+    if (idx < 0)
+        idx = 0
+    if (idx > kLineHeightFactors.length - 1)
+        idx = kLineHeightFactors.length - 1
+    return kLineHeightFactors[idx]
+}
+
 function settingsMenu(view, ov) {
     var hasDoc = !!view && view.hasDocument
     var items = []
@@ -291,6 +342,12 @@ function settingsMenu(view, ov) {
     var families = fontFamilyItems(view)
     for (var f = 0; f < families.length; ++f)
         items.push(families[f])
+
+    items.push({ separator: true })
+    items.push({ label: "行高", icon: "line-height", disabled: true })
+    var heights = lineHeightItems(view)
+    for (var h = 0; h < heights.length; ++h)
+        items.push(heights[h])
 
     items.push({ separator: true })
     items.push({ label: "自动换行", act: "toggleWrap", icon: "wrap",

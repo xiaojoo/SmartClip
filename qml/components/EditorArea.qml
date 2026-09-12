@@ -630,17 +630,24 @@ Rectangle {
                 visible: root.view.hasDocument
 
                 /*
-                 * 正文的左右留白（Scintilla 的 SCI_SETMARGINLEFT / RIGHT）。
+                 * 正文区的左右留白（Scintilla 的 SCI_SETMARGINLEFT / RIGHT）。
                  *
-                 * 注意这个左边距**不落在行号栏左边**：Scintilla 画边距是从编辑器
+                 * 左边 12：它**不落在行号栏左边** —— Scintilla 画边距是从编辑器
                  * 左边缘起算的（Editor::PaintMargin 里 rcMargin.left = 0），
-                 * 这里给的 12px 实际落在**折叠栏和正文之间**（实测，48 行的文件：
-                 * 行号栏宽 24、折叠栏 14，正文左边缘 = 2 + 24 + 14 + 12 = 52）。
-                 * 所以行号贴不贴左边只由 cardLeftInset 和边距宽决定，
-                 * 跟这个值无关；它管的是正文别贴着折叠栏。
+                 * 这个值实际落在**折叠栏和正文之间**（实测，48 行的文件：行号栏宽
+                 * 24、折叠栏 14，正文左边缘 = 2 + 24 + 14 + 12 = 52）。行号贴不贴
+                 * 左边只由 cardLeftInset 和边距宽决定，跟它无关。
+                 *
+                 * 右边 0：**当前行那层底色只铺到"文本区"的右边** —— Scintilla 把
+                 * 它当正文段的底色画（EditView::DrawBackground），而文本区 =
+                 * 编辑器宽 - marginRight。右边留 12px 的话，那层底色就在离卡片右
+                 * 边缘 14px 的地方断掉，看着就是"当前行有背景、背景右边缺一块"。
+                 * 收到 0 之后底色一直铺到编辑器右边缘（离卡片右边缘只剩
+                 * cardRightInset 那 2px）；正文的右边距改由竖滚动条顶着 ——
+                 * 竖条出现时它自己占掉那一条。
                  */
                 paddingLeft: 12
-                paddingRight: 12
+                paddingRight: 0
 
                 fontPixelSize: root.editorFontSize
                 textColor: "#d6d7da"

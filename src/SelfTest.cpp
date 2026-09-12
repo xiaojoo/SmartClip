@@ -124,6 +124,13 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store) {
         return result.toList();
     };
 
+    /* 读设置菜单的条目清单（见 Main.qml 的 settingsMenuActs，同上） */
+    auto settingsMenuActs = [qmlRoot]() {
+        QVariant result;
+        QMetaObject::invokeMethod(qmlRoot, "settingsMenuActs", Q_RETURN_ARG(QVariant, result));
+        return result.toList();
+    };
+
     QDir dir(QDir::tempPath() + QStringLiteral("/smartclip-selftest"));
     dir.removeRecursively();
     dir.mkpath(QStringLiteral("."));
@@ -184,6 +191,21 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store) {
      * 踩过：直接用 setPointSize(12) 给 QFont，96 DPI 下渲染出来是 16 像素 ——
      * 设置写着 12，字却比界面上别处的 12 大一圈。换算回像素来卡这一条。
      */
+
+    /*
+     * 量字号之前先把行高按回 1.0 倍。
+     *
+     * 行高倍数存在 QSettings 里，自检启动时 Main.qml 会把它恢复出来 ——
+     * 用户上次设成 1.5 倍的话，下面"行高跟字号一个量级"那条就会红
+     * （12px 的字量出 23px 的行高）。那条要钉的是"字号单位没被当成点"，
+     * 得在没有额外行距的前提下量。用户那份设置在本节末尾还原回去。
+     */
+    const qreal savedLineHeightFactor = view->lineHeightFactor();
+    if (!qFuzzyCompare(savedLineHeightFactor, 1.0)) {
+        view->setLineHeightFactor(1.0);
+        QCoreApplication::processEvents();
+    }
+
     out() << "        （字号换算：设置 " << view->fontPixelSize() << " px → 实际 "
           << view->fontPixelSizeEffective() << " px；行高 " << view->textLineHeight()
           << " px）" << Qt::endl;
@@ -204,6 +226,112 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store) {
           QStringLiteral("行高跟字号一个量级（没按点当成像素画大）"),
           QStringLiteral("行高 %1 px / 字号 %2 px")
               .arg(view->textLineHeight()).arg(view->fontPixelSize()));
+
+    /*
+     * 行高倍数（设置菜单 / 设置面板里的"行高"）。
+     *
+     * Scintilla 没有"把行高设成 N 像素"的消息，只有给每行加**额外上下空白**
+     * （SCI_SETEXTRAASCENT / SCI_SETEXTRADESCENT，见 ViewStyle::Refresh：
+     * lineHeight = maxAscent + maxDescent + extraAscent + extraDescent），
+     * 所以按"自然行高 × 倍数"算差额再摊到上下两侧。这里量三件事：
+     *   * 1.0 倍时实际行高就是自然行高（没偷偷加空）；
+     *   * 1.5 倍确实高了一档，且等于自然行高 × 1.5（取整 ±1px）；
+     *   * 调回 1.0 倍又回到自然行高（不是只能往松里走）。
+     */
+    {
+        const int natural = view->naturalLineHeight();
+        const int plain = view->lineHeight();
+        check(natural > 0 && natural == plain,
+              QStringLiteral("行高 1.0 倍 = 字体自带的自然行高（没额外加空）"),
+              QStringLiteral("自然 %1 px / 实际 %2 px").arg(natural).arg(plain));
+
+        view->setLineHeightFactor(1.5);
+        QCoreApplication::processEvents();
+        const int wide = view->lineHeight();
+        out() << "        （行高：1.0 倍 " << natural << " px → 1.5 倍 " << wide
+              << " px）" << Qt::endl;
+        check(qAbs(wide - qRound(natural * 1.5)) <= 1,
+              QStringLiteral("行高 1.5 倍按自然行高成比例拉开"),
+              QStringLiteral("实际 %1 px（应为 %2 px）").arg(wide).arg(qRound(natural * 1.5)));
+
+        view->setLineHeightFactor(1.0);
+        QCoreApplication::processEvents();
+        check(view->lineHeight() == natural,
+              QStringLiteral("行高调回 1.0 倍后回到自然值（不用重开标签）"),
+              QStringLiteral("实际 %1 px（应为 %2 px）").arg(view->lineHeight()).arg(natural));
+
+        /*
+         * 菜单里那一组"行高"（档位表在 js/EditorMenus.js 的 kLineHeightFactors）：
+         * 档位数、档位边界、以及**点下去真的会改行高** —— 三样一起钉。
+         * 条目清单由 Main.qml 的 settingsMenuActs 提供，和点"设置"弹出的那份
+         * 是同一个调用，所以断言看到的就是菜单里能点的。
+         */
+        {
+            QStringList factors;
+            const QVariantList items = settingsMenuActs();
+            for (const QVariant &item : items) {
+                const QString act = item.toString();
+                if (act.startsWith(QStringLiteral("lineHeight:")))
+                    factors << act.mid(int(qstrlen("lineHeight:")));
+            }
+            check(factors.size() == 7,
+                  QStringLiteral("设置菜单里有 7 档行高（含\"跟随字体\"）"),
+                  QStringLiteral("实际 %1 档：%2")
+                      .arg(factors.size()).arg(factors.join(QLatin1Char('/'))));
+            check(factors.value(0) == QStringLiteral("1")
+                      && factors.value(1) == QStringLiteral("1.15")
+                      && factors.contains(QStringLiteral("1.5"))
+                      && factors.contains(QStringLiteral("2.5")),
+                  QStringLiteral("档位从 1.0 起、最松 2.5 倍（没有比 1.0 更紧的档）"),
+                  factors.join(QLatin1Char('/')));
+
+            /* 点 1.15 倍那一档，走的就是菜单条目的 act */
+            dispatch(QStringLiteral("lineHeight:1.15"));
+            QCoreApplication::processEvents();
+            check(qAbs(view->lineHeightFactor() - 1.15) < 0.001,
+                  QStringLiteral("dispatch(lineHeight:1.15) 改到编辑器上了"),
+                  QStringLiteral("实际 %1（应为 1.15）").arg(view->lineHeightFactor()));
+            check(view->lineHeight() > natural,
+                  QStringLiteral("这一档确实比自然行高松"),
+                  QStringLiteral("实际 %1 px / 自然 %2 px")
+                      .arg(view->lineHeight()).arg(natural));
+
+            /*
+             * 设置面板上那两个按钮（"行高 − / 行高 +"）：走 lineHeightUp /
+             * lineHeightDown，在档位表里前后走一格 —— 1.15 上一格是 1.3，
+             * 再下一格又回到 1.15。
+             */
+            dispatch(QStringLiteral("lineHeightUp"));
+            QCoreApplication::processEvents();
+            const qreal up = view->lineHeightFactor();
+            check(qAbs(up - 1.3) < 0.001,
+                  QStringLiteral("行高 + 走到下一档（1.15 → 1.3）"),
+                  QStringLiteral("实际 %1").arg(up));
+            dispatch(QStringLiteral("lineHeightDown"));
+            QCoreApplication::processEvents();
+            check(qAbs(view->lineHeightFactor() - 1.15) < 0.001,
+                  QStringLiteral("行高 − 走回上一档（1.3 → 1.15）"),
+                  QStringLiteral("实际 %1").arg(view->lineHeightFactor()));
+
+            /* 两头要夹住：最松一档再 +、最紧一档再 − 都不许跑出表外 */
+            view->setLineHeightFactor(2.5);
+            dispatch(QStringLiteral("lineHeightUp"));
+            QCoreApplication::processEvents();
+            check(qAbs(view->lineHeightFactor() - 2.5) < 0.001,
+                  QStringLiteral("最松一档再按\"行高 +\"就停在原地（不越界）"),
+                  QStringLiteral("实际 %1").arg(view->lineHeightFactor()));
+            view->setLineHeightFactor(1.0);
+            dispatch(QStringLiteral("lineHeightDown"));
+            QCoreApplication::processEvents();
+            check(qAbs(view->lineHeightFactor() - 1.0) < 0.001,
+                  QStringLiteral("最紧一档（跟随字体）再按\"行高 −\"也停在原地"),
+                  QStringLiteral("实际 %1").arg(view->lineHeightFactor()));
+        }
+
+        /* 自检不该把用户调好的行高改掉，最后统一还原 */
+        view->setLineHeightFactor(savedLineHeightFactor);
+        QCoreApplication::processEvents();
+    }
 
     /*
      * 注释可以单独设字号（设置菜单里的"注释字号"）。
@@ -388,6 +516,17 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store) {
         check(view->caretLineAlpha() == 256,
               QStringLiteral("当前行底色 alpha = 256（SC_ALPHA_NOALPHA，不是 255）"),
               QStringLiteral("实际 %1").arg(view->caretLineAlpha()));
+
+        /*
+         * 当前行底色**只铺到"文本区"右边**：Scintilla 把它当正文段的底色画
+         * （EditView::DrawBackground），文本区 = 编辑器宽 - marginRight。
+         * 所以右边距必须是 0，否则那层底色会在离卡片右边缘十几像素的地方
+         * 断掉 —— 表现就是"当前行有背景，但背景右边空一块"（用户报的）。
+         * 这条只能靠属性钉住：控件 grab() 出来的图里根本没有这层底色（见上面）。
+         */
+        check(view->paddingRight() == 0,
+              QStringLiteral("当前行底色一直铺到编辑器右边缘（正文区右边距 = 0）"),
+              QStringLiteral("实际 %1").arg(view->paddingRight()));
     }
 
     /* ---- 查找 ---- */

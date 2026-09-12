@@ -57,6 +57,8 @@ QtObject {
         else if (kind === "check")         s = p('M3.4 8.4 L6.4 11.4 L12.6 4.6')
         else if (kind === "comment")       s = p('M6.2 3.4 L4.4 12.6 M9.8 3.4 L8 12.6 M3.4 6.6 H12.6 M2.8 9.4 H12')
         else if (kind === "indent")        s = p('M6 3.8 H14 M6 8 H14 M6 12.2 H14') + p('M2.6 2.8 V13.2') + ci(2.6, 8, 0.7)
+        // 行高：右边三条正文行，左边一个上下箭头（行距可拉大 / 缩小）
+        else if (kind === "line-height")   s = p('M6 3.6 H14 M6 8 H14 M6 12.4 H14') + p('M2.6 4 V12') + p('M1.5 5.1 L2.6 4 L3.7 5.1') + p('M1.5 10.9 L2.6 12 L3.7 10.9')
         else if (kind === "select-all")    s = p('M3 4.6 H11 M3 8 H11 M3 11.4 H7.6') + p('M9.2 11.2 L10.8 12.8 L13.8 9.2')
         else if (kind === "lock")          s = p('M4.6 7.4 H11.4 V13.4 H4.6 Z') + p('M6.4 7.4 V5.6 A1.6 1.6 0 0 1 9.6 5.6 V7.4') + ci(8, 10.4, 1)
         else if (kind === "info")          s = co(8, 8, 6) + p('M8 7.4 V11.4') + ci(8, 4.9, 0.95)

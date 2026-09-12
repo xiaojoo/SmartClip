@@ -336,6 +336,23 @@ Rectangle {
         return out
     }
 
+    /*
+     * 设置菜单里各条的动作名（自检核对用，见 src/SelfTest.cpp）。
+     *
+     * 同样是"和弹出的那份同一个构造"：工具栏点"设置"走的就是
+     * Menus.settingsMenu(view, ...)。行高的档位表只在 js/EditorMenus.js 里
+     * 有一份，自检要认的就是它到底给了哪几档。
+     */
+    function settingsMenuActs() {
+        var items = Menus.settingsMenu(view, shortcutOverrides())
+        var out = []
+        for (var i = 0; i < items.length; ++i) {
+            if (items[i] && items[i].act !== undefined)
+                out.push(String(items[i].act))
+        }
+        return out
+    }
+
     function showFind(replace) {
         if (!view.hasDocument)
             return
@@ -402,6 +419,18 @@ Rectangle {
             return
         }
         if (act.indexOf("font:") === 0) { view.fontFamily = act.substring(5); return }
+        if (act.indexOf("lineHeight:") === 0) {
+            var lhf = parseFloat(act.substring(11))
+            if (!isNaN(lhf))
+                view.lineHeightFactor = lhf     // 越界由 C++ 侧夹住（1.0 ~ 3.0）
+            return
+        }
+        /* 设置面板上的"行高 − / 行高 +"：按档位表走一格（表在 js/EditorMenus.js） */
+        if (act === "lineHeightDown" || act === "lineHeightUp") {
+            view.lineHeightFactor =
+                Menus.stepLineHeight(view.lineHeightFactor, act === "lineHeightUp" ? 1 : -1)
+            return
+        }
         if (act.indexOf("lang:") === 0) { view.language = act.substring(5); return }
         if (act.indexOf("encoding:") === 0) { view.encoding = act.substring(9); return }
         if (act.indexOf("eol:") === 0) { view.eolMode = act.substring(4); return }
@@ -598,6 +627,10 @@ Rectangle {
         var family = Cmd.recall("fontFamily", "Consolas")
         if (family !== "")
             view.fontFamily = family
+        /* 行高倍数：1.0 = 跟随字体（越界值由 C++ 侧夹住） */
+        var lineHeight = parseFloat(Cmd.recall("lineHeight", "1"))
+        if (!isNaN(lineHeight))
+            view.lineHeightFactor = lineHeight
 
         view.wrapEnabled = Cmd.recall("wrap", "0") === "1"
         view.lineNumbersVisible = Cmd.recall("lineNumbers", "1") === "1"
@@ -623,6 +656,7 @@ Rectangle {
             Cmd.remember("fontSize", String(editor.view.fontPixelSize))
             Cmd.remember("commentFontSize", String(editor.view.commentFontPixelSize))
             Cmd.remember("fontFamily", editor.view.fontFamily)
+            Cmd.remember("lineHeight", String(editor.view.lineHeightFactor))
         }
         function onWrapChanged() {
             Cmd.remember("wrap", editor.view.wrapEnabled ? "1" : "0")

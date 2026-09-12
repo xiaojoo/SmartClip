@@ -68,6 +68,25 @@ class EditorViewItem : public QQuickItem {
      * 单独一套字号/字体 —— 这正是"注释之内的可以分开设置"那件事。
      */
     Q_PROPERTY(int commentFontPixelSize READ commentFontPixelSize WRITE setCommentFontPixelSize NOTIFY fontChanged)
+
+    /*
+     * 行高倍数（设置菜单 / 设置面板里的"行高"）。
+     *
+     * 1.0 = 跟随字体：就是 Scintilla 按当前字体自己算出来的行高，不额外加空。
+     * 更大的值把行按比例拉开。基准取**自然行高**而不是字号 —— 字体家族换掉时
+     * 字形的 ascent+descent 是不一样的（Consolas 12px 是 15px，别的字体可能
+     * 是 17px），按自然行高算才不会算出比字形还矮的行。
+     *
+     * 实现上 Scintilla 没有"直接设行高"的口子，只有给每一行加额外上下空白
+     * （SCI_SETEXTRAASCENT / SCI_SETEXTRADESCENT），差额平均加到上下两侧 ——
+     * 见 applyLineSpacing()。
+     */
+    Q_PROPERTY(qreal lineHeightFactor READ lineHeightFactor WRITE setLineHeightFactor NOTIFY fontChanged)
+    /* 现在实际的行高（像素）；设置面板显示用 */
+    Q_PROPERTY(int lineHeight READ lineHeight NOTIFY fontChanged)
+    /* 自然行高（像素，= 1.0 倍时的高度）；菜单里"行高 1.4 倍（21 px）"那个数 */
+    Q_PROPERTY(int naturalLineHeight READ naturalLineHeight NOTIFY fontChanged)
+
     Q_PROPERTY(QColor textColor READ textColor WRITE setTextColor NOTIFY colorsChanged)
     Q_PROPERTY(QColor paperColor READ paperColor WRITE setPaperColor NOTIFY colorsChanged)
     Q_PROPERTY(QColor gutterColor READ gutterColor WRITE setGutterColor NOTIFY colorsChanged)
@@ -200,6 +219,19 @@ public:
 
     int commentFontPixelSize() const { return m_commentFontPixelSize; }
     void setCommentFontPixelSize(int px);
+
+    qreal lineHeightFactor() const { return m_lineHeightFactor; }
+    void setLineHeightFactor(qreal factor);
+
+    /*
+     * 实际行高 / 自然行高，单位像素。
+     *
+     * 自然行高 = 现在这一行的高度**减掉**自己加的那份额外上下空白
+     * （SCI_GETEXTRAASCENT / DESCENT），也就是"1.0 倍时的高度"。
+     * 没开文档时两者都是 0。
+     */
+    int lineHeight() const;
+    int naturalLineHeight() const;
 
     QColor textColor() const { return m_textColor; }
     void setTextColor(const QColor &c);
@@ -511,6 +543,11 @@ private:
     /* 字体/前景/底色写进 STYLE_DEFAULT 并刷满样式表（见 .cpp 里的说明） */
     void applyDefaultStyle();
     void applyPadding();
+    /*
+     * 按 lineHeightFactor 把"额外上下空白"写进 Scintilla（行高就是靠它实现的）。
+     * 换字号 / 换字体 / 装 lexer 之后自然行高会变，所以 applyStyle() 末尾要重算一次。
+     */
+    void applyLineSpacing();
     void applyViewOptions();
     void applyLanguageLexer();
     void applyMargins();
@@ -601,6 +638,8 @@ private:
     /* 正文字体家族；注释字号 0 = 跟随正文 */
     QString m_fontFamily = QStringLiteral("Consolas");
     int m_commentFontPixelSize = 0;
+    /* 行高倍数：1.0 = 跟随字体（见 Q_PROPERTY 里的说明） */
+    qreal m_lineHeightFactor = 1.0;
     int m_zoomPercent = 100;
     QColor m_textColor{0xd6, 0xd7, 0xda};
     QColor m_paperColor{0x1e, 0x1f, 0x22};

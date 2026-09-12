@@ -514,6 +514,13 @@ void EditorViewItem::applyStyle() {
 
     applyMargins();
 
+    /*
+     * 行高放在最后：自然行高是"按当前所有样式里最大的 ascent+descent"算的，
+     * 换字号 / 换字体 / 装 lexer（关键字变粗体、注释变斜体）都会改这个数，
+     * 所以每次刷完样式都要按倍数重算一遍额外上下空白。
+     */
+    applyLineSpacing();
+
     styleChrome();
 }
 
@@ -1488,6 +1495,72 @@ void EditorViewItem::setCommentFontPixelSize(int px) {
         themeLexer(lexer);
 
     applyStyle();
+    emit fontChanged();
+}
+
+int EditorViewItem::lineHeight() const {
+    if (m_sci && hasDocument())
+        return textLineHeight();
+    /*
+     * 没有文档时按字体度量估一份。
+     *
+     * 设置面板要显示"当前行高 xx px"，那个绑定是在面板建出来的时候算的 ——
+     * 应用刚起来还没有标签，这里要是直接返回 0，面板上就一直挂着 "0 px"
+     * （字号那个不受影响，所以只有行高露馅）。字体度量和 Scintilla 用的
+     * 是同一份上升/下降值，自然行高估出来和实际一样（Consolas 12px = 15px）。
+     */
+    return qRound(double(naturalLineHeight()) * m_lineHeightFactor);
+}
+
+int EditorViewItem::naturalLineHeight() const {
+    if (m_sci && hasDocument())
+        return qMax(0, m_sci->textHeight(0) - m_sci->extraAscent() - m_sci->extraDescent());
+    /*
+     * 没文档：按字体度量估一份。
+     *
+     * descent 要 +1 才和 Scintilla 一致 —— PlatQt.cpp 的 SurfaceImpl::Descent()
+     * 就是这么给的（"Qt doesn't include the baseline in the descent, so add it"），
+     * 少这 1px 的话设置面板上算出来的 px 会比编辑器里真实的行高少 1。
+     */
+    const QFontMetrics fm(uiFont());
+    return fm.ascent() + fm.descent() + 1;
+}
+
+void EditorViewItem::applyLineSpacing() {
+    if (!m_sci)
+        return;
+
+    /*
+     * 行高怎么落到 Scintilla 上。
+     *
+     * Scintilla 没有"把行高设成 N 像素"的消息，只有给每一行加**额外上下空白**
+     * （SCI_SETEXTRAASCENT / SCI_SETEXTRADESCENT，见 ViewStyle::Refresh：
+     * lineHeight = maxAscent + maxDescent + extraAscent + extraDescent）。
+     *
+     * 所以这里按倍数算差额，再**平均分到上下两侧** —— 全加在上面（或下面）
+     * 会把整行的字推到偏上 / 偏下，正文在行里就不居中了。
+     *
+     * 差额取 max(0, ...)：倍数 < 1.0 时行高比字形还小，行与行的字会叠在一起，
+     * 所以只往松的方向拉；setLineHeightFactor() 也把倍数夹在 [1.0, 3.0]。
+     */
+    const int natural = naturalLineHeight();
+    if (natural <= 0)
+        return;
+
+    const int extra = qMax(0, int(qRound(natural * m_lineHeightFactor)) - natural);
+    const int above = extra / 2;
+    m_sci->setExtraAscent(above);
+    m_sci->setExtraDescent(extra - above);
+}
+
+void EditorViewItem::setLineHeightFactor(qreal factor) {
+    /* 比字形还紧会压字，比 3 倍还松没有意义，两头都夹住 */
+    factor = qBound(1.0, factor, 3.0);
+    if (qFuzzyCompare(factor, m_lineHeightFactor))
+        return;
+    m_lineHeightFactor = factor;
+
+    applyLineSpacing();
     emit fontChanged();
 }
 

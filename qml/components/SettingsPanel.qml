@@ -781,7 +781,16 @@ Popup {
                                         { k: "作用",     v: "剪贴板历史 + 内置编辑器" },
                                         { k: "编辑器内核", v: "QScintilla 2.14（GPLv3）" },
                                         { k: "界面内核",  v: "Qt " + Qt.version + " / QML" },
-                                        { k: "当前字号",  v: (view ? view.fontPixelSize : 12) + " px（设置里可改）" }
+                                        { k: "当前字号",  v: (view ? view.fontPixelSize : 12) + " px（设置里可改）" },
+                                        /*
+                                         * 行高：显示**实际像素**，倍数是设置里那一档。
+                                         * 两个数都从编辑器读（view.lineHeight / lineHeightFactor），
+                                         * 换字体 / 换字号之后这里跟着变。
+                                         */
+                                        { k: "当前行高",  v: (view ? view.lineHeight : 15) + " px"
+                                                              + (view && view.lineHeightFactor > 1.0
+                                                                 ? "（" + view.lineHeightFactor + " 倍）"
+                                                                 : "（跟随字体）") }
                                     ]
     
                                     delegate: Row {
@@ -828,6 +837,8 @@ Popup {
                                 model: [
                                     { label: "字号 −", act: "fontSize:11" },
                                     { label: "字号 +", act: "fontSize:14" },
+                                    { label: "行高 −", act: "lineHeightDown" },
+                                    { label: "行高 +", act: "lineHeightUp" },
                                     { label: "重置缩放", act: "zoomReset" },
                                     { label: "自动换行", act: "toggleWrap" }
                                 ]
