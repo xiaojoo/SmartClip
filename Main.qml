@@ -689,14 +689,14 @@ Rectangle {
         view.indentGuidesVisible = Cmd.recall("indentGuides", "1") === "1"
 
         /*
-         * 行号右侧的分隔竖线、字数参考线（默认开，"一行 80 字"）。
-         * 列号越界/写坏就退回默认 80，别让设置文件里的垃圾值把线顶到画面外。
+         * 行号右侧的分隔竖线、字数参考线（默认开，"一行 120 字"）。
+         * 列号越界/写坏就退回默认 120，别让设置文件里的垃圾值把线顶到画面外。
          */
         view.gutterLineVisible = Cmd.recall("gutterLine", "1") === "1"
         view.rulerVisible = Cmd.recall("rulerVisible", "1") === "1"
-        var rulerCol = parseInt(Cmd.recall("rulerColumn", "80"))
+        var rulerCol = parseInt(Cmd.recall("rulerColumn", "120"))
         view.rulerColumn = (!isNaN(rulerCol) && rulerCol >= 1 && rulerCol <= 2000)
-                           ? rulerCol : 80
+                           ? rulerCol : 120
     }
 
     Connections { target: Store; function onChanged() { window.refresh() } }

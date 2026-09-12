@@ -587,13 +587,27 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store) {
 
         QVariantList rulerPixels = view->rulerPixelStats();
         out() << "        （参考线：扫到 x=" << rulerPixels.value(0).toInt()
-              << "，按 80 字算出来应为 x=" << rulerPixels.value(1).toInt() << "）"
+              << "，按 80 字算出来应为 x=" << rulerPixels.value(1).toInt()
+              << "，离底边 " << rulerPixels.value(2).toInt() << " px）"
               << Qt::endl;
         check(rulerPixels.value(0).toInt() >= 0
                   && qAbs(rulerPixels.value(0).toInt() - rulerPixels.value(1).toInt()) <= 3,
               QStringLiteral("那条线真的画在第 80 个字的位置上"),
               QStringLiteral("扫到 x=%1 / 应为 x=%2")
                   .arg(rulerPixels.value(0).toInt()).arg(rulerPixels.value(1).toInt()));
+        /*
+         * 两条竖线都要一直画到控件底边 —— 用户报过"有时候没撑满纵向屏幕"
+         * （横条把正文区截短了，线就断在横条上沿）。这一条没有横条，本该是 0。
+         */
+        check(rulerPixels.value(2).toInt() >= 0 && rulerPixels.value(2).toInt() <= 3,
+              QStringLiteral("参考线一直画到编辑区底边"),
+              QStringLiteral("离底边 %1 px").arg(rulerPixels.value(2).toInt()));
+        {
+            const QVariantList m = view->marginPixelStats();
+            check(m.value(13).toInt() >= 0 && m.value(13).toInt() <= 3,
+                  QStringLiteral("分隔竖线也一直画到编辑区底边"),
+                  QStringLiteral("离底边 %1 px").arg(m.value(13).toInt()));
+        }
 
         /* 改列号：菜单里"100 字"那一档，act 就是 "rulerColumn:100" */
         dispatch(QStringLiteral("rulerColumn:100"));
@@ -1295,6 +1309,39 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store) {
         check(big.value(QStringLiteral("maximum")).toInt() > 0
               && big.value(QStringLiteral("visible")).toBool(),
               QStringLiteral("长行：横向滚动条出现"), detail(big));
+
+        /*
+         * 横条出现之后，正文区就短了一截（横条那 12px）。两条竖线必须**补到控件
+         * 底边**，不能断在横条上沿 —— 用户报的就是这个："有时候没撑满纵向屏幕"。
+         * 补线是编辑控件上那块透明小控件画的（见 EditorViewItem::updateBottomLines）。
+         */
+        {
+            QCoreApplication::processEvents();
+            const QVariantList ruler = view->rulerPixelStats();
+            const QVariantList margin = view->marginPixelStats();
+            out() << "        （有横条时：参考线离底边 " << ruler.value(2).toInt()
+                  << " px，分隔线离底边 " << margin.value(13).toInt() << " px）" << Qt::endl;
+            check(ruler.value(2).toInt() >= 0 && ruler.value(2).toInt() <= 3,
+                  QStringLiteral("有横条时参考线仍然画到编辑区底边"),
+                  QStringLiteral("离底边 %1 px").arg(ruler.value(2).toInt()));
+            check(margin.value(13).toInt() >= 0 && margin.value(13).toInt() <= 3,
+                  QStringLiteral("有横条时分隔竖线也画到编辑区底边"),
+                  QStringLiteral("离底边 %1 px").arg(margin.value(13).toInt()));
+            /*
+             * 补线控件是贴在那一条上的，它自己不能画背景、也不能接鼠标事件
+             * （否则等于把滚动条糊住 / 点不动）。滚轮、拖横条都得照常能用。
+             */
+            const QVariantList bl = view->bottomLinesState();
+            check(bl.value(0).toBool() && bl.value(1).toBool() && bl.value(2).toBool()
+                      && !bl.value(3).toBool() && bl.value(4).toInt() == 2
+                      && bl.value(5).toInt() >= 8,
+                  QStringLiteral("补线控件在工作：鼠标穿透、不画背景、补两条线"),
+                  QStringLiteral("可见 %1 / 穿透 %2 / 不画背景 %3 / 自动填背景 %4 "
+                                 "/ 线数 %5 / 高 %6")
+                      .arg(bl.value(0).toBool()).arg(bl.value(1).toBool())
+                      .arg(bl.value(2).toBool()).arg(bl.value(3).toBool())
+                      .arg(bl.value(4).toInt()).arg(bl.value(5).toInt()));
+        }
         check(big.value(QStringLiteral("contentWidth")).toInt()
               > big.value(QStringLiteral("pageStep")).toInt(),
               QStringLiteral("长行：量出来的内容宽确实超过了一页"), detail(big));

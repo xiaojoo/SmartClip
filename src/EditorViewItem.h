@@ -113,12 +113,12 @@ class EditorViewItem : public QQuickItem {
     Q_PROPERTY(bool gutterLineVisible READ gutterLineVisible WRITE setGutterLineVisible NOTIFY gutterLineChanged)
 
     /*
-     * 字数参考线（"一行 80 字"那条竖线）与它的列号。
+     * 字数参考线（"一行 N 字"那条竖线）与它的列号。
      *
      * 走 Scintilla 的 edge（EDGE_LINE）：线画在**正文区**第 rulerColumn 列，
      * 位置按当前字体的空格宽算，跟行号栏多宽没关系；正文下方的空白区也一起
      * 画（EditView.cpp 的 rcBeyondEOF 那一支），所以它同样通到底。
-     * 80 是出厂值，设置菜单里可以改（见 setRulerColumn 的夹取范围）。
+     * 出厂值 120（原来 80），设置菜单里可以改（见 setRulerColumn 的夹取范围）。
      */
     Q_PROPERTY(bool rulerVisible READ rulerVisible WRITE setRulerVisible NOTIFY rulerChanged)
     Q_PROPERTY(int rulerColumn READ rulerColumn WRITE setRulerColumn NOTIFY rulerChanged)
@@ -250,13 +250,20 @@ public:
 
     /*
      * 自检用：参考线在控件上**画出来**的像素位置。
-     * 返回 { found, expected }：found = 抓图里扫到的列（-1 = 没扫到），
-     * expected = 按"边距 + 左留白 + 列号 × 空格宽"算出来的位置。
+     * 返回 { found, expected, bottomGap }：found = 抓图里扫到的列（-1 = 没扫到），
+     * expected = 按"边距 + 左留白 + 列号 × 空格宽"算出来的位置，
+     * bottomGap = 这条线最低那点离控件底边还有几像素（0 = 一直补到底）。
      *
-     * 光看 edgeColumn 只是"消息发对了"，这条是"线真的落在 80 个字的地方"——
+     * 光看 edgeColumn 只是"消息发对了"，这条是"线真的落在 120 个字的地方"——
      * 抓的是控件自己渲染的图，不依赖窗口在前台（同 marginPixelStats）。
      */
     Q_INVOKABLE QVariantList rulerPixelStats() const;
+
+    /*
+     * 自检用：编辑区底边那块补线控件的状态（见 .cpp 的 BottomLines）。
+     *   [0] 可见  [1] 鼠标穿透  [2] 不画背景  [3] 自动填背景  [4] 补了几条线  [5] 高度
+     */
+    Q_INVOKABLE QVariantList bottomLinesState() const;
 
     int paddingLeft() const { return m_paddingLeft; }
     void setPaddingLeft(int v);
@@ -588,6 +595,12 @@ private:
     void ensureWrapped();
     void applyGeometry();
 
+    /*
+     * 把两条竖线补到编辑控件最底边（横向滚动条那一条，正文区画不到那里）。
+     * 见 .cpp 里的 BottomLines。
+     */
+    void updateBottomLines();
+
     /* 标签标题（文件名 / 剪贴板标题 / 未命名 N） */
     QString titleOf(const Doc &d) const;
 
@@ -708,6 +721,8 @@ private:
     /* 宿主 QWidget 与它内部的 QScintilla 子控件 */
     QPointer<QWidget> m_hostWidget;
     QPointer<QWidget> m_sciWidget;
+    /* 横向滚动条那一条上的补线控件（见 .cpp 里的 BottomLines） */
+    QPointer<QWidget> m_bottomLines;
 
     QVector<Doc> m_docs;
     int m_current = -1;
@@ -744,9 +759,9 @@ private:
     bool m_indentGuides = true;
     /* 行号栏右侧的分隔竖线（默认开） */
     bool m_gutterLine = true;
-    /* 字数参考线：默认开、"一行 80 字" */
+    /* 字数参考线：默认开、"一行 120 字" */
     bool m_rulerVisible = true;
-    int m_rulerColumn = 80;
+    int m_rulerColumn = 120;
     bool m_folding = true;
     bool m_readOnly = false;
 

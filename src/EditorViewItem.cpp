@@ -262,6 +262,41 @@ EditorViewItem::~EditorViewItem() {
 /* 原生控件生命周期                                                    */
 /* ------------------------------------------------------------------ */
 
+namespace {
+
+/*
+ * 编辑区最底下那一行（横向滚动条占的那一条）上的"补线"。
+ *
+ * 为什么需要它：两条竖线分别画在 Scintilla 的边距和正文区里，而正文区
+ * （viewport）到横向滚动条上沿就截止了 —— 横条一出现，线就在离底边 12px 的地方
+ * 断掉（用户报的"有时候没撑满纵向屏幕"）。Scintilla 没有画到滚动条区域的接口，
+ * 所以用一个透明小控件把那一小段补上：
+ *   * 只画那两条 1px 的线，别的什么都不画（WA_NoSystemBackground，也不填背景），
+ *     底下的滚动条该什么样还什么样；
+ *   * WA_TransparentForMouseEvents：鼠标事件全放过去，横条照样能拖。
+ */
+class BottomLines : public QWidget {
+public:
+    explicit BottomLines(QWidget *parent) : QWidget(parent) {
+        setAttribute(Qt::WA_TransparentForMouseEvents, true);
+        setAttribute(Qt::WA_NoSystemBackground, true);
+        setAutoFillBackground(false);
+        setFocusPolicy(Qt::NoFocus);
+    }
+
+    /* 要补的线：控件坐标的 x + 颜色（宽度固定 1px） */
+    QVector<QPair<int, QColor>> lines;
+
+protected:
+    void paintEvent(QPaintEvent *) override {
+        QPainter painter(this);
+        for (const QPair<int, QColor> &line : lines)
+            painter.fillRect(QRect(line.first, 0, 1, height()), line.second);
+    }
+};
+
+}  // namespace
+
 void EditorViewItem::ensureWrapped() {
     if (m_sci)
         return;
@@ -280,6 +315,14 @@ void EditorViewItem::ensureWrapped() {
     m_sciWidget->setAutoFillBackground(false);
 
     m_sci = new QsciScintilla(m_sciWidget);
+
+    /*
+     * 底下那条"补线"控件：横向滚动条出现时，用它把两条竖线补到控件底边
+     * （见 BottomLines 的说明）。挂在编辑控件上、排在最后创建，所以它画在
+     * 滚动条之上；又因为只画那两条线，滚动条照常看得见。
+     */
+    m_bottomLines = new BottomLines(m_sci);
+    m_bottomLines->hide();
 
     /* 可编辑 + 不换行 + UTF-8 */
     m_sci->setReadOnly(false);
@@ -347,6 +390,15 @@ void EditorViewItem::ensureWrapped() {
             d->cursorPos = long(m_sci->SendScintilla(QsciScintillaBase::SCI_GETCURRENTPOS));
         emit cursorChanged();
     });
+
+    /*
+     * 横向滚动时参考线跟着正文一起挪，底下那条补线得跟着重画；
+     * 横条的显隐（范围变化）也要重排。
+     */
+    if (auto *hb = m_sci->horizontalScrollBar()) {
+        connect(hb, &QScrollBar::valueChanged, this, [this]() { updateBottomLines(); });
+        connect(hb, &QScrollBar::rangeChanged, this, [this]() { updateBottomLines(); });
+    }
 
     connect(m_sci, &QsciScintilla::selectionChanged, this, [this]() {
         emit cursorChanged();
@@ -821,7 +873,7 @@ int EditorViewItem::styleFore(int style) const {
 }
 
 QVariantList EditorViewItem::marginPixelStats() const {
-    QVariantList out{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    QVariantList out{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
     if (!m_sci || !m_sciWidget || !hasDocument())
         return out;
 
@@ -897,13 +949,14 @@ QVariantList EditorViewItem::marginPixelStats() const {
      * 边距宽度是逻辑像素、抓图是设备像素，高 DPI 下两者差一个缩放系数，
      * 所以这里按"正文区左边"当上界，不去抠那 1 像素。
      */
-    int gutterInk = 0, gutterX = -1;
+    int gutterInk = 0, gutterX = -1, gutterMaxY = -1;
     for (int y = 0; y < img.height(); ++y) {
         for (int x = 0; x <= gutterEnd; ++x) {
             if (img.pixelColor(x, y) == kGuideLine) {
                 ++gutterInk;
                 if (gutterX < 0)
                     gutterX = x;
+                gutterMaxY = y;
             }
         }
     }
@@ -940,6 +993,32 @@ QVariantList EditorViewItem::marginPixelStats() const {
     out[10] = gutterX;
     out[11] = (textInkX >= 0 && gutterX >= 0) ? textInkX - (gutterX + 1) : -1;
     out[12] = guideInk;
+    /* 分隔线最低那一点离控件底边还有几像素（0 = 补到底了；横条出现时靠补线） */
+    out[13] = (gutterMaxY >= 0) ? (img.height() - 1 - gutterMaxY) : -1;
+    return out;
+}
+
+/*
+ * 自检用：编辑区底边那块补线控件的状态（见 BottomLines / updateBottomLines）。
+ *   [0] 可见   [1] 鼠标穿透（横条还能拖）   [2] 不画背景（滚动条还看得见）
+ *   [3] 自动填背景   [4] 补了几条线   [5] 控件高度
+ *
+ * 为什么量属性而不是量像素：横条那一行是滚动条控件自己画的（stylesheet 里背景是
+ * transparent，靠"父控件已经画过的内容"透出来），控件 grab() 出来的图里那一条
+ * 本来就是没画过的底色，量它是量不准的。
+ */
+QVariantList EditorViewItem::bottomLinesState() const {
+    QVariantList out{false, false, false, true, 0, 0};
+    auto *overlay = static_cast<BottomLines *>(m_bottomLines.data());
+    if (!overlay)
+        return out;
+
+    out[0] = overlay->isVisible();
+    out[1] = overlay->testAttribute(Qt::WA_TransparentForMouseEvents);
+    out[2] = overlay->testAttribute(Qt::WA_NoSystemBackground);
+    out[3] = overlay->autoFillBackground();
+    out[4] = overlay->lines.size();
+    out[5] = overlay->height();
     return out;
 }
 
@@ -1287,6 +1366,9 @@ void EditorViewItem::applyMargins() {
     /* 颜色最后压：装 lexer 时那次 STYLECLEARALL 会把行号样式刷回白底 */
     applyFoldMarkers();
     applyMarginTheme();
+
+    /* 边距宽度变了 → 底边那条补线的位置也得跟着挪 */
+    updateBottomLines();
 }
 
 void EditorViewItem::applyLanguageLexer() {
@@ -1536,11 +1618,84 @@ void EditorViewItem::updateHorizontalScroll() {
                                                          : contentWidth;
     m_sci->SendScintilla(QsciScintillaBase::SCI_SETSCROLLWIDTH,
                          (unsigned long)qMax(1L, scrollWidth));
+
+    /*
+     * 横条可能刚出现 / 刚收回去 —— 那一条的高度变了，补线要跟着排。
+     * 横条的显隐是 Scintilla 在 SetScrollBars 里改的，几何要等这一轮事件处理完
+     * 才落定，所以再排一次到下一轮。
+     */
+    updateBottomLines();
+    QTimer::singleShot(0, this, [this]() { updateBottomLines(); });
 }
 
 /* ------------------------------------------------------------------ */
 /* 几何                                                                */
 /* ------------------------------------------------------------------ */
+
+/*
+ * 把两条竖线补到编辑控件的最底边（横向滚动条那一条）。
+ *
+ * 两种情况下这一条是空的：横条没出现（正文区一直铺到底）、或者控件还没布局。
+ * 其余情况就按当前几何算两条线的 x，交给 BottomLines 画。要重算的时机：
+ * 改窗口大小、横条出现/消失、横向滚动（参考线的 x 跟着挪）、改列号 / 边距 / 字号。
+ */
+void EditorViewItem::updateBottomLines() {
+    auto *overlay = static_cast<BottomLines *>(m_bottomLines.data());
+    if (!m_sci || !overlay)
+        return;
+
+    if (!m_sci->isVisible()) {
+        overlay->hide();
+        return;
+    }
+
+    /*
+     * 正文区（viewport）下面的那一条，就是横向滚动条占的那一行。
+     * 横条没出现时 viewport 一直铺到控件底边，这条高度是 0，没什么可补的。
+     */
+    const QRect vp = m_sci->viewport()->geometry();
+    const int top = vp.bottom() + 1;
+    const int height = m_sci->height() - top;
+    if (top <= 0 || height <= 0 || m_sci->width() <= 0) {
+        overlay->hide();
+        return;
+    }
+
+    const int m0 = marginWidth(0);
+    const int m1 = marginWidth(1);
+    const int m2 = marginWidth(2);
+    const int textStart = m0 + m1 + m2 + m_paddingLeft;
+
+    QVector<QPair<int, QColor>> lines;
+
+    /* 行号右边那条分隔线：它在 [m0 + m1, +m2) 那一条边距上 */
+    if (m_gutterLine && m0 >= 0 && m1 >= 0) {
+        const int x = m0 + m1;
+        if (x < m_sci->width())
+            lines.append({x, kGuideLine});
+    }
+
+    /*
+     * 字数参考线：Scintilla 画 edge 的公式（x = 列号 × 空格宽 + 正文左边缘，
+     * 横滚时整体左移），见 rulerPixelStats 里的同一份算法。线只画在正文区里，
+     * 所以算出来落在正文左边缘左边（横滚滚出去了）就不补。
+     */
+    if (m_rulerVisible) {
+        const long xOffset =
+            m_sci->SendScintilla(QsciScintillaBase::SCI_GETXOFFSET);
+        const QFontMetrics fm(uiFont());
+        const int x = textStart - int(xOffset)
+                      + m_rulerColumn * fm.horizontalAdvance(QLatin1Char(' '));
+        if (x >= textStart && x < m_sci->width())
+            lines.append({x, kGuideLine});
+    }
+
+    overlay->lines = lines;
+    overlay->setGeometry(0, top, m_sci->width(), height);
+    overlay->raise();
+    overlay->show();
+    overlay->update();
+}
 
 void EditorViewItem::applyGeometry() {
     if (!m_sci || !m_sciWidget || !m_hostWidget || !window())
@@ -1610,6 +1765,9 @@ void EditorViewItem::applyGeometry() {
 
     m_sci->viewport()->update();
     m_sci->update();
+
+    /* 几何变了，底下那条补线也得跟着重排（见 updateBottomLines） */
+    updateBottomLines();
 }
 
 void EditorViewItem::geometryChange(const QRectF &newGeometry,
@@ -1926,6 +2084,9 @@ void EditorViewItem::applyRuler() {
     m_sci->setEdgeColor(kGuideLine);
     m_sci->setEdgeMode(m_rulerVisible ? QsciScintilla::EdgeLine
                                       : QsciScintilla::EdgeNone);
+
+    /* 参考线的位置/开关变了，底边那条补线也要重画 */
+    updateBottomLines();
 }
 
 int EditorViewItem::rulerEdgeMode() const {
@@ -1949,7 +2110,7 @@ int EditorViewItem::rulerEdgeColor() const {
 }
 
 QVariantList EditorViewItem::rulerPixelStats() const {
-    QVariantList out{-1, -1};   // { found, expected }
+    QVariantList out{-1, -1, -1};   // { found, expected, bottomGap }
     if (!m_sci || !m_sciWidget || !hasDocument())
         return out;
 
@@ -2006,6 +2167,21 @@ QVariantList EditorViewItem::rulerPixelStats() const {
 
     out[0] = found;
     out[1] = expected;
+    /*
+     * 第三个：这条线最低的那一点离控件底边还有几像素。横条出现时正文区画不到
+     * 那一行，全靠底下那块补线控件（见 updateBottomLines），这里量它有没有补上。
+     */
+    int maxY = -1;
+    if (found >= 0) {
+        for (int yy = 0; yy < img.height(); ++yy) {
+            const QColor c = img.pixelColor(found, yy);
+            if (qAbs(c.red() - kGuideLine.red()) <= 6
+                && qAbs(c.green() - kGuideLine.green()) <= 6
+                && qAbs(c.blue() - kGuideLine.blue()) <= 6)
+                maxY = yy;
+        }
+    }
+    out[2] = (maxY >= 0) ? (img.height() - 1 - maxY) : -1;
     return out;
 }
 

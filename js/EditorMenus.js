@@ -329,17 +329,17 @@ function stepLineHeight(current, dir) {
 /*
  * 字数参考线（"一行 N 字"那条竖线）的可选列号。
  *
- * 80 是出厂默认，和 EditorViewItem 里的 m_rulerColumn 一致 —— 两处都改才算换了
+ * 120 是出厂默认，和 EditorViewItem 里的 m_rulerColumn 一致 —— 两处都改才算换了
  * 默认值。不在表里的值（自定义输入的）就只显示在"自定义…"那一行上。
  */
 var kRulerColumns = [60, 72, 80, 100, 120]
 
 function rulerColumnItems(view) {
-    var current = view ? view.rulerColumn : 80
+    var current = view ? view.rulerColumn : 120
     var out = []
     for (var i = 0; i < kRulerColumns.length; ++i) {
         out.push({
-            label: kRulerColumns[i] + " 字" + (kRulerColumns[i] === 80 ? "（默认）" : ""),
+            label: kRulerColumns[i] + " 字" + (kRulerColumns[i] === 120 ? "（默认）" : ""),
             act: "rulerColumn:" + kRulerColumns[i],
             checked: current === kRulerColumns[i]
         })
