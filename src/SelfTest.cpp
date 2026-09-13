@@ -2367,6 +2367,17 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot) {
         if (overlay) {
             settle();
 
+            /*
+             * "撤销"按钮的可用状态。
+             *
+             * 钉这个是因为踩过：history 是 JS 数组，原地 push 不触发绑定，
+             * 按钮的 enabled 一直停在启动时那次求值上 —— 画了再多标注，
+             * "撤销"也一直是灰的、点不动。所以"还没有标注 -> 不可用，
+             * 落一条之后 -> 可用"这两头都得量一下。
+             */
+            check(!overlay->property("undoAvailable").toBool(),
+                  QStringLiteral("截图：刚开出来（还没标注）时「撤销」是置灰的"));
+
             const double overlayW = overlay->property("width").toDouble();
             const double overlayH = overlay->property("height").toDouble();
             check(overlayW > 640 && overlayH > 480,
@@ -2396,6 +2407,9 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot) {
                                       Q_ARG(QVariant, selX + 40), Q_ARG(QVariant, selY + 60),
                                       Q_ARG(QVariant, QStringLiteral("自检文字")));
             check(added.toBool(), QStringLiteral("截图：文字工具在选区里落下一段文字"));
+            /* 落了一条之后"撤销"必须变成可点的（不能一直是灰的） */
+            check(overlay->property("undoAvailable").toBool(),
+                  QStringLiteral("截图：落一条标注之后「撤销」变成可点（不再是灰的）"));
 
             QVariant textsVar;
             QMetaObject::invokeMethod(overlay, "textsData", Q_RETURN_ARG(QVariant, textsVar));
@@ -2702,14 +2716,65 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot) {
                           .arg(shapes.size())
                           .arg(pencil.value(QStringLiteral("pts")).toList().size()));
 
+                /*
+                 * 三个工具都要能从"按下"开始整条走通（不只是 commitShape）——
+                 * 加"方框"时就是这里漏了：数据 / 合成都支持 rect，可按下时的
+                 * 分派还写着 arrow||pencil，于是方框工具下拖出来的是"改选区"。
+                 */
+                {
+                    const double bx = selX + 20;
+                    const double by = selY + 200;
+                    QVariant drew;
+                    QMetaObject::invokeMethod(overlay, "testDrawWith", Q_RETURN_ARG(QVariant, drew),
+                                              Q_ARG(QVariant, QStringLiteral("rect")),
+                                              Q_ARG(QVariant, bx), Q_ARG(QVariant, by),
+                                              Q_ARG(QVariant, bx + 60), Q_ARG(QVariant, by + 40));
+                    check(drew.toBool(), QStringLiteral("截图：方框工具从按下到松手整条路走得通"));
+
+                    /* 而且**不该**顺手把选区改掉（那正是漏掉分派时的症状） */
+                    const QRectF afterDraw = overlay->property("sel").toRectF();
+                    check(qAbs(afterDraw.width() - selW) < 1.5
+                              && qAbs(afterDraw.height() - selH) < 1.5,
+                          QStringLiteral("截图：用形状工具画一笔不会改掉选区"),
+                          QStringLiteral("选区 %1 × %2").arg(afterDraw.width())
+                              .arg(afterDraw.height()));
+                }
+
                 QVariant all;
+                QMetaObject::invokeMethod(overlay, "annotationsData", Q_RETURN_ARG(QVariant, all));
+
+                /* 方框：和箭头同一套"按下 + 松开"，只有描边 */
+                QMetaObject::invokeMethod(overlay, "testAddShape", Q_RETURN_ARG(QVariant, ok),
+                                          Q_ARG(QVariant, QStringLiteral("rect")),
+                                          Q_ARG(QVariant, selX + 260), Q_ARG(QVariant, selY + 40),
+                                          Q_ARG(QVariant, selX + 380), Q_ARG(QVariant, selY + 150));
+                QMetaObject::invokeMethod(overlay, "shapesData", Q_RETURN_ARG(QVariant, shapesVar));
+                const QVariantList withRect = shapesVar.toList();
+                /* 按 kind + 角点找那一条（列表里这会儿不止一个形状） */
+                QVariantMap rect;
+                for (const QVariant &v : withRect) {
+                    const QVariantMap m = v.toMap();
+                    if (m.value(QStringLiteral("kind")).toString() == QLatin1String("rect")
+                        && qAbs(m.value(QStringLiteral("x1")).toDouble() - (selX + 260)) < 1.5)
+                        rect = m;
+                }
+                check(ok.toBool() && !rect.isEmpty()
+                          && qAbs(rect.value(QStringLiteral("y2")).toDouble() - (selY + 150)) < 1.5,
+                      QStringLiteral("截图：方框带着两个角点（kind=rect）"),
+                      QStringLiteral("条目 %1 / 角点 (%2,%3)-(%4,%5)")
+                          .arg(withRect.size())
+                          .arg(rect.value(QStringLiteral("x1")).toDouble())
+                          .arg(rect.value(QStringLiteral("y1")).toDouble())
+                          .arg(rect.value(QStringLiteral("x2")).toDouble())
+                          .arg(rect.value(QStringLiteral("y2")).toDouble()));
+
                 QMetaObject::invokeMethod(overlay, "annotationsData", Q_RETURN_ARG(QVariant, all));
                 const QString shapePath = dir.filePath(QStringLiteral("shot-shapes.png"));
                 check(shot->saveResult(shapePath, sel, all.toList()),
-                      QStringLiteral("截图：箭头 + 铅笔 + 文字一起合成出图"));
+                      QStringLiteral("截图：箭头 + 铅笔 + 方框 + 文字一起合成出图"));
                 const QImage withShapes(shapePath);
                 check(withShapes.size() == marked.size() && withShapes != marked,
-                      QStringLiteral("截图：箭头和铅笔真的画进了成品图（不是只在预览里）"));
+                      QStringLiteral("截图：箭头 / 铅笔 / 方框真的画进了成品图（不是只在预览里）"));
             }
 
             /* 第二条出口：剪贴板 */

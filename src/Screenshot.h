@@ -100,6 +100,12 @@ public:
     /* 弹"保存截图"对话框并写盘；用户取消 / 写失败返回 false */
     Q_INVOKABLE bool saveResultAs(const QRectF &sel, const QVariantList &texts);
 
+    /*
+     * "更多颜色 -> 自定义…"：开系统取色框，返回 #rrggbb；取消返回空串。
+     * current 是打开时停在哪个颜色上。
+     */
+    Q_INVOKABLE QString pickColor(const QString &current);
+
     /* 固定到桌面：在选区原来的位置上开一个置顶窗口 */
     Q_INVOKABLE void pinResult(const QRectF &sel, const QVariantList &texts);
 
@@ -156,6 +162,12 @@ private:
      * 所以延时期间单独用这个标志挡重复触发。
      */
     bool m_pending = false;
+    /*
+     * 正开着取色框 / 保存框（都是嵌套事件循环的模态对话框）。
+     * 这期间不许关选区窗口 —— 对话框的父窗口被拆掉的话它会 abort，
+     * 详见 Screenshot::endCapture 的说明。
+     */
+    bool m_modalOpen = false;
     /* 抓屏前把主窗口藏起来了，收尾时要放回去 */
     bool m_hiddenHost = false;
 };

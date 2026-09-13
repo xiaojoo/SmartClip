@@ -72,6 +72,17 @@ Rectangle {
     property var history: []
 
     /*
+     * 有没有东西可撤 —— 拿它绑"撤销"按钮，**别直接绑 history.length**。
+     *
+     * 这是个踩过的坑：history 是 JS 数组，`history.push(...)` 是原地改，
+     * QML 不会因此重算绑定 —— 按钮的 enabled 一直停在启动时那一次求值
+     * （长度 0 → 灰的），画了再多东西也一直灰着、点不动。
+     * 所以下面所有增删都改成"整体重新赋值"（concat / slice），
+     * 属性一换，绑定才会跟着重算。
+     */
+    readonly property bool undoAvailable: history.length > 0
+
+    /*
      * 画好的形状（箭头 / 铅笔），一条一项：
      *   { kind, x1, y1, x2, y2, stroke, color, pts }
      *
@@ -132,7 +143,7 @@ Rectangle {
         textModel.append({ tx: x, ty: y, txt: "", fsize: root.fontSize,
                            fcolor: root.annotColor.toString(), bx: 0, bh: 0, rot: 0 })
         root.selected = textModel.count - 1
-        root.history.push("text")
+        root.history = root.history.concat(["text"])
         return root.selected
     }
 
@@ -345,14 +356,23 @@ Rectangle {
     /* 选工具：再点同一个 = 收起（回到框选）；切走时先把正在打的字收掉 */
     function pickTool(name) {
         root.commitEditing()
+        root.closeMenus()
         root.tool = (root.tool === name) ? "" : name
     }
 
     /* 字号：改"下一条的默认值"，也改选中的那一条 */
     function bumpFont(delta) {
-        root.fontSize = Math.max(8, Math.min(96, root.fontSize + delta))
+        /* 基准取"选中的那一条"当前的字号（没有就取默认值），
+           这样拖大字号的文字之后再点 A−/A+ 不会突然跳回 16 */
+        const base = root.selected >= 0 ? textModel.get(root.selected).fsize : root.fontSize
+        root.setFontSize(base + delta)
+    }
+
+    function setFontSize(v) {
+        const size = Math.max(8, Math.min(96, Math.round(v)))
+        root.fontSize = size
         if (root.selected >= 0)
-            textModel.setProperty(root.selected, "fsize", root.fontSize)
+            textModel.setProperty(root.selected, "fsize", size)
     }
 
     /* 线宽：箭头 / 铅笔用（范围窄一档，太粗的线在小图上很丑） */
@@ -360,20 +380,83 @@ Rectangle {
         root.strokeWidth = Math.max(1, Math.min(12, root.strokeWidth + delta))
     }
 
+    /* 形状工具在用吗（决定 − / + 和那个数字是线宽还是字号） */
+    readonly property bool shapeTool: tool === "arrow" || tool === "pencil" || tool === "rect"
+
+    /* 数字框里显示的当前值 */
+    readonly property int sizeValue: shapeTool ? strokeWidth
+                                               : (selected >= 0 ? textModel.get(selected).fsize
+                                                                : fontSize)
+
+    /* 那两个键的标签也跟着变，免得"改线宽"的时候还写着 A+ */
+    readonly property string sizeDownLabel: shapeTool ? "细 −" : "A−"
+    readonly property string sizeUpLabel: shapeTool ? "粗 +" : "A+"
+
+    /* 数字框里的候选值（点一下弹出来直接挑） */
+    readonly property var sizePresets: shapeTool
+        ? [1, 2, 3, 4, 5, 6, 8, 10, 12]
+        : [8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 32, 36, 40, 48, 64, 96]
+
+    /* "更多颜色"那一格里摆的调色板（8 列，够日常用又不至于找不着） */
+    readonly property var colorPalette: [
+        "#ffffff", "#d6d7da", "#8b929e", "#4b4d4f", "#000000",
+        "#ff3b30", "#ff6b35", "#ffd60a", "#30d158", "#0a84ff",
+        "#5e5ce6", "#bf5af2", "#ff2d55", "#a2845e", "#64d2ff",
+        "#32d74b", "#ff9f0a", "#ff375f", "#ac8e68", "#00c7be",
+        "#66d4cf", "#7d7aff", "#d4a5a5", "#f2f2f7"
+    ]
+
+    /* 弹出的小面板（数字框 / 更多颜色），同一时刻只开一个 */
+    property bool menuSize: false
+    property bool menuColor: false
+
+    /*
+     * 正开着系统取色框（QtWidgets 模态框，里面是嵌套事件循环）。
+     *
+     * 这期间要把窗口级快捷键全让开：实测取色框开着按 Esc，先被这边的
+     * Esc Shortcut 接住、把选区窗口关了 —— 对话框的父窗口一没，它直接
+     * abort（弹"Microsoft Visual C++ Runtime Library"）。让开之后 Esc
+     * 才轮到对话框自己处理。C++ 那侧 endCapture 也加了同样的闸门。
+     */
+    property bool pickingColor: false
+
+    /* 快捷键总闸：打字 / 开着系统对话框的时候都让开 */
+    readonly property bool shortcutsOn: editing < 0 && !pickingColor
+
+    function closeMenus() {
+        root.menuSize = false
+        root.menuColor = false
+    }
+
+    /* 从数字框里挑了一个值 */
+    function setSizeValue(v) {
+        const n = Math.round(v)
+        if (root.shapeTool)
+            root.strokeWidth = Math.max(1, Math.min(12, n))
+        else
+            root.setFontSize(n)
+    }
+
+    /* 弹出面板上的"自定义…"：开系统取色框（C++ 那边 QColorDialog） */
+    function pickCustomColor() {
+        root.pickingColor = true
+        const picked = Shot.pickColor(root.annotColor.toString())
+        root.pickingColor = false
+        if (picked !== "")
+            root.setColor(picked)
+        root.menuColor = false
+    }
+
     /*
      * 工具条上那两个"− / +"：跟着当前工具走 —— 形状工具改线宽，
      * 其余情况（文字工具 / 正在改某条文字）改字号。
      */
     function bumpSize(delta) {
-        if (root.tool === "arrow" || root.tool === "pencil")
+        if (root.shapeTool)
             root.bumpStroke(delta)
         else
             root.bumpFont(delta)
     }
-
-    /* 那两个键的标签也跟着变，免得"改线宽"的时候还写着 A+ */
-    readonly property string sizeDownLabel: (tool === "arrow" || tool === "pencil") ? "细 −" : "A−"
-    readonly property string sizeUpLabel: (tool === "arrow" || tool === "pencil") ? "粗 +" : "A+"
 
     function setColor(color) {
         root.annotColor = color
@@ -392,16 +475,17 @@ Rectangle {
                                                     stroke: root.strokeWidth,
                                                     color: root.annotColor.toString(),
                                                     pts: root.drawPts.slice(0) }])
-                root.history.push("shape")
+                root.history = root.history.concat(["shape"])
             }
-        } else if (root.drawKind === "arrow") {
+        } else if (root.drawKind === "arrow" || root.drawKind === "rect") {
+            /* 两种都是"按下点 + 松开点"定形状；太短的（手抖点一下）丢掉 */
             if (Math.abs(root.drawX2 - root.drawX1) + Math.abs(root.drawY2 - root.drawY1) >= 6) {
-                root.shapes = root.shapes.concat([{ kind: "arrow",
+                root.shapes = root.shapes.concat([{ kind: root.drawKind,
                                                     x1: root.drawX1, y1: root.drawY1,
                                                     x2: root.drawX2, y2: root.drawY2,
                                                     stroke: root.strokeWidth,
                                                     color: root.annotColor.toString(), pts: [] }])
-                root.history.push("shape")
+                root.history = root.history.concat(["shape"])
             }
         }
         root.drawKind = ""
@@ -412,10 +496,14 @@ Rectangle {
     /*
      * 撤销：按 history 退最后加的那一条。history 里可能留着已经被删掉
      * （✕ 按钮 / 空文本框收掉）的记录，所以循环里跳过对不上号的。
+     *
+     * 出栈也用 slice 而不是 pop —— 原地改不触发绑定，"撤销"按钮会一直
+     * 停在"还有东西可撤"的状态上（见 undoAvailable 的说明）。
      */
     function undoLast() {
         while (root.history.length > 0) {
-            const kind = root.history.pop()
+            const kind = root.history[root.history.length - 1]
+            root.history = root.history.slice(0, -1)
             if (kind === "shape" && root.shapes.length > 0) {
                 root.shapes = root.shapes.slice(0, -1)
                 shapeCanvas.requestPaint()
@@ -483,6 +571,12 @@ Rectangle {
             ctx.stroke()
             return
         }
+        if (kind === "rect") {
+            /* 方框：左上角取反方向那一侧，所以往哪个方向拖都行 */
+            ctx.strokeRect(Math.min(x1, x2) - root.sel.x, Math.min(y1, y2) - root.sel.y,
+                           Math.abs(x2 - x1), Math.abs(y2 - y1))
+            return
+        }
         const ax = x1 - root.sel.x
         const ay = y1 - root.sel.y
         const bx = x2 - root.sel.x
@@ -529,6 +623,16 @@ Rectangle {
     /* ---- 自检入口（见 src/SelfTest.cpp），和界面上那几下是同一批函数 ---- */
     function testSelect(x, y, w, h) { root.sel = Qt.rect(x, y, w, h) }
     function testTextTool(on) { root.tool = on ? "text" : "" }
+    /* 自检：选某个工具 -> 按下 -> 拖 -> 松开（走界面上同一套 pointer*） */
+    function testDrawWith(tool, x1, y1, x2, y2) {
+        const before = root.shapes.length
+        root.tool = tool
+        root.pointerDown(x1, y1, false)
+        root.pointerMove(x2, y2)
+        root.pointerUp()
+        root.tool = ""
+        return root.shapes.length > before
+    }
     /* 自检：画一个形状（和界面上一样"起笔 -> 落笔"，落笔走 commitShape） */
     function testAddShape(kind, x1, y1, x2, y2) {
         root.drawKind = kind
@@ -677,89 +781,111 @@ Rectangle {
         hoverEnabled: true
         cursorShape: root.textTool ? Qt.IBeamCursor : Qt.CrossCursor
 
-        onPressed: (mouse) => {
-            if (mouse.button === Qt.RightButton) {
-                /* 右键 = 收起当前工具，回到框选 */
-                root.commitEditing()
-                root.tool = ""
-                return
-            }
-            if (root.textTool) {
-                root.hinted = false
-                if (root.insideSel(mouse.x, mouse.y)) {
-                    /*
-                     * 文字工具：按下就落一个空框，然后**左键不松**地拖着把
-                     * 它拉大 / 缩小（和框选一个手感），松手才落定并进打字。
-                     */
-                    root.boxIndex = root.beginTextBox(mouse.x, mouse.y)
-                    root.boxX = mouse.x
-                    root.boxY = mouse.y
-                    root.boxDrag = true
-                }
-                return
-            }
-            if (root.tool === "arrow" || root.tool === "pencil") {
-                root.hinted = false
-                if (!root.insideSel(mouse.x, mouse.y))
-                    return
-                /* 箭头 / 铅笔：按下起笔，拖动期间只重绘画布，松手才落进模型 */
-                root.drawKind = root.tool
-                root.drawX1 = mouse.x
-                root.drawY1 = mouse.y
-                root.drawX2 = mouse.x
-                root.drawY2 = mouse.y
-                root.drawPts = [mouse.x, mouse.y]
-                root.shapeDrag = true
-                return
-            }
+        /*
+         * 三个处理器都不干活，只转给 root.pointer*()。
+         *
+         * 这么绕一层是为了自检能**走同一条路**：加"方框"的时候就栽在这儿
+         * —— commitShape / compose 都支持 rect，但按下时的分派还写着
+         * "arrow || pencil"，于是方框工具下拖出来的是"改选区"。那种漏项
+         * 光测 commitShape 是测不出来的，得能从按下开始整条走一遍。
+         */
+        onPressed: (mouse) => root.pointerDown(mouse.x, mouse.y,
+                                               mouse.button === Qt.RightButton)
+        onPositionChanged: (mouse) => root.pointerMove(mouse.x, mouse.y)
+        onReleased: (mouse) => root.pointerUp()
+    }
 
+    /* 按下（x/y 是选区窗口坐标，right 是右键） */
+    function pointerDown(x, y, right) {
+        if (right) {
+            /* 右键 = 收起当前工具，回到框选 */
             root.commitEditing()
-            root.selected = -1
+            root.tool = ""
+            return
+        }
+        if (root.textTool) {
             root.hinted = false
-            root.dragging = true
-            root.pressX = mouse.x
-            root.pressY = mouse.y
-            root.sel = Qt.rect(mouse.x, mouse.y, 0, 0)
+            if (root.insideSel(x, y)) {
+                /*
+                 * 文字工具：按下就落一个空框，然后**左键不松**地拖着把
+                 * 它拉大 / 缩小（和框选一个手感），松手才落定并进打字。
+                 */
+                root.boxIndex = root.beginTextBox(x, y)
+                root.boxX = x
+                root.boxY = y
+                root.boxDrag = true
+            }
+            return
+        }
+        /*
+         * 形状工具（箭头 / 铅笔 / 方框）：按下起笔，拖动期间只重绘画布，
+         * 松手才落进 shapes（见 commitShape）。
+         *
+         * 判据用 root.shapeTool，别再在这里写一遍 tool 的枚举 —— 加"方框"
+         * 的时候就栽在这儿：shapeTool 加了 rect、这里漏了，于是方框工具
+         * 下按下去走的是下面"框选"那条路（拖出来变成改选区）。
+         */
+        if (root.shapeTool) {
+            root.hinted = false
+            if (!root.insideSel(x, y))
+                return
+            root.drawKind = root.tool
+            root.drawX1 = x
+            root.drawY1 = y
+            root.drawX2 = x
+            root.drawY2 = y
+            root.drawPts = [x, y]
+            root.shapeDrag = true
+            return
         }
 
-        onPositionChanged: (mouse) => {
-            /* 画形状：点都夹在选区里（出了界画布也裁掉，但别往模型里存野点） */
-            if (root.shapeDrag) {
-                const px = Math.max(root.sel.x,
-                                    Math.min(root.sel.x + root.sel.width, mouse.x))
-                const py = Math.max(root.sel.y,
-                                    Math.min(root.sel.y + root.sel.height, mouse.y))
-                root.drawX2 = px
-                root.drawY2 = py
-                if (root.drawKind === "pencil") {
-                    const pts = root.drawPts
-                    pts.push(px, py)
-                    root.drawPts = pts
-                }
-                shapeCanvas.repaint()
-                return
-            }
+        root.commitEditing()
+        root.closeMenus()
+        root.selected = -1
+        root.hinted = false
+        root.dragging = true
+        root.pressX = x
+        root.pressY = y
+        root.sel = Qt.rect(x, y, 0, 0)
+    }
 
-            /* 拖文本框：框跟着鼠标走（左上角取反方向那一侧，往上左拖也成立） */
-            if (root.boxDrag) {
-                root.resizeBox(root.boxIndex, root.boxX, root.boxY, mouse.x, mouse.y)
-                return
+    /* 移动 */
+    function pointerMove(x, y) {
+        /* 画形状：点都夹在选区里（出了界画布也裁掉，但别往模型里存野点） */
+        if (root.shapeDrag) {
+            const px = Math.max(root.sel.x, Math.min(root.sel.x + root.sel.width, x))
+            const py = Math.max(root.sel.y, Math.min(root.sel.y + root.sel.height, y))
+            root.drawX2 = px
+            root.drawY2 = py
+            if (root.drawKind === "pencil") {
+                const pts = root.drawPts
+                pts.push(px, py)
+                root.drawPts = pts
             }
-
-            if (!root.dragging)
-                return
-            const x = Math.min(root.pressX, mouse.x)
-            const y = Math.min(root.pressY, mouse.y)
-            root.sel = Qt.rect(x, y, Math.abs(mouse.x - root.pressX),
-                               Math.abs(mouse.y - root.pressY))
+            shapeCanvas.repaint()
+            return
         }
 
-        onReleased: (mouse) => {
-            /* 形状松手 = 落笔 */
-            if (root.shapeDrag) {
-                root.shapeDrag = false
-                root.commitShape()
-                return
+        /* 拖文本框：框跟着鼠标走（左上角取反方向那一侧，往上左拖也成立） */
+        if (root.boxDrag) {
+            root.resizeBox(root.boxIndex, root.boxX, root.boxY, x, y)
+            return
+        }
+
+        if (!root.dragging)
+            return
+        const rx = Math.min(root.pressX, x)
+        const ry = Math.min(root.pressY, y)
+        root.sel = Qt.rect(rx, ry, Math.abs(x - root.pressX), Math.abs(y - root.pressY))
+    }
+
+    /* 松开 */
+    function pointerUp() {
+        /* 形状松手 = 落笔 */
+        if (root.shapeDrag) {
+            root.shapeDrag = false
+            root.commitShape()
+            return
             }
 
             /* 松开左键 = 文本框落定，这会儿才把光标放进框里等打字 */
@@ -777,7 +903,6 @@ Rectangle {
             /* 点一下（几乎没拖）= 整屏，主流截图工具都是这个手感 */
             if (!root.selReady)
                 root.sel = Qt.rect(0, 0, root.width, root.height)
-        }
     }
 
     /* 选区边框（不吃鼠标：没有 MouseArea，事件照样穿到下面去） */
@@ -793,7 +918,7 @@ Rectangle {
     }
 
     /*
-     * 形状层（箭头 / 铅笔）。
+     * 形状层（箭头 / 铅笔 / 方框）。
      *
      * 用 Canvas 画：这两种都是"线的集合"，画布是立即模式，一条路径一笔带过，
      * 箭头头、铅笔折线都好写；拖动期间只要 requestPaint() 重画这一层，
@@ -1382,11 +1507,48 @@ Rectangle {
                     active: root.tool === "pencil"
                     onClicked: root.pickTool("pencil")
                 }
+                BarButton {
+                    label: "方框"
+                    active: root.tool === "rect"
+                    onClicked: root.pickTool("rect")
+                }
 
                 BarGap {}
 
                 /* 这两个键跟着工具走：形状工具下是线宽（标签也换成细/粗） */
                 BarButton { label: root.sizeDownLabel; onClicked: root.bumpSize(-2) }
+
+                /* 中间那个数字：点一下弹出一格格的候选值，直接挑（不用一直点 +） */
+                Rectangle {
+                    id: sizePicker
+
+                    implicitWidth: 34
+                    implicitHeight: 24
+                    radius: 4
+                    color: root.menuSize ? root.accent
+                                         : (pickerHit.containsMouse ? "#45484c" : "#1e2023")
+                    border.color: "#4b4d4f"
+                    border.width: 1
+
+                    Text {
+                        anchors.centerIn: parent
+                        text: root.sizeValue
+                        font.pixelSize: 12
+                        color: root.menuSize ? "#ffffff" : "#e8e8e8"
+                    }
+
+                    MouseArea {
+                        id: pickerHit
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: {
+                            root.menuColor = false
+                            root.menuSize = !root.menuSize
+                        }
+                    }
+                }
+
                 BarButton { label: root.sizeUpLabel; onClicked: root.bumpSize(2) }
 
                 BarGap {}
@@ -1396,12 +1558,23 @@ Rectangle {
                 ColorDot { dotColor: "#30d158" }
                 ColorDot { dotColor: "#ffffff" }
 
+                /* 更多颜色：弹一块调色板，最后一行还能开系统取色框 */
+                BarButton {
+                    id: moreColors
+                    label: "更多"
+                    active: root.menuColor
+                    onClicked: {
+                        root.menuSize = false
+                        root.menuColor = !root.menuColor
+                    }
+                }
+
                 BarGap {}
 
                 BarButton {
                     label: "撤销"
                     onClicked: root.undoLast()
-                    enabled: root.history.length > 0
+                    enabled: root.undoAvailable
                 }
 
                 BarGap {}
@@ -1417,9 +1590,130 @@ Rectangle {
 
             Text {
                 Layout.alignment: Qt.AlignHCenter
-                text: "T 文字 / A 箭头 / P 铅笔 · 左下角拖整框 · 左上旋转 · 右下缩放（Shift 整体放大）· Ctrl+Z 撤销"
+                text: "T 文字 / A 箭头 / P 铅笔 / R 方框 · 左下角拖整框 · 左上旋转 · 右下缩放（Shift 整体放大）· Ctrl+Z 撤销"
                 font.pixelSize: 10
                 color: "#6f737a"
+            }
+        }
+
+        /*
+         * 数字框弹出来的候选值。
+         *
+         * 做成"弹出的小面板"而不是下拉框：截图时鼠标就在附近，一格一格点
+         * 比在列表里拖快。位置贴着工具条上方（工具条翻到上方时改到下方），
+         * 并夹在窗口里。
+         */
+        Rectangle {
+            id: sizeMenu
+
+            visible: root.menuSize
+            width: sizeGrid.implicitWidth + 16
+            height: sizeGrid.implicitHeight + 16
+            x: Math.max(4, Math.min(bar.width - width - 4,
+                                    sizePicker.mapToItem(bar, 0, 0).x))
+            y: (bar.y - height - 6 >= 4) ? -height - 6 : bar.height + 6
+            radius: 6
+            color: "#2b2d30"
+            border.color: "#4b4d4f"
+            border.width: 1
+
+            Grid {
+                id: sizeGrid
+                anchors.centerIn: parent
+                columns: 5
+                spacing: 4
+
+                Repeater {
+                    model: root.sizePresets
+
+                    delegate: Rectangle {
+                        required property var modelData
+
+                        width: 30
+                        height: 22
+                        radius: 4
+                        color: modelData === root.sizeValue
+                               ? root.accent
+                               : (presetHit.containsMouse ? "#45484c" : "transparent")
+
+                        Text {
+                            anchors.centerIn: parent
+                            text: modelData
+                            font.pixelSize: 11
+                            color: modelData === root.sizeValue ? "#ffffff" : "#c8ccd1"
+                        }
+
+                        MouseArea {
+                            id: presetHit
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: {
+                                root.setSizeValue(modelData)
+                                root.menuSize = false
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        /* "更多颜色"那块调色板（8 列），最下面一行是系统取色框 */
+        Rectangle {
+            id: colorMenu
+
+            visible: root.menuColor
+            width: colorGrid.implicitWidth + 16
+            height: colorGrid.implicitHeight + customColor.height + 26
+            x: Math.max(4, Math.min(bar.width - width - 4,
+                                    moreColors.mapToItem(bar, 0, 0).x))
+            y: (bar.y - height - 6 >= 4) ? -height - 6 : bar.height + 6
+            radius: 6
+            color: "#2b2d30"
+            border.color: "#4b4d4f"
+            border.width: 1
+
+            Grid {
+                id: colorGrid
+                anchors.horizontalCenter: parent.horizontalCenter
+                anchors.top: parent.top
+                anchors.topMargin: 8
+                columns: 8
+                spacing: 4
+
+                Repeater {
+                    model: root.colorPalette
+
+                    delegate: Rectangle {
+                        required property var modelData
+
+                        width: 18
+                        height: 18
+                        radius: 4
+                        color: modelData
+                        border.width: modelData === root.annotColor.toString() ? 2 : 1
+                        border.color: modelData === root.annotColor.toString() ? "#ffffff" : "#4b4d4f"
+
+                        MouseArea {
+                            anchors.fill: parent
+                            anchors.margins: -2
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: {
+                                root.setColor(modelData)
+                                root.menuColor = false
+                            }
+                        }
+                    }
+                }
+            }
+
+            BarButton {
+                id: customColor
+                label: "自定义…"
+                anchors.horizontalCenter: parent.horizontalCenter
+                anchors.bottom: parent.bottom
+                anchors.bottomMargin: 8
+                onClicked: root.pickCustomColor()
             }
         }
     }
@@ -1455,14 +1749,15 @@ Rectangle {
      * 文字输入框拿到焦点之后就没有"当前项"了（打字全给 TextEdit），
      * 挂在根元素上的 Keys 收不到 Esc —— Shortcut 是窗口级的，不受焦点影响。
      *
-     * 两条都带 `enabled: root.editing < 0`：**打字的时候要让开**。回车在
-     * 文本框里是"换行"（TextEdit 自己处理），Esc 交给编辑框自己的
-     * Keys.onEscapePressed（见上面的 editor）—— 窗口级 Shortcut 优先级比
-     * 控件的按键处理高，不让开的话回车永远换不了行。
+     * 全部挂在 `enabled: root.shortcutsOn` 上（= 没在打字 && 没开着系统取色框）：
+     * **打字的时候要让开** —— 回车在文本框里是"换行"（TextEdit 自己处理），
+     * Esc 交给编辑框自己的 Keys.onEscapePressed；窗口级 Shortcut 的优先级比
+     * 控件的按键处理高，不让开的话回车永远换不了行。开着系统对话框时同理
+     * （见 pickingColor 的说明）。
      */
     Shortcut {
         sequence: "Escape"
-        enabled: root.editing < 0
+        enabled: root.shortcutsOn
         onActivated: {
             /* 一层一层往后退：先取消选中 -> 都没有才撤销整个截图 */
             if (root.selected >= 0)
@@ -1474,42 +1769,49 @@ Rectangle {
 
     Shortcut {
         sequence: "Return"
-        enabled: root.editing < 0
+        enabled: root.shortcutsOn
         onActivated: root.runAction("copy")
     }
 
     /* 撤销：打字的时候让开（那会儿 Ctrl+Z 归 TextEdit 自己用） */
     Shortcut {
         sequence: "Ctrl+Z"
-        enabled: root.editing < 0
+        enabled: root.shortcutsOn
         onActivated: root.undoLast()
     }
 
     Shortcut {
         sequence: "Enter"
-        enabled: root.editing < 0
+        enabled: root.shortcutsOn
         onActivated: root.runAction("copy")
     }
 
     /*
-     * 工具快捷键：T 文字 / A 箭头 / P 铅笔（再按一下同一个 = 收起工具）。
-     * 都要在打字的时候让开 —— 否则在文本框里敲 t、a、p 会被它们吃掉。
+     * 工具快捷键：T 文字 / A 箭头 / P 铅笔 / R 方框
+     * （再按一下同一个 = 收起工具）。都要在打字的时候让开 ——
+     * 否则在文本框里敲这几个字母会被它们吃掉。
      */
     Shortcut {
         sequence: "T"
-        enabled: root.editing < 0
+        enabled: root.shortcutsOn
         onActivated: root.pickTool("text")
     }
 
     Shortcut {
         sequence: "A"
-        enabled: root.editing < 0
+        enabled: root.shortcutsOn
         onActivated: root.pickTool("arrow")
     }
 
     Shortcut {
         sequence: "P"
-        enabled: root.editing < 0
+        enabled: root.shortcutsOn
         onActivated: root.pickTool("pencil")
+    }
+
+    Shortcut {
+        sequence: "R"
+        enabled: root.shortcutsOn
+        onActivated: root.pickTool("rect")
     }
 }

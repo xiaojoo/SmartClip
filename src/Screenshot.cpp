@@ -3,6 +3,7 @@
 #include <QAction>
 #include <QApplication>
 #include <QClipboard>
+#include <QColorDialog>
 #include <QCursor>
 #include <QDateTime>
 #include <QDir>
@@ -353,6 +354,18 @@ void Screenshot::showOverlay() {
 }
 
 void Screenshot::endCapture() {
+    /*
+     * 取色框 / 保存框开着的时候**不许**关选区窗口。
+     *
+     * 那两个用的都是模态对话框里的嵌套事件循环，而窗口级快捷键照样能漏进来
+     * （实测：取色框开着按 Esc，选区窗口的 Esc Shortcut 先接住了）——
+     * 一关就把对话框的父窗口拆了，可对话框还在 exec() 里，于是直接 abort，
+     * 弹出"Microsoft Visual C++ Runtime Library"错误框。等对话框自己收尾
+     * （用户确认或取消）之后才允许关 —— QML 那侧同时也把快捷键让开。
+     */
+    if (m_modalOpen)
+        return;
+
     if (m_overlay) {
         QWidget *overlay = m_overlay;
         /* 先断开引用：close() 之后它随时会被删，别的地方不要再伸手 */
@@ -412,7 +425,8 @@ QImage Screenshot::compose(const QRectF &sel, const QVariantList &texts) const {
          * 箭头 / 铅笔：两种都用"屏幕坐标 -> 裁剪切块坐标"这同一套换算。
          * 线宽、箭头头部尺寸都乘 dpr（和字号一样，高 DPI 下才不会细成一条线）。
          */
-        if (kind == QLatin1String("arrow") || kind == QLatin1String("pencil")) {
+        if (kind == QLatin1String("arrow") || kind == QLatin1String("pencil")
+            || kind == QLatin1String("rect")) {
             QColor color(item.value(QStringLiteral("color")).toString());
             if (!color.isValid())
                 color = QColor(0xff, 0x3b, 0x30);
@@ -427,7 +441,18 @@ QImage Screenshot::compose(const QRectF &sel, const QVariantList &texts) const {
                 return QPointF((sx - clipped.x()) * m_dpr, (sy - clipped.y()) * m_dpr);
             };
 
-            if (kind == QLatin1String("arrow")) {
+            if (kind == QLatin1String("rect")) {
+                /*
+                 * 方框：只有描边（不填充 —— 填了就把底下的内容挡住了）。
+                 * 两个角点可能哪个大哪个小，normalized() 抹平。
+                 */
+                const QPointF a = toLocal(item.value(QStringLiteral("x1")).toDouble(),
+                                          item.value(QStringLiteral("y1")).toDouble());
+                const QPointF b = toLocal(item.value(QStringLiteral("x2")).toDouble(),
+                                          item.value(QStringLiteral("y2")).toDouble());
+                painter.setBrush(Qt::NoBrush);
+                painter.drawRect(QRectF(a, b).normalized());
+            } else if (kind == QLatin1String("arrow")) {
                 const QPointF a = toLocal(item.value(QStringLiteral("x1")).toDouble(),
                                           item.value(QStringLiteral("y1")).toDouble());
                 const QPointF b = toLocal(item.value(QStringLiteral("x2")).toDouble(),
@@ -540,10 +565,13 @@ bool Screenshot::saveResultAs(const QRectF &sel, const QVariantList &texts) {
     if (dir.isEmpty() || !QDir(dir).exists())
         dir = QStandardPaths::writableLocation(QStandardPaths::PicturesLocation);
 
+    /* 同样是嵌套事件循环，期间不许关选区窗口 —— 见 endCapture 的说明 */
+    m_modalOpen = true;
     const QString path = QFileDialog::getSaveFileName(
         m_overlay ? m_overlay : m_host, QStringLiteral("保存截图"),
         dir + QDir::separator() + defaultFileName(),
         QStringLiteral("PNG 图片 (*.png);;JPEG 图片 (*.jpg);;所有文件 (*.*)"));
+    m_modalOpen = false;
     if (path.isEmpty())
         return false;
 
@@ -554,6 +582,26 @@ bool Screenshot::saveResultAs(const QRectF &sel, const QVariantList &texts) {
     }
     m_saveDir = QFileInfo(path).absolutePath();
     return true;
+}
+
+QString Screenshot::pickColor(const QString &current) {
+    /*
+     * "更多颜色 -> 自定义…"：开系统取色框。
+     *
+     * 父窗口用选区窗口：它铺满整屏又是置顶的，取色框挂在它上面才不会被盖住
+     * （和保存对话框同一个道理，实测那边是好的）。取消返回空串，QML 那边
+     * 保持原色不动。
+     */
+    QColor start(current);
+    if (!start.isValid())
+        start = QColor(0xff, 0x3b, 0x30);
+
+    /* 嵌套事件循环期间不许关选区窗口，见 endCapture 的说明 */
+    m_modalOpen = true;
+    const QColor picked = QColorDialog::getColor(start, m_overlay ? m_overlay : m_host,
+                                                 QStringLiteral("选择标注颜色"));
+    m_modalOpen = false;
+    return picked.isValid() ? picked.name() : QString();
 }
 
 void Screenshot::pinResult(const QRectF &sel, const QVariantList &texts) {
