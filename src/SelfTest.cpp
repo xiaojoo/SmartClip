@@ -1971,6 +1971,47 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
                       && folderActs.value(2).startsWith(QStringLiteral("folderReveal:")),
                   QStringLiteral("文件夹右键菜单三条（新建 / 刷新 / 在文件夹中显示）"),
                   folderActs.join(QLatin1Char('/')));
+
+            /*
+             * 右键菜单指着的那一行要有灰黑底。
+             *
+             * 蓝底（rowHighlight）是"这份文件开在编辑器里"，和"菜单要动哪一行"
+             * 是两件事：右键一个没打开的文件时，光看菜单看不出动的是谁，所以
+             * 那一行单独画一层灰黑底。这里走的就是界面上那条路
+             * （openTreeRowMenuFor -> openTreeRowMenu），量的也是委托自己
+             * 报上来的 rowContext。
+             */
+            QVariant ctxPath;
+            QMetaObject::invokeMethod(qmlRoot, "openTreeRowMenuFor", Q_RETURN_ARG(QVariant, ctxPath),
+                                      Q_ARG(QVariant, QVariant(QStringLiteral("file"))));
+            settle();
+            {
+                const QVariantMap s = treeState();
+                const QVariantMap hl = s.value(QStringLiteral("highlighted")).toMap();
+                check(!ctxPath.toString().isEmpty()
+                          && s.value(QStringLiteral("contextPath")).toString() == ctxPath.toString(),
+                      QStringLiteral("右键：菜单指着的那一行记下来了"),
+                      QStringLiteral("菜单行 %1 / 树上报 %2")
+                          .arg(ctxPath.toString())
+                          .arg(s.value(QStringLiteral("contextPath")).toString()));
+                check(hl.value(QStringLiteral("context")).toInt() == 1,
+                      QStringLiteral("右键：那一行画上了灰黑底"),
+                      QStringLiteral("带着灰黑底的行 %1")
+                          .arg(hl.value(QStringLiteral("context")).toInt()));
+            }
+
+            QMetaObject::invokeMethod(qmlRoot, "closeMenu");
+            settle();
+            {
+                const QVariantMap s = treeState();
+                const QVariantMap hl = s.value(QStringLiteral("highlighted")).toMap();
+                check(s.value(QStringLiteral("contextPath")).toString().isEmpty()
+                          && hl.value(QStringLiteral("context")).toInt() == 0,
+                      QStringLiteral("右键：菜单收起后灰黑底也撤掉"),
+                      QStringLiteral("菜单行 %1 / 灰黑底 %2")
+                          .arg(s.value(QStringLiteral("contextPath")).toString())
+                          .arg(hl.value(QStringLiteral("context")).toInt()));
+            }
         }
 
         /*
@@ -1997,6 +2038,53 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
                   QStringLiteral("面板 %1 / 元数据 %2")
                       .arg(panel.value(QStringLiteral("storageEntries")).toInt())
                       .arg(store->entryCount()));
+        }
+        QMetaObject::invokeMethod(qmlRoot, "closeSettings");
+        settle();
+
+        /*
+         * 设置面板这块窗口本身的两条要求。
+         *
+         *  1) 点面板外面的空白处不许自己收起来 —— 面板里那几个按钮弹的是
+         *     **系统**文件对话框，用户去点那个对话框，按"点外面就收"的老规矩
+         *     面板会先一步没掉（而它本该一直开着）。关它只能靠标题栏的 ✕ / Esc。
+         *  2) 会话框出现时面板得让开一条路：这块窗口是 Qt 按 Popup.Window 建的，
+         *     flags 里带着 WindowStaysOnTopHint（下面报出来那一行），Windows 上
+         *     非置顶窗口永远盖不住置顶窗口，所以对话框只能出现在面板下面 ——
+         *     见 Main.qml 的 withSettingsPanelAway。
+         */
+        dispatch(QStringLiteral("storage"));
+        settle();
+        {
+            QWindow *panelWin = nullptr;
+            for (QWindow *w : QGuiApplication::topLevelWindows()) {
+                if (w->isVisible() && w->width() > 700 && w->width() < 900 && w->height() > 400)
+                    panelWin = w;
+            }
+            check(panelWin != nullptr, QStringLiteral("设置面板：那块窗口开出来了"));
+            if (panelWin) {
+                /* 只报一声不断言：这是 Qt 建窗口的规矩，不是我们的设定 */
+                out() << "        （设置面板窗口 flags = 0x"
+                      << QString::number(int(panelWin->flags()), 16) << "）" << Qt::endl;
+            }
+            check(!uiState().value(QStringLiteral("settingsClosesOnOutside")).toBool(),
+                  QStringLiteral("设置面板：点面板外面的空白处不会自己收起来"));
+
+            /*
+             * 面板里那几个按钮要弹系统文件夹选择框 —— 弹之前面板必须先让开，
+             * 弹完还要原样回来（栏目、位置都不变）。
+             */
+            QVariant away;
+            QMetaObject::invokeMethod(qmlRoot, "probeSettingsAway", Q_RETURN_ARG(QVariant, away));
+            settle();
+            check(away.toString() == QLatin1String("away"),
+                  QStringLiteral("设置面板：弹系统对话框之前自己让开了"),
+                  away.toString());
+            check(uiState().value(QStringLiteral("settingsOpened")).toBool()
+                      && uiState().value(QStringLiteral("settingsSection")).toString()
+                             == QLatin1String("storage"),
+                  QStringLiteral("设置面板：对话框关掉之后原栏目放回来"),
+                  uiState().value(QStringLiteral("settingsSection")).toString());
         }
         QMetaObject::invokeMethod(qmlRoot, "closeSettings");
         settle();

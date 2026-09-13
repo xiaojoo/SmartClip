@@ -434,9 +434,34 @@ Rectangle {
             Cmd.revealInExplorer(path)
     }
 
+    /*
+     * 弹系统对话框之前，先把设置面板收起来，弹完原地放回来。
+     *
+     * 面板是 Popup.Window —— Qt 把这块窗口建成**置顶**的（实测 flags 里带着
+     * WindowStaysOnTopHint），而 Windows 的规矩是非置顶窗口永远盖不住置顶窗口。
+     * 所以面板里点"导入文件夹…"/"选择保存位置…"时，系统的文件夹选择框只会
+     * 出现在面板下面（用户截图报的就是这个，试过在 C++ 里给对话框换 transient
+     * parent、临时摘掉面板的置顶，都压不过 Qt 建这块窗口的规矩）。
+     *
+     * 与其跟窗口管理器较劲，不如让面板先让开：对话框一关立刻按原栏目放回来，
+     * 位置、状态都不变 —— 用户看到的是"面板换成了文件选择框，选完又回来了"。
+     */
+    function withSettingsPanelAway(fn) {
+        var wasOpen = settingsPanel.opened
+        var section = settingsPanel.section
+        if (wasOpen)
+            settingsPanel.close()
+        var result = fn()
+        if (wasOpen)
+            settingsPanel.show(section)
+        return result
+    }
+
     /* 导入一个外部文件夹：只读地把它里面的 md / txt 挂到左树上 */
     function importFolder() {
-        var dir = Cmd.chooseFolderDialog("导入文件夹", Store.rootPath)
+        var dir = withSettingsPanelAway(function () {
+            return Cmd.chooseFolderDialog("导入文件夹", Store.rootPath)
+        })
         if (dir === "")
             return
         if (!Store.addImportedFolder(dir)) {
@@ -453,11 +478,23 @@ Rectangle {
 
     /* 换剪贴板文件的保存位置（设置面板和"更多"菜单都有入口） */
     function chooseStorageRoot() {
-        var dir = Cmd.chooseFolderDialog("选择剪贴板保存位置", Store.rootPath)
+        var dir = withSettingsPanelAway(function () {
+            return Cmd.chooseFolderDialog("选择剪贴板保存位置", Store.rootPath)
+        })
         if (dir === "")
             return
         if (!Store.setRootPath(dir))
             Cmd.alert("设置失败", "这个目录用不了：\n" + dir)
+    }
+
+    /*
+     * 自检用：走一遍那层"让开再回来"的壳，回来时告诉自检"让开期间面板是不是
+     * 真的收起来了"（见 withSettingsPanelAway）。
+     */
+    function probeSettingsAway() {
+        return withSettingsPanelAway(function () {
+            return settingsPanel.opened ? "still-open" : "away"
+        })
     }
 
     /* ------------------------------------------------------------------
@@ -857,6 +894,8 @@ Rectangle {
                  currentPath: currentTreePath(),
                  locateEnabled: canLocateCurrent(),
                  selectedPath: selectedPath,
+                 /* 右键菜单正指着哪一行（灰黑底那一条） */
+                 contextPath: folderTree.contextPath,
                  /* 定位的最后一步（滚进可视区）有没有真的生效 */
                  locatedVisible: folderTree.rowVisible(selectedPath),
                  /* 亮着蓝底的行：文件夹必须恒为 0，文件最多 1（见 FolderTree.highlightCounts） */
@@ -996,6 +1035,37 @@ Rectangle {
 
     function showAbout() {
         settingsPanel.show("about")
+    }
+
+    /*
+     * 左树一行上按右键：文件给"打开 / 重命名 / 删除 / 在文件夹中显示"，
+     * 文件夹给"新建 / 刷新 / 在文件夹中显示"（导入的目录多一条移除）。
+     *
+     * 顺手把"菜单指着哪一行"记到树上（folderTree.contextPath）—— 那一行会画一层
+     * 灰黑底，不然右键一个没打开的文件时，光看菜单看不出动的是哪一行。
+     * 菜单收起时清掉（见下面 ddMenu 的 onClosed）。
+     */
+    function openTreeRowMenu(row, x, y) {
+        if (!row)
+            return
+        folderTree.contextPath = row.path !== undefined ? row.path : ""
+        var items = (row.kind === "file") ? Menus.fileContextMenu(row)
+                                          : Menus.folderContextMenu(row)
+        ddMenu.openAtPoint(null, x, y, items)
+    }
+
+    /*
+     * 自检用：像真的右键那样，为某一类行（"file" / "folder"）弹出右键菜单，
+     * 返回那一行的路径。和界面走的是同一个 openTreeRowMenu。
+     */
+    function openTreeRowMenuFor(kind) {
+        for (var i = 0; i < treeRows.length; ++i) {
+            if (treeRows[i].kind !== kind)
+                continue
+            openTreeRowMenu(treeRows[i], 120, 200)
+            return treeRows[i].path !== undefined ? String(treeRows[i].path) : ""
+        }
+        return ""
     }
 
     /*
@@ -1272,6 +1342,8 @@ Rectangle {
             /* 设置面板（存储那一栏的绑定会在打开时才算出来，自检据此确认它没报错） */
             settingsOpened: settingsPanel.opened,
             settingsSection: settingsPanel.section,
+            /* 点面板外面的空白处还会不会把它收掉（见 SettingsPanel.closePolicy） */
+            settingsClosesOnOutside: settingsPanel.closesOnOutsidePress,
             storageRoot: Store.rootPath,
             storageFiles: Store.fileCount,
             storageEntries: Store.entryCount,
@@ -1543,6 +1615,11 @@ Rectangle {
         id: ddMenu
         parent: window
         onSelected: (act) => window.dispatch(act)
+        /*
+         * 菜单一收，左树那一行的"右键底色"也跟着撤（见 openTreeRowMenu）。
+         * 别的菜单（tab / 编辑区 / 滚动条）收起时这里清的是个空串，无害。
+         */
+        onClosed: folderTree.contextPath = ""
     }
 
     /*
@@ -1903,12 +1980,7 @@ Rectangle {
                  * 文件夹给"新建 / 刷新 / 在文件夹中显示"（导入的目录多一条移除）。
                  * 坐标由委托换算成场景坐标（见 TreeDelegate 的 onClicked）。
                  */
-                onRowContextMenuRequested: (row, x, y) => {
-                    var items = (row.kind === "file")
-                                ? Menus.fileContextMenu(row)
-                                : Menus.folderContextMenu(row)
-                    ddMenu.openAtPoint(null, x, y, items)
-                }
+                onRowContextMenuRequested: (row, x, y) => window.openTreeRowMenu(row, x, y)
 
                 /* 标题栏那排按钮：动作全在 Main 这边（数据都在这儿） */
                 onNewEntryRequested: window.newEntry()

@@ -20,11 +20,21 @@ Rectangle {
 
     required property var modelData
     property bool rowHighlight: false
+    /*
+     * 右键菜单正指着这一行（见 FolderTree.contextPath）。
+     *
+     * 和 rowHighlight（蓝底 = "这份文件开在编辑器里"）是两件事，所以用两个颜色：
+     * 蓝底是"打开的是它"，这块灰黑底是"菜单要动的是它"。右键一个没打开的
+     * 文件时，光看菜单看不出动的是哪一行 —— 用户要的就是这一眼。
+     */
+    property bool rowContext: false
     signal rowClicked()
     /* 右键：把"哪一行"和鼠标坐标报给 Main，由它弹菜单（见 FolderTree） */
     signal rowContextMenu(real x, real y)
 
     readonly property color selColor:    "#214283"
+    /* 右键那一行的底色：灰黑，比面板底色（#1e1f22）亮一档就够，不抢蓝底的风头 */
+    readonly property color contextColor: "#34373b"
     readonly property color textBright:  "#e8e8e8"
     readonly property color textColor:   "#bbbbbb"
     readonly property color textMuted:   "#7d7d7d"
@@ -54,8 +64,9 @@ Rectangle {
      * 只有当前选中的文件有蓝色高亮，鼠标悬停不再变色。
      *
      * 文件夹行一律不亮：一级菜单是容器，点它只是展开 / 收起。
+     * 右键菜单指着的那一行另给一层灰黑底（文件夹也给 —— 菜单对文件夹也有话可说）。
      */
-    color: rowHighlight ? selColor : "transparent"
+    color: rowHighlight ? selColor : (rowContext ? contextColor : "transparent")
 
     /*
      * 行内元素之间的间隙。

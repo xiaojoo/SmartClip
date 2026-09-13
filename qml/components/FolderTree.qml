@@ -24,6 +24,16 @@ Rectangle {
      */
     property string selectedPath: ""
 
+    /*
+     * 右键菜单正指着哪一行（路径；空串 = 没有）。
+     *
+     * Main 弹出那一份行菜单时写进来、菜单收起时清掉（见 Main.qml 的
+     * openTreeRowMenu / ddMenu.onClosed）。委托据此给那一行画一层灰黑底
+     * （见 TreeDelegate.rowContext）—— 右键一个没打开的文件时，光看菜单
+     * 看不出动的是哪一行。
+     */
+    property string contextPath: ""
+
     signal folderClicked(string key)
     signal fileClicked(var row)
     /* 行上按右键：Main 那边据此弹"打开 / 重命名 / 删除"那一份菜单 */
@@ -115,16 +125,21 @@ Rectangle {
     function highlightCounts() {
         var folderRows = 0
         var fileRows = 0
+        var contextRows = 0
         for (var i = 0; i < rows.length; ++i) {
             var it = view.itemAtIndex(i)
-            if (!it || it.rowHighlight !== true)
+            if (!it)
+                continue
+            if (it.rowContext === true)
+                ++contextRows
+            if (it.rowHighlight !== true)
                 continue
             if (rows[i].kind === "folder")
                 ++folderRows
             else
                 ++fileRows
         }
-        return { folders: folderRows, files: fileRows }
+        return { folders: folderRows, files: fileRows, context: contextRows }
     }
 
     readonly property color borderColor: "#43454a"
@@ -327,6 +342,12 @@ Rectangle {
                  */
                 rowHighlight: modelData.kind === "file" && root.selectedPath !== ""
                               && modelData.path === root.selectedPath
+
+                /*
+                 * 右键菜单指着的那一行：文件夹也给（菜单对文件夹也有条目）。
+                 * Main 弹菜单时写进 contextPath，菜单收起时清掉。
+                 */
+                rowContext: root.contextPath !== "" && modelData.path === root.contextPath
 
                 onRowClicked: modelData.kind === "folder"
                               ? root.folderClicked(modelData.key)

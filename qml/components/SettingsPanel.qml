@@ -209,7 +209,29 @@ Popup {
     modal: false
     focus: true
     popupType: Popup.Window
-    closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+    /*
+     * 只认"主动关"：标题栏那个 ✕，还有 Esc。
+     *
+     * 原来带着 CloseOnPressOutside —— 点面板外面的空白处就收起来了。而面板里
+     * 那几个按钮（选择保存位置… / 导入文件夹…）弹的是**系统文件对话框**，
+     * 用户去点那个对话框，就是在点面板外面，面板先一步自己收掉，看着像
+     * "打开文件夹选择框把设置面板弄没了"。
+     *
+     * 另一件事也靠这个改：CloseOnPressOutside 会让 Qt 把这块窗口建成
+     * Qt::Popup（Windows 上位这类窗口是**置顶**的），所以那个系统文件对话框
+     * 一出来就被压在面板下面（用户截图报的正是这个）。去掉之后它是普通
+     * Qt::Tool 窗口，对话框正常盖在它上面。
+     */
+    closePolicy: Popup.CloseOnEscape
+
+    /*
+     * 自检用：这条策略里还带着"点外面就收"没有。
+     *
+     * 在 QML 这侧按 Popup 自己的枚举判，不拿到 C++ 去手写那个位掩码 ——
+     * 同一个枚举两边各记一份，迟早对不上。
+     */
+    readonly property bool closesOnOutsidePress:
+        (closePolicy & Popup.CloseOnPressOutside) !== 0
 
     onClosed: {
         capturing = ""
