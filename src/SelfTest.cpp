@@ -105,7 +105,8 @@ bool SelfTest::enabled(int argc, char **argv) {
     return false;
 }
 
-int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, TrayIcon *tray, EditorController *cmd) {
+int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, TrayIcon *tray,
+                  EditorController *cmd, StickyNotes *notes) {
     EditorViewItem *view = EditorViewItem::instance();
 
     /*
@@ -3659,6 +3660,20 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
         view->closeDocument(view->currentIndex());
         view->setWrapEnabled(oldWrap);
         settle();
+    }
+
+    /*
+     * 便签那一节放在**最后**，而且整段在另一个文件里（src/SelfTestNotes.cpp）。
+     *
+     * 放最后是有意的：那一段会新建 / 删除便签窗口，也会短暂地开关便签菜单，
+     * 摆在前面会给编辑区 / 截图那几节的时序添乱。单独成文件则是因为它自己也是
+     * 一个入口（`--note-test`，不碰编辑区 / 截图 / 设置面板那些老毛病）。
+     */
+    if (notes) {
+        SelfTest::runNotes(store, tray, cmd, notes);
+        /* 通过 / 失败都并进来：只并失败的话，总数上会少了便签那几十项 */
+        gPassed += SelfTest::notesPassed();
+        gFailed += SelfTest::notesFailed();
     }
 
     out() << Qt::endl

@@ -107,6 +107,18 @@ function fileMenu(ov) {
          * Ctrl+Alt+A —— 国内截图工具的通用键位，改键在设置面板里。
          */
         { label: "截图…", act: "shot", shortcut: "Ctrl+Alt+A", icon: "image" },
+        /*
+         * 便签（桌面上的小块文本，见 src/StickyNotes.h）。
+         *
+         * 放在截图旁边：两者是一类东西 —— "把一小块东西从程序里拿出来钉在
+         * 桌面上"，而且都能在收进托盘之后用（截图 Ctrl+Alt+A、新建便签
+         * Ctrl+Alt+N 都是系统级热键）。排列那一条是把摆着的便签一键排成网格，
+         * 没有全局键位（它只在主窗口里用得上）。
+         */
+        { label: "新建便签", act: "note", shortcut: "Ctrl+Alt+N", icon: "note" },
+        { label: "排列便签", act: "notesArrange", icon: "grid" },
+        { label: "显示全部便签", act: "notesShowAll", icon: "note" },
+        { label: "收起全部便签", act: "notesHideAll", icon: "note" },
         { separator: true },
         { label: "保存", act: "save", shortcut: "Ctrl+S", icon: "save" },
         { label: "另存为…", act: "saveAs", shortcut: "Ctrl+Shift+S", icon: "save-as" },

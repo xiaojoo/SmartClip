@@ -4,6 +4,8 @@
 #include "EditorViewItem.h"
 #include "Screenshot.h"
 #include "SelfTest.h"
+#include "StickyNotes.h"
+#include "StickyNoteStore.h"
 #include "TrayIcon.h"
 #include "WindowHelper.h"
 
@@ -147,6 +149,17 @@ int main(int argc, char *argv[]) {
     Screenshot screenshot;
 
     /*
+     * 便签（见 src/StickyNotes.h）。
+     *
+     * **必须声明在 host 之前**，和 Screenshot 同一个理由：便签窗口的
+     * QQuickWidget 用的是 quick->engine()（单例、图片提供者都挂在那个引擎上），
+     * 而引擎是 host 的子对象 —— 局部对象按声明的反序析构，声明在前才活得比
+     * 引擎久。引擎这时候还没建，所以先构造（那时它登记不了图片提供者，
+     * 见 StickyNotes::attachEngine），quick 建好之后再补一次。
+     */
+    StickyNotes notes;
+
+    /*
      * 主窗口用 QWidget 承载，而不是 QQmlApplicationEngine 直接开 QQuickWindow。
      *
      * 为什么必须这样（这是"编辑器真正嵌进去"能否成立的前提）：
@@ -185,6 +198,12 @@ int main(int argc, char *argv[]) {
      */
     EditorViewItem::setGlobalHostWidget(&host);
     EditorViewItem::setGlobalStore(&store);
+
+    /*
+     * 便签的单例先登记（缩略图那个图片提供者要等主界面加载完再挂，
+     * 见下面 setSource 之后那一段）。
+     */
+    qmlRegisterSingletonInstance("SmartClip.Globals", 1, 0, "Notes", &notes);
 
     /*
      * 截图：主窗口（藏 / 恢复、对话框父窗口）+ QML 引擎（选区窗口那个
@@ -237,6 +256,16 @@ int main(int argc, char *argv[]) {
     }
 
     /*
+     * 便签要主引擎：缩略图的图片提供者（image://stickythumb/…）挂在它上面，
+     * 而且每块便签窗口里的 QQuickWidget 也要用它（不然会各自 new 一个引擎，
+     * 既 import 不到 SmartClip.Globals，也取不到缩略图）。
+     *
+     * 必须赶在 notes.start() 之前 —— 那一步会按上次的清单把便签窗口建出来。
+     * addImageProvider 对同名是替换语义，重复挂也只会留一份。
+     */
+    notes.attachEngine(quick->engine());
+
+    /*
      * 预建并预热选区窗口（藏着）：抓屏那一刻只剩"换图 + show"。
      *
      * 必须放在 qmlRegisterSingletonInstance 之后 —— 选区窗口的 QML 要
@@ -246,8 +275,30 @@ int main(int argc, char *argv[]) {
      */
     screenshot.prewarm();
 
-    host.resize(1460, 900);
-    host.show();
+    /*
+     * 便签：恢复上次摆着的那几条。
+     *
+     * 放在这份单例注册之后 —— 便签窗口的 QML 要 `import SmartClip.Globals`
+     * （排列便签那个按钮调的是 Notes.arrangeAll），模块还没装就建窗口会报
+     * "module not installed"（和上面选区窗口预热同一个坑）。
+     */
+    notes.start();
+
+    /*
+     * 便签专用自检（`SmartClip.exe --note-test`，见 src/SelfTest.h 的 runNotes）。
+     *
+     * 和下面那套全量自检分开：这一条**只测便签**，别的功能一律不碰。
+     * 全量自检里截图 / 设置面板那几节有自己的时序问题（一轮跑下来会偶发飘红，
+     * 和便签无关），只改便签的时候没必要每次都把那些跑一遍 —— 而且那些检查会
+     * 开选区窗口 / 弹卡片，界面上看着乱跳。
+     *
+     * 这一条也不显示主窗口：省得跟着便签一起晃。
+     */
+    const bool noteTest = SelfTest::noteTestEnabled(argc, argv);
+    if (!noteTest) {
+        host.resize(1460, 900);
+        host.show();
+    }
 
     /*
      * 圆角遮罩要在原生窗口真正创建之后再落一次。
@@ -260,14 +311,29 @@ int main(int argc, char *argv[]) {
     QTimer::singleShot(0, &app, [&windowHelper]() { windowHelper.refreshMask(); });
 
     /*
-     * 托盘图标（任务栏右下角那个）：右键菜单里有"截图…"，
-     * 主窗口被压着 / 缩在一边时不用先叫它出来就能截图。
+     * 托盘图标（任务栏右下角那个）：右键菜单里有"截图…"和便签那三条，
+     * 主窗口被压着 / 缩在一边时不用先叫它出来就能截图、就能开一块便签。
      * 具体在那个类里，见 src/TrayIcon.h。
      *
      * 建在自检分支**之前**：自检要验那个菜单（见 src/SelfTest.cpp），
      * 拿不到对象就验不了。自检模式下它只是短暂亮一下，无害。
      */
-    TrayIcon tray(&host, &screenshot, &editorController, &app);
+    TrayIcon tray(&host, &screenshot, &editorController, &notes, &app);
+
+    if (noteTest) {
+        int result = -1;
+        QTimer::singleShot(600, &app, [&]() {
+            result = SelfTest::runNotes(&store, &tray, &editorController, &notes);
+            app.quit();
+        });
+        QTimer::singleShot(40000, &app, []() {
+            qWarning("便签自检超时，强制退出");
+            ::exit(9);
+        });
+        app.exec();
+        notes.shutdown();
+        return result < 0 ? 9 : result;
+    }
 
     /*
      * 自检模式（`SmartClip.exe --self-test`，见 src/SelfTest.h）。
@@ -280,7 +346,8 @@ int main(int argc, char *argv[]) {
         int result = -1;
         /* 给 QML 引擎一点时间把原生子窗口（编辑区）真正建起来再跑检查 */
         QTimer::singleShot(600, &app, [&]() {
-            result = SelfTest::run(quick->rootObject(), &store, &screenshot, &tray, &editorController);
+            result = SelfTest::run(quick->rootObject(), &store, &screenshot, &tray,
+                                   &editorController, &notes);
             app.quit();
         });
 
@@ -294,8 +361,17 @@ int main(int argc, char *argv[]) {
         });
 
         app.exec();
+        /*
+         * 收尾：便签的缩略图有在飞的网络请求，必须在事件循环还活着的时候
+         * 掐掉（见 StickyNotes::shutdown）—— 留到析构那会儿，Qt 网络层会在
+         * 进程退出时踩空，退出码变成 0xC0000005（自检全过也照样崩）。
+         * 正常启动那条路同理，见下面 app.exec() 之后那一行。
+         */
+        notes.shutdown();
         return result < 0 ? 9 : result;
     }
 
-    return app.exec();
+    const int code = app.exec();
+    notes.shutdown();
+    return code;
 }

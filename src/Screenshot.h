@@ -123,6 +123,9 @@ public:
      */
     Q_INVOKABLE void cancelCapture();
 
+    /* 临时诊断：给选区界面的 QML 用的日志口（和 Screenshot::eventFilter 那份同一个文件） */
+    Q_INVOKABLE void uiTrace(const QString &what);
+
     /*
      * 三条出口。sel 是选区（屏幕坐标，逻辑像素），texts 是标注：
      *   [ { x, y, text, size, color } ]，x/y 也是屏幕坐标。

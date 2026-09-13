@@ -5,6 +5,7 @@ class ClipboardStore;
 class Screenshot;
 class TrayIcon;
 class EditorController;
+class StickyNotes;
 
 /*
  * 自检模式：`SmartClip.exe --self-test`
@@ -18,7 +19,8 @@ class EditorController;
  *
  * 覆盖：打开 / 编码识别 / 换行符 / 查找 / 全部高亮 / 全部替换 / 撤销 /
  *       注释切换 / 另存为 / BOM / 多标签切换关闭 / 剪贴板条目载入 /
- *       写入失败上报 / 截图（选区 -> 加文字 -> 合成）/ 托盘菜单里的截图。
+ *       写入失败上报 / 截图（选区 -> 加文字 -> 合成）/ 托盘菜单里的截图 /
+ *       便签（新建 -> 换底色 -> 链接缩略图 -> 落盘 -> 一键排列 -> 收进托盘也能用）。
  *
  * 返回 0 表示全部通过（main.cpp 据此作为进程退出码）。
  */
@@ -26,8 +28,35 @@ namespace SelfTest {
 
 bool enabled(int argc, char **argv);
 
+/* `--note-test`：只跑便签那一节（见 runNotes） */
+bool noteTestEnabled(int argc, char **argv);
+
 /* qmlRoot 是 Main.qml 的根对象；run() 通过它的 dispatch() 发命令 */
 int run(QObject *qmlRoot, ClipboardStore *store, Screenshot *screenshot = nullptr,
-        TrayIcon *tray = nullptr, EditorController *cmd = nullptr);
+        TrayIcon *tray = nullptr, EditorController *cmd = nullptr,
+        StickyNotes *notes = nullptr);
+
+/*
+ * 便签专用自检：**只测便签**，别的功能一律不碰。
+ *
+ * 为什么单独留一个入口：全量自检里截图 / 设置面板那几节有自己的时序问题
+ * （偶发飘红，和便签无关），改便签的时候没必要每次都把它们跑一遍 —— 那些检查
+ * 还会开选区窗口 / 弹卡片，界面上看着乱跳。这一条不显示主窗口、不开选区窗口，
+ * 只建便签、量便签。
+ *
+ * store / tray / cmd 可以为空（对应的那几条检查会跳过），notes 必须有。
+ * 返回失败项数（0 = 全过）。
+ */
+int runNotes(ClipboardStore *store, TrayIcon *tray = nullptr,
+             EditorController *cmd = nullptr, StickyNotes *notes = nullptr);
+
+/*
+ * 便签自检跑完之后，它那 80 多项里通过了几项、失败了几项。
+ *
+ * 全量自检（run）要把这两笔并进自己的总计里 —— 只并失败数的话，总数上会显得
+ * "便签那几十项凭空没了"（实测：便签 82 项全过，总数却还是 405）。
+ */
+int notesPassed();
+int notesFailed();
 
 }  // namespace SelfTest

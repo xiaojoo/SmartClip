@@ -716,6 +716,8 @@ Rectangle {
      */
     function settleOverlay() {
         root.overlayReady = true
+        /* 临时诊断（和 C++ 那份同一个日志文件）：边框什么时候被放行 */
+        Shot.uiTrace("settleOverlay(): border allowed")
     }
 
     /* ---- 自检入口（见 src/SelfTest.cpp），和界面上那几下是同一批函数 ---- */    function testSelect(x, y, w, h) {
@@ -1089,6 +1091,8 @@ Rectangle {
         border.color: root.accent
         border.width: 1
         visible: root.selReady && root.overlayReady
+        /* 临时诊断：边框真的被画出来没有 */
+        onVisibleChanged: Shot.uiTrace("selBorder.visible=" + (visible ? 1 : 0))
     }
 
     /*

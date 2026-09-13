@@ -22,10 +22,30 @@
 
 namespace {
 
-#if defined(Q_OS_WIN)
+/*
+ * 要额外注册成**系统级**热键（Windows 的 RegisterHotKey）的那几条。
+ *
+ * 为什么只有这几条：它们的作用不是"编辑当前文件"，而是"把某个东西从桌面上
+ * 叫出来"—— 收进托盘 / 主窗口被压着时也得响（用户报的"最小化之后截图快捷键
+ * 不能用"就是这个）。别的命令（保存 / 查找）离开主窗口没有意义，不该占系统热键。
+ *
+ * id 是 WM_HOTKEY 的回执号，每条一个、不能重（见 Windows 的 RegisterHotKey）。
+ *
+ * 放在 Q_OS_WIN 外面：非 Windows 那半边也要按这张表去问"这个命令有没有
+ * 全局热键"（m_hotkeys 里不会有记录，所以答案恒为 false，见
+ * globalHotkeyActiveFor）。
+ */
+struct GlobalHotkeyEntry {
+    int id;
+    const char *name;   /* 必须和 kShortcutTable 里的名字一致 */
+};
 
-/* 系统级热键的 id：WM_HOTKEY 靠它分辨是哪一个（本程序只注册这一个） */
-constexpr int kShotHotkeyId = 0x5C01;
+const GlobalHotkeyEntry kGlobalHotkeys[] = {
+    {0x5C01, "shot"},
+    {0x5C02, "note"},
+};
+
+#if defined(Q_OS_WIN)
 
 /*
  * Qt 的组合键 -> Windows 的 (修饰键, 虚拟键)。
@@ -74,19 +94,29 @@ bool winHotkey(const QKeySequence &seq, UINT *mods, UINT *vk) {
  * 是活动窗口时才响 —— 程序收进托盘 / 被别的窗口压着时按 Ctrl+Alt+A 没反应，
  * 用户报的"最小化之后截图快捷键不能用"就是这个。RegisterHotKey 是系统级的，
  * 前台是谁都收得到，消息走 WM_HOTKEY。
+ *
+ * 现在有两条（截图 / 新建便签，见 kGlobalHotkeys），按 wParam 里那个 id 分辨，
+ * 翻成命令名交给 EditorController —— 走的是和 QAction 完全同一条路
+ * （commandRequested -> QML 的 dispatch），所以界面上的行为和点菜单一模一样。
  */
-class ShotHotkeyFilter final : public QAbstractNativeEventFilter {
+class GlobalHotkeyFilter final : public QAbstractNativeEventFilter {
 public:
-    explicit ShotHotkeyFilter(EditorController *owner) : m_owner(owner) {}
+    explicit GlobalHotkeyFilter(EditorController *owner) : m_owner(owner) {}
 
     bool nativeEventFilter(const QByteArray &type, void *message, qintptr *) override {
         if (type != QByteArrayLiteral("windows_generic_MSG"))
             return false;
         auto *msg = static_cast<MSG *>(message);
-        if (msg->message != WM_HOTKEY || msg->wParam != kShotHotkeyId)
+        if (msg->message != WM_HOTKEY)
             return false;
-        m_owner->activateCommand(QStringLiteral("shot"));
-        return true;
+
+        for (const GlobalHotkeyEntry &entry : kGlobalHotkeys) {
+            if (msg->wParam != WPARAM(entry.id))
+                continue;
+            m_owner->activateCommand(QString::fromLatin1(entry.name));
+            return true;
+        }
+        return false;
     }
 
 private:
@@ -107,29 +137,44 @@ void EditorController::applyGlobalHotkey() {
     if (!m_widget)
         return;
     if (!m_hotkeyFilter) {
-        m_hotkeyFilter = new ShotHotkeyFilter(this);
+        m_hotkeyFilter = new GlobalHotkeyFilter(this);
         qApp->installNativeEventFilter(m_hotkeyFilter);
     }
 
     const HWND hwnd = reinterpret_cast<HWND>(m_widget->winId());
-    if (m_hotkeyRegistered) {
-        UnregisterHotKey(hwnd, kShotHotkeyId);
-        m_hotkeyRegistered = false;
+
+    /* 先全摘掉再按现在的键位重新注册：改键 / 解绑都走这一条路 */
+    for (const GlobalHotkeyEntry &entry : kGlobalHotkeys) {
+        if (m_hotkeys.contains(entry.id) && m_hotkeys.value(entry.id)) {
+            UnregisterHotKey(hwnd, entry.id);
+            m_hotkeys[entry.id] = false;
+        }
     }
 
-    UINT mods = 0;
-    UINT vk = 0;
-    /* 空串 = 用户主动解绑了这个键，那就别注册全局的 */
-    const QString key = shortcutFor(QStringLiteral("shot"));
-    if (key.isEmpty() || !winHotkey(QKeySequence(key, QKeySequence::PortableText), &mods, &vk))
-        return;
+    for (const GlobalHotkeyEntry &entry : kGlobalHotkeys) {
+        UINT mods = 0;
+        UINT vk = 0;
+        /* 空串 = 用户主动解绑了这个键，那就别注册全局的 */
+        const QString key = shortcutFor(QString::fromLatin1(entry.name));
+        if (key.isEmpty() || !winHotkey(QKeySequence(key, QKeySequence::PortableText), &mods, &vk))
+            continue;
 
-    /*
-     * 注册失败不是错误（组合键可能被别的程序占了）：程序内那条 QAction 还在。
-     * 结果记下来给自检看（globalHotkeyActive）。
-     */
-    m_hotkeyRegistered = RegisterHotKey(hwnd, kShotHotkeyId, mods | MOD_NOREPEAT, vk) != FALSE;
+        /*
+         * 注册失败不是错误（组合键可能被别的程序占了）：程序内那条 QAction
+         * 还在。结果记下来给自检看（globalHotkeyActive / globalHotkeyActiveFor）。
+         */
+        m_hotkeys[entry.id] =
+            RegisterHotKey(hwnd, entry.id, mods | MOD_NOREPEAT, vk) != FALSE;
+    }
 #endif
+}
+
+bool EditorController::globalHotkeyActiveFor(const QString &name) const {
+    for (const GlobalHotkeyEntry &entry : kGlobalHotkeys) {
+        if (name == QLatin1String(entry.name))
+            return m_hotkeys.value(entry.id, false);
+    }
+    return false;
 }
 
 EditorController::~EditorController() {
@@ -138,8 +183,13 @@ EditorController::~EditorController() {
      * —— 系统消息还会往一个已经析构的对象上打。摘干净。
      */
 #if defined(Q_OS_WIN)
-    if (m_widget && m_hotkeyRegistered)
-        UnregisterHotKey(reinterpret_cast<HWND>(m_widget->winId()), kShotHotkeyId);
+    if (m_widget) {
+        const HWND hwnd = reinterpret_cast<HWND>(m_widget->winId());
+        for (const GlobalHotkeyEntry &entry : kGlobalHotkeys) {
+            if (m_hotkeys.value(entry.id, false))
+                UnregisterHotKey(hwnd, entry.id);
+        }
+    }
 #endif
     if (m_hotkeyFilter) {
         qApp->removeNativeEventFilter(m_hotkeyFilter);
@@ -198,6 +248,8 @@ const ShortcutEntry kShortcutTable[] = {
     {"save",          "保存",       "文件", "Ctrl+S"},
     {"saveAs",        "另存为",     "文件", "Ctrl+Shift+S"},
     {"shot",          "截图",       "文件", "Ctrl+Alt+A"},
+    {"note",          "新建便签",   "文件", "Ctrl+Alt+N"},
+    {"notesArrange",  "排列便签",   "文件", ""},
     {"saveAll",       "全部保存",   "文件", "Ctrl+Alt+S"},
     {"print",         "打印",       "文件", "Ctrl+P"},
     {"closeTab",      "关闭标签",   "文件", "Ctrl+W"},
@@ -216,6 +268,7 @@ const ShortcutEntry kShortcutTable[] = {
 };
 
 }  // namespace
+
 
 void EditorController::registerShortcuts() {
     for (const ShortcutEntry &entry : kShortcutTable) {

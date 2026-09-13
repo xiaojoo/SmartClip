@@ -164,8 +164,17 @@ public:
      *
      * RegisterHotKey 会被别人占用的组合键顶掉（返回失败），那不是错误 ——
      * 程序内那条 QAction 还在。这个口子给自检看结果，也有个地方能查。
+     * （按名字查别的全局热键用下面那个。）
      */
-    bool globalHotkeyActive() const { return m_hotkeyRegistered; }
+    bool globalHotkeyActive() const { return globalHotkeyActiveFor(QStringLiteral("shot")); }
+
+    /*
+     * 某个命令的**系统级**热键注册上了没（见 .cpp 的 kGlobalHotkeys）。
+     *
+     * 只有"把某个东西从桌面上叫出来"那几条会注册（截图 / 新建便签），
+     * 别的命令没有全局热键，一律返回 false。
+     */
+    bool globalHotkeyActiveFor(const QString &name) const;
 
 signals:
     /* 快捷键被按下；name 见 EditorController.cpp 里的注册表 */
@@ -184,7 +193,7 @@ private:
     void restoreShortcuts();
 
     /*
-     * 把截图键注册成**系统级**热键（Windows 的 RegisterHotKey）。
+     * 把"叫得出东西"的那几条键注册成**系统级**热键（Windows 的 RegisterHotKey）。
      *
      * 改键 / 重置之后要重来一次，所以挂在 restoreShortcuts() 末尾 —— 所有
      * 改键路径最后都汇到那里，一处改动够了。
@@ -196,9 +205,13 @@ private:
     QWidget *m_widget = nullptr;
     QHash<QString, QAction *> m_actions;
 
-    /* 系统级热键的回调（见 .cpp 里的 ShotHotkeyFilter），随本对象生灭 */
+    /* 系统级热键的回调（见 .cpp 里的 GlobalHotkeyFilter），随本对象生灭 */
     QAbstractNativeEventFilter *m_hotkeyFilter = nullptr;
-    bool m_hotkeyRegistered = false;
+    /*
+     * WM_HOTKEY 那个 id -> 注册上了没（见 .cpp 的 kGlobalHotkeys）。
+     * 用哈希而不是一条 bool：现在有截图 / 新建便签两条，以后还会加。
+     */
+    QHash<int, bool> m_hotkeys;
     /* name -> 出厂默认组合键（PortableText），"恢复默认"用 */
     QHash<QString, QString> m_defaults;
     /* name -> 当前生效组合键（PortableText），改键后即时更新 */

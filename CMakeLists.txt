@@ -6,7 +6,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 
-find_package(Qt6 6.5 REQUIRED COMPONENTS Core Gui Qml Quick QuickControls2 QuickWidgets Sql Widgets PrintSupport)
+find_package(Qt6 6.5 REQUIRED COMPONENTS Core Gui Network Qml Quick QuickControls2 QuickWidgets Sql Widgets PrintSupport)
 
 # ---------------------------------------------------------------------------
 # 配置时那条 Qt6TaskTree / Qt6QmlAssetDownloaderPrivate 的 NOT FOUND —— **可以忽略**
@@ -54,10 +54,22 @@ set(SMARTCLIP_SOURCES
     src/EditorViewItem.cpp
     src/Screenshot.h
     src/Screenshot.cpp
+    src/NoteThumbs.h
+    src/NoteThumbs.cpp
+    src/NoteLinkModel.h
+    src/NoteLinkModel.cpp
+    src/StickyNoteStore.h
+    src/StickyNoteStore.cpp
+    src/StickyNotes.h
+    src/StickyNotes.cpp
     src/TrayIcon.h
     src/TrayIcon.cpp
     src/SelfTest.h
     src/SelfTest.cpp
+    # 便签自检单独一个文件（`--note-test` 只跑它，见 src/SelfTest.h）：
+    # 和 SelfTest.cpp 那三千多行分开，改便签时不用把编辑区 / 截图那些
+    # 有时序问题的检查也跑一遍。
+    src/SelfTestNotes.cpp
 )
 
 qt_add_executable(SmartClip ${SMARTCLIP_SOURCES})
@@ -124,6 +136,8 @@ qt_add_qml_module(SmartClip
         qml/components/WindowControls.qml
         qml/delegates/TreeDelegate.qml
         qml/models/ClipboardModel.qml
+        qml/notes/StickyNoteWindow.qml
+        qml/notes/NoteMenu.qml
         qml/screenshot/CaptureOverlay.qml
         qml/utils/IconProvider.qml
         qml/utils/AppIcon.qml
@@ -150,6 +164,7 @@ qt_add_resources(SmartClip "app_icons"
         resources/icons/grid.svg
         resources/icons/image.svg
         resources/icons/more.svg
+        resources/icons/note.svg
         resources/icons/play.svg
         resources/icons/plus.svg
         resources/icons/refresh.svg
@@ -158,8 +173,8 @@ qt_add_resources(SmartClip "app_icons"
 )
 
 target_link_libraries(SmartClip PRIVATE
-    Qt6::Core Qt6::Gui Qt6::Qml Qt6::Quick Qt6::QuickControls2 Qt6::QuickWidgets Qt6::Sql
-    Qt6::Widgets Qt6::PrintSupport
+    Qt6::Core Qt6::Gui Qt6::Network Qt6::Qml Qt6::Quick Qt6::QuickControls2 Qt6::QuickWidgets
+    Qt6::Sql Qt6::Widgets Qt6::PrintSupport
     qscintilla
     dwmapi
 )

@@ -1199,6 +1199,17 @@ Rectangle {
         if (act === "open") { openFile(); return }
         /* 截图：抓屏 -> 框选 -> 加文字 / 复制 / 保存 / 固定到桌面（见 src/Screenshot.h） */
         if (act === "shot") { Shot.beginCapture(); return }
+        /*
+         * 便签（见 src/StickyNotes.h / qml/notes/StickyNoteWindow.qml）。
+         *
+         * 四条命令的落点都在 Notes 那个单例上：新建会自己找一块没被占用的
+         * 桌面摆好，排列是按便签所在那块屏的工作区摆成网格。这里不做任何
+         * 二次处理 —— 托盘菜单点的是同一份实现，两边行为必须一模一样。
+         */
+        if (act === "note") { Notes.createNote(); return }
+        if (act === "notesArrange") { Notes.arrangeAll(); return }
+        if (act === "notesShowAll") { Notes.showAll(); return }
+        if (act === "notesHideAll") { Notes.hideAll(); return }
         if (act === "save") { saveFile(); return }
         if (act === "saveAs") { saveFileAs(); return }
         if (act === "saveAll") { saveAll(); return }
@@ -1449,7 +1460,18 @@ Rectangle {
              * 的"标题栏那排按钮"那一节）。
              */
             treeToolbarButtons: folderTree.toolbarButtonCount,
-            tree: window.treeState()
+            tree: window.treeState(),
+
+            /*
+             * 便签（见 src/StickyNotes.h）。
+             *
+             * 便签是**独立顶层窗口**，不在主窗口这棵树里 —— 自检从别处
+             * （StickyNotes::windowState）量它们的几何，这里量的是"主界面
+             * 这一侧知不知道有那么几块"，也就是图标条那一格的状态。
+             */
+            noteCount: Notes.count,
+            noteVisibleCount: Notes.visibleCount,
+            noteFile: Notes.notesFilePath
         }
     }
 
@@ -1868,11 +1890,14 @@ Rectangle {
                     anchors.fill: parent; anchors.topMargin: 8; anchors.bottomMargin: 8; spacing: 6
                     Repeater {
                         /*
-                         * 只有"文件夹"和"截图"两格接上了动作，其余三格还是装饰
-                         * （见下面 navHit 的 onClicked）。截图那一格放在最前面
-                         * 几个工具窗口图标之间，因为它也是"叫出一个工具"。
+                         * 只有"文件夹 / 截图 / 便签"三格接上了动作，其余几格还是
+                         * 装饰（见下面 navHit 的 onClicked）。截图和便签那两格
+                         * 放在最前面几个工具窗口图标之间，因为它们也是"叫出一个
+                         * 工具"—— 便签那一格点一下就地新建一块，长按（右键）才
+                         * 是排列 / 收起那些（老用户不会误点，新用户看一眼提示就懂）。
                          */
                         model: [ { k: "folder", active: true }, { k: "screenshot", active: false },
+                                 { k: "note", active: false },
                                  { k: "file", active: false },
                                  { k: "search", active: false }, { k: "play", active: false },
                                  { k: "branch", active: false } ]
@@ -1884,6 +1909,7 @@ Rectangle {
                             /* 这一格点下去有没有事发生（决定光标和提示要不要给） */
                             readonly property bool acts: modelData.k === "folder"
                                                          || modelData.k === "screenshot"
+                                                         || modelData.k === "note"
 
                             /*
                              * 这一格算不算"当前打开的工具窗口"。
@@ -1893,10 +1919,16 @@ Rectangle {
                              * （和 PyCharm 左边那排工具窗口按钮一个道理）——
                              * 面板收起来之后，标题栏那排按钮跟着没了，
                              * 这里就是唯一能把树叫回来的地方。
+                             *
+                             * 便签那格同理：桌面上摆着便签时它才亮着 ——
+                             * 新便签是**在桌面上**出现的（不在主窗口里），
+                             * 这一格亮着就是"外面有那么几块"的唯一提示。
                              */
                             readonly property bool selected: modelData.k === "folder"
                                                              ? !window.folderTreeHidden
-                                                             : modelData.active
+                                                             : (modelData.k === "note"
+                                                                ? Notes.visibleCount > 0
+                                                                : modelData.active)
 
                             /*
                              * 悬停态：整格填强调蓝 + 图标转白。
@@ -1922,20 +1954,62 @@ Rectangle {
                                 hoverEnabled: true
                                 cursorShape: navCell.acts ? Qt.PointingHandCursor
                                                           : Qt.ArrowCursor
+                                acceptedButtons: Qt.LeftButton | Qt.RightButton
                                 onClicked: (mouse) => {
                                     if (modelData.k === "folder")
                                         window.toggleFolderTree()
                                     else if (modelData.k === "screenshot")
                                         Shot.beginCapture()
+                                    else if (modelData.k === "note") {
+                                        /*
+                                         * 左键 = 新建一块；右键 = 排列 / 收起那些。
+                                         * 便签这一格迟早要放好几条命令，但格子上
+                                         * 挂不下第二个按钮，右键菜单是最省地方的做法。
+                                         */
+                                        if (mouse.button === Qt.RightButton)
+                                            navNotesMenu.popup()
+                                        else
+                                            Notes.createNote()
+                                    }
                                 }
                             }
 
-                            /* 接上动作的那两格给提示 */
+                            /* 便签那一格的右键菜单（排列 / 显示全部 / 收起全部） */
+                            Menu {
+                                id: navNotesMenu
+                                parent: navCell
+
+                                Action {
+                                    text: "新建便签"
+                                    onTriggered: Notes.createNote()
+                                }
+                                MenuSeparator { }
+                                Action {
+                                    text: "排列便签（" + Notes.visibleCount + " 块摆着）"
+                                    enabled: Notes.visibleCount > 0
+                                    onTriggered: Notes.arrangeAll()
+                                }
+                                Action {
+                                    text: "显示全部便签"
+                                    enabled: Notes.count > 0
+                                    onTriggered: Notes.showAll()
+                                }
+                                Action {
+                                    text: "收起全部便签"
+                                    enabled: Notes.visibleCount > 0
+                                    onTriggered: Notes.hideAll()
+                                }
+                            }
+
+                            /* 接上动作的那几格给提示 */
                             AppToolTip {
                                 hovered: navHit.containsMouse && navCell.acts
                                 text: modelData.k === "folder"
                                       ? (window.folderTreeHidden ? "显示项目树" : "收起项目树")
-                                      : "截图（" + window.shortcutLabel("shot", "Ctrl+Alt+A") + "）"
+                                      : (modelData.k === "screenshot"
+                                         ? "截图（" + window.shortcutLabel("shot", "Ctrl+Alt+A") + "）"
+                                         : "新建便签（" + window.shortcutLabel("note", "Ctrl+Alt+N")
+                                           + "）· 右键排列")
                                 /* 贴着窗口左沿放：默认的"居中在格子上"会往左出界 */
                                 x: 2
                                 y: -implicitHeight - 3

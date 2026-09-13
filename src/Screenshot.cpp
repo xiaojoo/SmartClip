@@ -10,6 +10,7 @@
 #include <QDateTime>
 #include <QDir>
 #include <QElapsedTimer>
+#include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QGuiApplication>
@@ -228,6 +229,39 @@ Screenshot::~Screenshot() {
     m_overlay = nullptr;
 }
 
+/*
+ * === 临时诊断（定位"取消截图时全屏闪一下边框"）===
+ *
+ * 把截图状态机 + 每一次 Esc 的到达 + 选区窗口的几何变化都带毫秒时间戳记到
+ * **当前工作目录**下的 shot-trace.log。复现一次，这个文件就能说明：
+ * 那一下 Esc 落在哪一段、当时窗口可见没有、边框画出来没有、窗口被摆到哪儿。
+ * 定位完删掉：这个函数 + 所有 shotTrace(...) 调用 + <QFile> 这个 include。
+ */
+static void shotTrace(const char *what) {
+    static QElapsedTimer clock;
+    static bool started = false;
+    if (!started) {
+        clock.start();
+        started = true;
+        QFile::remove(QStringLiteral("shot-trace.log"));
+    }
+    QFile f(QStringLiteral("shot-trace.log"));
+    if (f.open(QIODevice::Append | QIODevice::Text)) {
+        f.write(QStringLiteral("%1  %2\n")
+                    .arg(clock.elapsed(), 6)
+                    .arg(QLatin1String(what))
+                    .toUtf8());
+        f.flush();
+        f.close();
+    }
+}
+
+static void shotTrace(const QString &what) {
+    shotTrace(what.toUtf8().constData());
+}
+
+void Screenshot::uiTrace(const QString &what) { shotTrace(what); }
+
 void Screenshot::setHostWidget(QWidget *host) {
     m_host = host;
     /*
@@ -262,10 +296,15 @@ bool Screenshot::eventFilter(QObject *watched, QEvent *event) {
     if (event->type() == QEvent::KeyPress) {
         auto *key = static_cast<QKeyEvent *>(event);
         if (key->key() == Qt::Key_Escape) {
+            shotTrace(QStringLiteral("Esc ARRIVED: pending=%1 active=%2 visible=%3")
+                          .arg(m_pending ? 1 : 0).arg(m_active ? 1 : 0)
+                          .arg(overlayVisible() ? 1 : 0));
             if (m_pending || (m_active && !overlayVisible())) {
+                shotTrace("  -> caught app-level (window not visible) -> cancel");
                 cancelCapture();
                 return true;   /* 吃掉，别让它再下去触发系统提示音 */
             }
+            shotTrace("  -> passed to overlay window (QML Shortcut handles it)");
         }
     }
     return QObject::eventFilter(watched, event);
@@ -278,6 +317,7 @@ void Screenshot::setEngine(QQmlEngine *engine) {
 }
 
 void Screenshot::beginCapture() {
+    shotTrace("beginCapture");
     if (m_active || m_pending) {
         /* 已经开着（用户又按了一次快捷键）：把选区窗口提到前面就够了 */
         if (m_overlay) {
@@ -339,6 +379,7 @@ void Screenshot::beginCapture() {
 }
 
 void Screenshot::grabAndShow() {
+    shotTrace(m_pending ? "grabAndShow(pending)" : "grabAndShow(CANCELLED)");
     /*
      * 延时这段窗口期里用户取消了（见 cancelCapture）：主窗口已经放回来了，
      * 这里就什么都别做 —— 尤其**不能** show() 选区窗口，否则就是"取消截图时
@@ -476,9 +517,29 @@ void Screenshot::prewarm() {
             view->grabFramebuffer();
             view->repaint();
         }
-        m_overlay->hide();
         m_overlay->setAttribute(Qt::WA_ShowWithoutActivating, false);
-        m_overlay->setGeometry(rect);   /* 摆回主屏，第一次抓屏直接就用它 */
+
+        /*
+         * 关键第二步：**摆回主屏之后，趁窗口还可见再画一帧，然后才藏**。
+         *
+         * 为什么非要有这一步：上面那次渲染是在**屏幕外**的几何上做的，而系统
+         * 保存的是"窗口表面最后一次真正呈现出来的内容"。以前是 hide() 之后才
+         * setGeometry(rect)，那之后没有任何一帧呈现过 —— 系统手里那张表面就一直是
+         * **按屏幕外几何画的**。第一次抓屏 show() 时先呈现的正是它（这段代码开头
+         * 那条注释写的就是这个规则），于是屏幕上先亮一帧"位置对不上的整屏选区"，
+         * 用户看到的就是"刚按下快捷键、鼠标还没动，屏幕闪一下"。
+         *
+         * 这里和 endCapture() 收工前那套走法保持一致：grabFramebuffer() 强制同步
+         * 渲染，repaint() 把这一帧推到窗口上 —— 差别只是窗口这会儿还在屏幕外露着
+         * （WA_ShowWithoutActivating，不抢焦点），用户看不见。
+         */
+        m_overlay->setGeometry(rect);   /* 先摆回主屏，第一次抓屏直接就用它 */
+        if (auto *view = m_overlay->findChild<QQuickWidget *>()) {
+            view->grabFramebuffer();
+            view->repaint();
+        }
+        shotTrace("prewarm: 已在主屏几何上重画一帧（窗口表面不再对应屏幕外几何）");
+        m_overlay->hide();
         m_overlayWarmed = true;
     }
     if (auto *view = m_overlay->findChild<QQuickWidget *>())
@@ -486,6 +547,7 @@ void Screenshot::prewarm() {
 }
 
 void Screenshot::showOverlay() {
+    shotTrace("showOverlay enter");
     if (!m_overlay)
         m_overlay = createOverlay();
     if (!m_overlay) {
@@ -498,6 +560,9 @@ void Screenshot::showOverlay() {
 
     /* 复用同一个窗口：先摆到这块屏上，再把上一次的标注清干净 */
     m_overlay->setGeometry(m_screenRect);
+    shotTrace(QStringLiteral("  window geometry %1,%2 %3x%4")
+                  .arg(m_screenRect.x()).arg(m_screenRect.y())
+                  .arg(m_screenRect.width()).arg(m_screenRect.height()));
     /*
      * 把屏幕矩形**直接告诉 QML**，别让它按控件尺寸猜 —— setGeometry 之后
      * QQuickWidget 的布局是延迟生效的，复位那一刻它还是预热时的旧尺寸，
@@ -580,7 +645,9 @@ void Screenshot::showOverlay() {
         return;
     }
 
+    shotTrace("show() BEFORE");
     m_overlay->show();
+    shotTrace("show() AFTER: window visible");
     m_overlay->raise();
     m_overlay->activateWindow();
     if (auto *view = m_overlay->findChild<QQuickWidget *>())
@@ -597,7 +664,23 @@ void Screenshot::showOverlay() {
      * 从头到尾没画过，一帧都不闪；正常截图只是晚一两帧出现边框，用户在框选时
      * 看不出差别。
      */
+    /* 临时诊断：settle 之后再等一会儿，看这会儿边框到底可见没有 */
+    QTimer::singleShot(250, this, [this]() {
+        if (QObject *root = overlayRoot()) {
+            QVariant v;
+            QMetaObject::invokeMethod(root, "barState", Q_RETURN_ARG(QVariant, v));
+            const QVariantMap m = v.toMap();
+            shotTrace(QStringLiteral("+250ms: active=%1 visible=%2 ready=%3 borderVisible=%4")
+                          .arg(m_active ? 1 : 0)
+                          .arg(overlayVisible() ? 1 : 0)
+                          .arg(m.value(QStringLiteral("ready")).toInt())
+                          .arg(m.value(QStringLiteral("borderVisible")).toInt()));
+        }
+    });
+
     QTimer::singleShot(60, this, [this]() {
+        shotTrace(QStringLiteral("settle timer: active=%1 visible=%2")
+                      .arg(m_active ? 1 : 0).arg(overlayVisible() ? 1 : 0));
         if (m_active && overlayVisible()) {
             if (QObject *root = overlayRoot())
                 QMetaObject::invokeMethod(root, "settleOverlay");
@@ -680,7 +763,9 @@ void Screenshot::endCapture() {
             view->grabFramebuffer();
             view->repaint();
         }
+        shotTrace("endCapture: hide() now");
         m_overlay->hide();      /* 只是藏起来，留着下次复用（见 prewarm） */
+        shotTrace("endCapture: hidden");
     }
 
     m_active = false;
@@ -689,6 +774,7 @@ void Screenshot::endCapture() {
 }
 
 void Screenshot::cancelCapture() {
+    shotTrace("cancelCapture");
     /*
      * 取消 = 收工。两条路（抓屏还在延时里 / 选区窗口已经开着）都由
      * endCapture 里的 pending 判断分开处理，所以这里直接转过去 ——
