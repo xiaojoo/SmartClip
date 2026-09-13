@@ -105,7 +105,7 @@ function fileMenu(ov) {
         { separator: true },
         { label: "打印…", act: "print", shortcut: "Ctrl+P", icon: "print" },
         { separator: true },
-        { label: "刷新剪贴板", act: "refresh", shortcut: "F5", icon: "refresh" },
+        { label: "刷新剪贴板列表", act: "refresh", shortcut: "F5", icon: "refresh" },
         { separator: true },
         { label: "退出", act: "quit" }
     ], ov)
@@ -367,8 +367,10 @@ function rulerColumnItems(view) {
 function settingsMenu(view, ov) {
     var hasDoc = !!view && view.hasDocument
     var items = []
-    /* 图形化设置面板（快捷键 / 关于），见 qml/components/SettingsPanel.qml */
+    /* 图形化设置面板（快捷键 / 存储 / 关于），见 qml/components/SettingsPanel.qml */
     items.push({ label: "打开设置面板…", act: "settings", icon: "gear" })
+    /* 剪贴板内容存哪儿、导入了哪些外部文件夹 —— 直接翻到"存储"那一栏 */
+    items.push({ label: "存储与保存位置…", act: "storage", icon: "folder" })
     items.push({ separator: true })
     items.push({ label: "字号", icon: "zoom-reset", disabled: true })
     var sizes = fontSizeItems(view)
@@ -452,13 +454,15 @@ function tabMenu(view, index, ov) {
  * 左侧项目树标题栏的"更多"菜单（也挂在标题"项目 ∨"上，见 FolderTree.qml）。
  *
  * state 由 Main.qml 的 treeMenuState() 给：
- *   { folderCount, openCount, itemCount, newestFirst, locateEnabled }
+ *   { folderCount, openCount, itemCount, entryCount, rootPath, importedCount,
+ *     newestFirst, locateEnabled }
  * 用它把"已经全展开 / 已经全折叠"的两条置灰 —— 和 PyCharm 一样，
- * 点下去没事发生的那两条就不该是可点的样子。
+ * 点下去没事发生的那两条就不该是可点的样子；保存位置也顺便显示在这儿，
+ * 让用户一眼看到"东西到底存哪儿了"。
  *
  * 动作名同样由 Main.qml 的 dispatch 解析（treeNew / treeLocate / treeExpandAll /
- * treeCollapseAll / treeSortNewest / treeSortOldest / treeHide），
- * 刷新复用已有的 refresh。
+ * treeCollapseAll / treeSortNewest / treeSortOldest / treeHide /
+ * treeImportFolder / treeOpenRoot / treeChooseRoot）。
  */
 function treeMenu(state, ov) {
     var s = state || {}
@@ -467,10 +471,11 @@ function treeMenu(state, ov) {
     var allOpen = folders > 0 && open >= folders
     var allClosed = open <= 0
     var newest = s.newestFirst !== false
+    var root = s.rootPath ? String(s.rootPath) : ""
     return applyOverrides([
-        { label: "新建条目", act: "treeNew", icon: "plus" },
-        { label: "刷新列表", act: "refresh", shortcut: "F5", icon: "refresh" },
-        /* 当前标签不在列表里（磁盘文件 / 未命名空白文档）时没什么可定位的 */
+        { label: "新建文件", act: "treeNew", icon: "plus" },
+        { label: "刷新列表（重扫磁盘）", act: "refresh", shortcut: "F5", icon: "refresh" },
+        /* 当前标签不在左树里（未命名空白文档 / 别处打开的文件）时没什么可定位的 */
         { label: "定位当前文件", act: "treeLocate", icon: "locate",
           disabled: s.locateEnabled === false },
         { separator: true },
@@ -480,8 +485,51 @@ function treeMenu(state, ov) {
         { label: "最新在前", act: "treeSortNewest", checked: newest },
         { label: "最早在前", act: "treeSortOldest", checked: !newest },
         { separator: true },
+        /* 导入的文件夹只是"挂上来看"，新内容永远写进保存目录 */
+        { label: "导入文件夹…", act: "treeImportFolder", icon: "open" },
+        { label: "打开保存位置", act: "treeOpenRoot", icon: "folder", disabled: root === "" },
+        { label: "设置保存位置…", act: "treeChooseRoot", icon: "gear" },
+        { separator: true },
         { label: "收起面板", act: "treeHide", icon: "minus" }
     ], ov)
+}
+
+/*
+ * 左树上一个**文件**行的右键菜单（Main.qml 的 openAtPoint 弹它）。
+ *
+ * row 就是 js/FolderManager.js 拍出来的那一行（带 path / entries / size…）。
+ * 动作带路径：fileOpen:/fileRename:/fileDelete:/fileReveal:，
+ * 由 Main.qml 的 dispatch 按前缀切开再执行。
+ */
+function fileContextMenu(row) {
+    var path = (row && row.path) ? row.path : ""
+    return [
+        { label: "打开", act: "fileOpen:" + path, icon: "open" },
+        { separator: true },
+        { label: "重命名…", act: "fileRename:" + path, icon: "save-as" },
+        { label: "删除…", act: "fileDelete:" + path, icon: "trash" },
+        { separator: true },
+        { label: "在文件夹中显示", act: "fileReveal:" + path, icon: "folder" }
+    ]
+}
+
+/*
+ * 左树上一个**文件夹**行的右键菜单。
+ *
+ * 导入的目录（folderKind === "imported"）多一条"移除"：它只是挂上来看的，
+ * 移开不动磁盘上的文件。
+ */
+function folderContextMenu(row) {
+    var path = (row && row.path) ? row.path : ""
+    var items = [
+        { label: "新建文件", act: "treeNew", icon: "plus" },
+        { label: "刷新列表（重扫磁盘）", act: "refresh", icon: "refresh" },
+        { separator: true },
+        { label: "在文件夹中显示", act: "folderReveal:" + path, icon: "folder" }
+    ]
+    if (row && row.folderKind === "imported")
+        items.push({ label: "移除此导入目录", act: "removeImport:" + path, icon: "trash" })
+    return items
 }
 
 /* 菜单栏 tab */

@@ -6,10 +6,9 @@ import "qml/components"
 import "qml/models"
 import "qml/utils"
 import "js/FolderManager.js" as Folders
-import "js/TimeUtils.js" as Time
 import "js/EditorMenus.js" as Menus
 /*
- * 点击条目 / 菜单里的"复制"都要回填系统剪贴板。
+ * 左树点一个文件 / 菜单里的"复制"，都会回到编辑器里那份真实的 md 上。
  *
  * 数据源现在是 QML 单例 Store（SmartClip.Globals，见 main.cpp 的
  * qmlRegisterSingletonInstance）—— 任何 QML 文档只要 import 该模块就能直接用，
@@ -65,16 +64,13 @@ Rectangle {
      */
 
     property string searchText: ""
-    property var selectedItem: null
     /*
-     * 当前分组（点哪个分组就是哪个）。
+     * 当前选中的是哪一个文件 —— 按**路径**认（见 FolderTree.selectedPath）。
      *
-     * 注意它**不再**用来画高亮：一级菜单不亮蓝底，只有选中的条目亮
-     * （见 FolderTree.qml 里 delegate 的 rowHighlight）。
-     * 留着它是因为"当前是哪一组"这件事本身还有用 ——
-     * dispatch("folder:<key>") 那条命令就落在它上面，以后按分组做操作也认它。
+     * 左树现在列的是磁盘上的真实 md 文件，选中的是文件本身，"哪个文件开着"
+     * 就是它的绝对路径；重命名之后把新路径填回来就行。
      */
-    property string activeFolder: "today"
+    property string selectedPath: ""
     property var treeRows: []
     /* 欢迎页 / 编辑器：现在由"有没有打开的标签"决定，见 EditorArea */
 
@@ -106,9 +102,11 @@ Rectangle {
     readonly property real folderTreeMaxWidth: 600
 
     /*
-     * 树里条目的排序：true = 最新在前（默认，和库里 ORDER BY id DESC 一致），
-     * false = 最早在前（在 QML 这侧把列表翻过来，见 orderedEntries()）。
-     * 由"更多"菜单里的那两条切换。
+     * 树里文件的排序：true = 最新在前。
+     *
+     * 文件名就是时分秒（073100.md），所以"按名字倒序"天然就是时间倒序；
+     * 真正的排序在 C++ 那边做（见 ClipboardStore::tree 的 newestFirst）。
+     * 导入的文件夹里那些文件按名字字母序，不受这个开关影响。
      */
     property bool newestFirst: true
 
@@ -120,13 +118,17 @@ Rectangle {
      */
     readonly property color accentColor: "#4c96d8"
 
-    readonly property var folders: [
-        { key: "today",     label: "今天" },
-        { key: "yesterday", label: "昨天" },
-        { key: "week",      label: "近 7 天" },
-        { key: "older",     label: "更早" }
-    ]
-    property var expanded: ({ "today": true, "yesterday": false, "week": false, "older": false })
+    /*
+     * 左树里哪些文件夹是展开的（key -> true）。
+     *
+     * key 就是 C++ 那边给的节点 key，形如 "dir:C:/Users/…/2026-09-13"
+     * （见 ClipboardStore::tree）。日期文件夹和导入的文件夹共用这一份状态：
+     * 树有几层、有多少个文件夹都是运行时才知道的，所以不能再像以前那样
+     * 写死"今天 / 昨天 / 近 7 天 / 更早"四个键。
+     *
+     * 展开状态存 QSettings（treeExpanded，一行一个 key），下次启动回到原样。
+     */
+    property var expanded: ({})
 
     /*
      * 可改键清单的镜像（见 src/EditorController.h 的 shortcutItems）。
@@ -148,46 +150,68 @@ Rectangle {
 
     ClipboardModel { id: cbm; onChanged: window.rebuild() }
 
-    function rebuild() { treeRows = Folders.buildTree(orderedEntries(), folders, expanded, Time.periodFor) }
-    function refresh() { cbm.reload(searchText) }
+    function rebuild() { treeRows = Folders.buildTree(cbm.nodes, expanded) }
 
     /*
-     * 树里条目按什么顺序排。
+     * 重新读一遍数据。
      *
-     * 库里给的就是"最新在前"（items() 里 ORDER BY id DESC），所以默认直接用它；
-     * "最早在前"只需要把同一份列表倒过来 —— 数据源那边不用再查一次。
+     * 数据源是"磁盘 + 元数据缓存"（C++ 的 Store）：query 非空时只留命中的文件。
+     * 真正去扫盘的是 Store.rescan()，这里是拿现成的缓存重建左树。
      */
-    function orderedEntries() {
-        var list = cbm.entries
-        if (newestFirst)
-            return list
-        var out = []
-        for (var i = list.length - 1; i >= 0; --i)
-            out.push(list[i])
-        return out
+    function refresh() { cbm.reload(searchText, newestFirst) }
+
+    /* 展开状态的深浅拷贝（改完整个赋回去，绑定才知道变了） */
+    function copyExpanded() {
+        var e = ({})
+        for (var k in expanded)
+            e[k] = expanded[k]
+        return e
+    }
+
+    function rememberExpanded() {
+        var keys = []
+        for (var k in expanded)
+            if (expanded[k])
+                keys.push(k)
+        Cmd.remember("treeExpanded", keys.join("\n"))
+    }
+
+    /*
+     * 一个文件路径落在哪个文件夹节点上。
+     *
+     * C++ 那边统一用 '/' 拼路径（QDir::cleanPath），所以这里直接找最后一个斜杠。
+     */
+    function folderKeyOf(filePath) {
+        var at = filePath.lastIndexOf("/")
+        return at > 0 ? "dir:" + filePath.substring(0, at) : ""
     }
 
     function toggleFolder(key) {
-        var e = ({})
-        for (var k in expanded) e[k] = expanded[k]
+        var e = copyExpanded()
         e[key] = !e[key]
-        expanded = e; activeFolder = key; selectedItem = null
+        expanded = e
+        rememberExpanded()
         rebuild()
     }
+
     function activateFolder(key) {
-        var e = ({})
-        for (var k in expanded) e[k] = expanded[k]
+        if (!key)
+            return
+        var e = copyExpanded()
         e[key] = true
-        expanded = e; activeFolder = key; selectedItem = null
+        expanded = e
+        rememberExpanded()
         rebuild()
     }
 
     /* 全部展开 / 全部折叠（左树标题栏那两个按钮，也是"更多"菜单里的两条） */
     function setAllFolders(open) {
+        var keys = Folders.allFolderKeys(cbm.nodes)
         var e = ({})
-        for (var i = 0; i < folders.length; ++i)
-            e[folders[i].key] = open
+        for (var i = 0; i < keys.length; ++i)
+            e[keys[i]] = open
         expanded = e
+        rememberExpanded()
         rebuild()
     }
 
@@ -216,16 +240,14 @@ Rectangle {
     }
 
     /*
-     * 左树标题栏的 "+"：手工新建一条文本条目。
+     * 左树标题栏的 "+"：在今天那个日期目录里新建一份 md。
      *
-     * 和剪贴板采集（ClipboardManager -> ClipboardStore::addText）不是一条路：
-     * 那条按内容去重，这里故意不去重（见 ClipboardStore::createTextEntry），
-     * 否则"再建一条空的"会被 INSERT OR IGNORE 静默丢掉。
+     * 已经不是"往库里插一条空条目"了 —— 建出来的是一份真实文件
+     * （<root>/2026-09-13/073100.md，名字取当前时分秒），建完直接在编辑器里
+     * 打开，写东西按 Ctrl+S 就是普通的保存文件。
      *
-     * 建完立刻：清掉搜索框里的过滤（不然新条目可能根本不显示）-> 展开它所在的
-     * 日期分组 -> 选中 -> 在编辑器里打开。注意**不**写系统剪贴板
-     * （selectItem 的第二个参数）：刚建出来是空的，往剪贴板里塞个空串没意义。
-     * 编辑完按 Ctrl+S 就写回库里那一条（见 EditorViewItem::saveCurrent）。
+     * 建完立刻：清掉搜索框里的过滤（不然新文件可能根本不显示）-> 展开它所在的
+     * 日期目录 -> 选中 -> 打开。
      */
     function newEntry() {
         if (searchText !== "") {
@@ -233,63 +255,68 @@ Rectangle {
             topBar.clearSearch()
         }
 
-        var id = Store.createTextEntry("")
-        if (id <= 0) {
-            Cmd.alert("新建失败", "无法写入剪贴板库")
+        var path = Store.createFile("")
+        if (path === "") {
+            Cmd.alert("新建失败", "无法在保存目录里建文件，请检查设置里的保存位置")
             return
         }
 
         refresh()
-
-        var item = null
-        for (var i = 0; i < cbm.entries.length; ++i) {
-            if (cbm.entries[i].id === id) {
-                item = cbm.entries[i]
-                break
-            }
-        }
-        if (!item) {
-            Cmd.alert("新建失败", "新条目没能读回来，请刷新列表")
-            return
-        }
-
-        activateFolder(Time.periodFor(item.createdAt))
-        selectItem(item, false)
+        activateFolder(folderKeyOf(path))
+        openTreeFile(path)
     }
 
     /*
-     * 当前标签对应的条目 id；当前标签不是列表里的条目（磁盘文件 / 未命名
-     * 空白文档）时返回 -1。
+     * 当前标签对应的左树文件路径；当前标签不是左树管着的文件（未命名空白文档、
+     * 从菜单"打开"进来的别的文件）时返回空串。
      *
-     * 按 id 认，不按标题认：标题是跟着正文变的（见 ClipboardStore::updateTextEntry），
-     * 认标题迟早对不上。
+     * 按**路径**认，不按标题认：重命名之后标题跟着变，路径才是身份
+     * （renameTreeFile 会把新路径同步给编辑器标签）。
      */
-    function currentClipId() {
-        var docs = view.documents
-        var i = view.currentIndex
-        if (i < 0 || i >= docs.length || !docs[i].clipboard)
-            return -1
-        var id = docs[i].clipId
-        return (id === undefined || id === null) ? -1 : id
+    function currentTreePath() {
+        var path = view.filePath
+        return isManagedPath(path) ? path : ""
+    }
+
+    /*
+     * 这个路径在不在保存目录 / 导入的某个目录里面（左树管得着的范围）。
+     *
+     * 特意**不查 treeRows**：折叠起来的日期目录里那一份也是左树的一员，
+     * 而"定位当前文件"本来就是要把它展开再选中 —— 拿 treeRows 判的话，
+     * 面板一折叠（或者搜索框里有过滤），准星按钮就会莫名其妙地灰掉。
+     */
+    function isManagedPath(path) {
+        if (!path)
+            return false
+
+        var root = Store.rootPath
+        if (root !== "" && path.indexOf(root + "/") === 0)
+            return true
+
+        var dirs = Store.importedFolders
+        for (var i = 0; i < dirs.length; ++i) {
+            if (dirs[i] !== "" && path.indexOf(dirs[i] + "/") === 0)
+                return true
+        }
+        return false
     }
 
     /* 准星按钮能不能点（转给 FolderTree，见那边 locateEnabled） */
-    function canLocateCurrent() { return currentClipId() >= 0 }
+    function canLocateCurrent() { return currentTreePath() !== "" }
 
     /*
      * 在左树里定位当前标签（标题栏那个准星按钮 / "更多"菜单里的"定位当前文件"）。
      *
-     * 只做三件事：展开它所在的那一组 -> 把它选上（蓝条）-> 滚到它。
-     * **不**动编辑器里的正文，也**不**写系统剪贴板 —— 点列表里的条目会顺手
-     * 复制到剪贴板（那是"点条目"的语义），这里只是"告诉我它在哪儿"。
+     * 只做三件事：展开它自己（以及导入目录那些父目录）-> 把它选上（蓝条）-> 滚到它。
+     * **不**动编辑器里的正文。
      *
      * 搜索框里有过滤的话先清掉：定位是明确的"带我去看"动作，被过滤掉就白点了
      * （和 newEntry 清过滤是同一个理由）。
-     * 返回有没有真的定位到（没定位到通常是当前标签根本不在列表里）。
+     * 返回有没有真的定位到（没定位到通常是当前标签根本不在左树里）。
      */
     function locateCurrentItem() {
-        var id = currentClipId()
-        if (id < 0)
+        var path = currentTreePath()
+        if (path === "")
             return false
 
         if (searchText !== "") {
@@ -298,70 +325,129 @@ Rectangle {
             refresh()
         }
 
-        var item = null
-        for (var i = 0; i < cbm.entries.length; ++i) {
-            if (cbm.entries[i].id === id) {
-                item = cbm.entries[i]
+        var e = copyExpanded()
+        e[folderKeyOf(path)] = true
+        /* 导入的目录可能套了好几层，一路展开上去（顶级目录不在树里，多了也无妨） */
+        var dir = path.substring(0, path.lastIndexOf("/"))
+        while (dir.length > 2) {
+            e["dir:" + dir] = true
+            var up = dir.substring(0, dir.lastIndexOf("/"))
+            if (up === dir)
                 break
-            }
+            dir = up
         }
-        if (!item)
-            return false
+        expanded = e
+        rebuild()
 
-        var key = Time.periodFor(item.createdAt)
-        if (!expanded[key]) {
-            var e = ({})
-            for (var k in expanded) e[k] = expanded[k]
-            e[key] = true
-            expanded = e
-            rebuild()
-        }
-
-        selectedItem = item
+        selectedPath = path
         /*
          * 滚动要等这一帧的列表更新完再做（树刚重建过，行下标这会儿还在算）——
          * Qt.callLater 就是"这一轮事件处理完再调"。
          */
-        Qt.callLater(function () { folderTree.scrollToItem(id) })
+        Qt.callLater(function () { folderTree.scrollToPath(path) })
         return true
     }
 
     /*
-     * 点左侧条目。
+     * 点左树里的一个文件：在编辑器里打开它。
      *
-     *   图片 -> 走图片预览（没有正文可编辑）；
-     *   文本 -> 载入编辑器标签（正文由 C++ 按 id 从库里取，
-     *           全程不经过 QML 属性，见 src/EditorViewItem.h）。
-     *
-     * 两种都继续回填系统剪贴板 —— 这是这个应用本来的用途。
-     * 只有"新建条目"那条路会传 copy = false：那时候条目还是空的，
-     * 塞进剪贴板没有意义（见 newEntry）。
+     * 树上没有"条目"了，点开的是一份真实的 md，所以走 openFile() 那条路 ——
+     * 已经开着就切回那条标签（按路径认），Ctrl+S 直接写回这份文件。
      */
-    function selectItem(item, copy) {
-        selectedItem = item
+    function openTreeFile(rowOrPath) {
+        var path = (typeof rowOrPath === "string") ? rowOrPath : rowOrPath.path
+        if (!path)
+            return
 
-        if (!item) {
-            editor.previewItem = null
+        selectedPath = path
+        editor.previewItem = null
+
+        var index = view.indexOfPath(path)
+        if (index >= 0) {
+            view.activateDocument(index)
+            view.requestEditorFocus()
             return
         }
 
-        if (item.type === "image") {
-            editor.previewItem = item
-        } else {
-            editor.previewItem = null
-            view.openClipboardItem(item.id, item.title)
+        if (view.openFile(path) < 0)
+            Cmd.alert("打开失败", view.lastError)
+        else
             view.requestEditorFocus()
-        }
-
-        if (copy !== false)
-            Store.copyItem(item.id)
     }
 
-    /* 当前标签是不是"来自剪贴板库"的那一类（在库里、没有磁盘文件） */
-    function isClipboardDocument() {
-        var docs = view.documents
-        var i = view.currentIndex
-        return i >= 0 && i < docs.length && docs[i].clipboard === true
+    /* ------------------------------------------------------------------
+     * 文件与文件夹操作（左树右键菜单 / "更多"菜单）
+     * ---------------------------------------------------------------- */
+
+    /* 重命名一份 md：改的是真实文件，编辑器里开着的那个标签跟着换路径 */
+    function renameTreeFile(path) {
+        var oldName = Cmd.fileNameOf(path)
+        var name = Cmd.askText("重命名", "新文件名（.md 可以省略）", oldName)
+        if (name === "" || name === oldName)
+            return
+
+        var dir = path.substring(0, path.lastIndexOf("/"))
+        var newName = /\.md$/i.test(name) ? name : name + ".md"
+        var newPath = dir + "/" + newName
+
+        if (!Store.renameFile(path, name)) {
+            Cmd.alert("重命名失败", "同名文件可能已经存在：" + newName)
+            return
+        }
+
+        /* 打开着的那个标签也要跟着换，否则下一次 Ctrl+S 会写回旧名字 */
+        view.updateDocumentPath(path, newPath)
+        if (selectedPath === path)
+            selectedPath = newPath
+    }
+
+    /* 删一份 md：开着的标签先关（有未保存改动会先问），再删文件 */
+    function deleteTreeFile(path) {
+        if (!Cmd.confirm("删除文件", "确定删除这一份吗？\n\n" + path))
+            return
+
+        var index = view.indexOfPath(path)
+        if (index >= 0 && !closeTab(index))
+            return
+
+        if (!Store.deleteFile(path)) {
+            Cmd.alert("删除失败", "文件可能已经不在了：\n" + path)
+            return
+        }
+        if (selectedPath === path)
+            selectedPath = ""
+    }
+
+    function revealPath(path) {
+        if (path)
+            Cmd.revealInExplorer(path)
+    }
+
+    /* 导入一个外部文件夹：只读地把它里面的 md / txt 挂到左树上 */
+    function importFolder() {
+        var dir = Cmd.chooseFolderDialog("导入文件夹", Store.rootPath)
+        if (dir === "")
+            return
+        if (!Store.addImportedFolder(dir)) {
+            Cmd.alert("导入失败", "这个文件夹不存在，或者已经在列表里了：\n" + dir)
+            return
+        }
+        activateFolder("dir:" + dir)
+    }
+
+    function removeImportedFolder(path) {
+        if (!Cmd.confirm("移除导入目录", "把它从左树上移开？（磁盘上的文件不动）\n\n" + path))
+            return
+        Store.removeImportedFolder(path)
+    }
+
+    /* 换剪贴板文件的保存位置（设置面板和"更多"菜单都有入口） */
+    function chooseStorageRoot() {
+        var dir = Cmd.chooseFolderDialog("选择剪贴板保存位置", Store.rootPath)
+        if (dir === "")
+            return
+        if (!Store.setRootPath(dir))
+            Cmd.alert("设置失败", "这个目录用不了：\n" + dir)
     }
 
     /* ------------------------------------------------------------------
@@ -411,11 +497,10 @@ Rectangle {
         if (!view.hasDocument)
             return false
         /*
-         * 剪贴板条目在库里、没有磁盘文件：Ctrl+S 走的是"写回库里那一条"
-         * （见 EditorViewItem::saveCurrent 的剪贴板分支），不该弹"另存为"。
-         * 只有真正的未命名空白文档才需要问路径。
+         * 剪贴板内容现在是真实文件（日期目录里的 md），打开它就带着路径，
+         * Ctrl+S 走的是普通保存。只有真正的未命名空白文档才需要问路径。
          */
-        if (view.filePath === "" && !isClipboardDocument())
+        if (view.filePath === "")
             return saveFileAs()
         if (!view.saveCurrent()) {
             Cmd.alert("保存失败", view.lastError)
@@ -581,12 +666,16 @@ Rectangle {
      * 没事发生的那两条置灰。
      */
     function treeMenuState() {
+        var keys = Folders.allFolderKeys(cbm.nodes)
         var open = 0
-        for (var k in expanded)
-            if (expanded[k]) ++open
-        return { folderCount: folders.length,
+        for (var i = 0; i < keys.length; ++i)
+            if (expanded[keys[i]]) ++open
+        return { folderCount: keys.length,
                  openCount: open,
-                 itemCount: cbm.entries.length,
+                 itemCount: treeRows.length,
+                 entryCount: Store.entryCount,
+                 rootPath: Store.rootPath,
+                 importedCount: Store.importedFolders.length,
                  newestFirst: newestFirst,
                  locateEnabled: canLocateCurrent() }
     }
@@ -606,30 +695,39 @@ Rectangle {
     }
 
     /*
-     * 左树当前状态（自检量"全部折叠 / 全部展开 / 收起面板"用，见 uiState）。
+     * 左树当前状态（自检量"全部折叠 / 全部展开 / 收起面板 / 定位"用）。
      *
      * panelWidth 是布局算出来的真实槽位宽度：面板收起来时它必须是 0，
      * 只把 folderTreeHidden 置上而宽度没跟着走，从界面上是能一眼看出来的。
+     *
+     * 认"当前打开的是哪一份文件"用**路径**（currentPath / selectedPath）：
+     * 树上列的就是磁盘上的文件，没有条目 id 这回事了。
      */
     function treeState() {
+        var keys = Folders.allFolderKeys(cbm.nodes)
         var open = 0
-        for (var k in expanded)
-            if (expanded[k]) ++open
-        return { folderCount: folders.length,
+        for (var i = 0; i < keys.length; ++i)
+            if (expanded[keys[i]]) ++open
+        var files = 0
+        for (var j = 0; j < cbm.nodes.length; ++j)
+            files += cbm.nodes[j].files !== undefined ? cbm.nodes[j].files : 0
+        return { folderCount: keys.length,
                  openFolders: open,
                  rows: treeRows.length,
-                 items: cbm.entries.length,
+                 items: files,
+                 entries: Store.entryCount,
                  hidden: folderTreeHidden,
                  width: folderTreeWidth,
                  panelWidth: folderTree.width,
                  newestFirst: newestFirst,
-                 /* 定位用：当前标签对应的条目 id / 按钮是不是可点 / 选中的是哪条 */
-                 currentClipId: currentClipId(),
+                 rootPath: Store.rootPath,
+                 /* 定位用：当前标签对应哪个文件 / 按钮是不是可点 / 选中的是哪个 */
+                 currentPath: currentTreePath(),
                  locateEnabled: canLocateCurrent(),
-                 selectedId: selectedItem ? selectedItem.id : -1,
+                 selectedPath: selectedPath,
                  /* 定位的最后一步（滚进可视区）有没有真的生效 */
-                 locatedVisible: folderTree.rowVisible(selectedItem ? selectedItem.id : -1),
-                 /* 亮着蓝底的行：分组必须恒为 0，条目最多 1（见 FolderTree.highlightCounts） */
+                 locatedVisible: folderTree.rowVisible(selectedPath),
+                 /* 亮着蓝底的行：文件夹必须恒为 0，文件最多 1（见 FolderTree.highlightCounts） */
                  highlighted: folderTree.highlightCounts() }
     }
 
@@ -729,8 +827,42 @@ Rectangle {
         settingsPanel.show("shortcuts")
     }
 
+    /* 设置面板的"存储"那一栏（保存位置 / 导入的文件夹，见 SettingsPanel.qml） */
+    function showStorage() {
+        settingsPanel.show("storage")
+    }
+
+    /* 自检收尾用：关掉设置面板，别让它挂到进程退出那一刻再拆 */
+    function closeSettings() {
+        settingsPanel.close()
+    }
+
     function showAbout() {
         settingsPanel.show("about")
+    }
+
+    /*
+     * 左树某一类行的右键菜单动作名（自检核对用，见 src/SelfTest.cpp）。
+     *
+     * kind 传 "file" / "folder"：找树里第一个这一类行，用它构造菜单 ——
+     * 和界面上右键弹出的是**同一个构造**（Menus.fileContextMenu /
+     * folderContextMenu），所以断言看到的就是用户能点的。
+     */
+    function treeRowMenuActs(kind) {
+        for (var i = 0; i < treeRows.length; ++i) {
+            var row = treeRows[i]
+            if (row.kind !== kind)
+                continue
+            var items = (kind === "file") ? Menus.fileContextMenu(row)
+                                          : Menus.folderContextMenu(row)
+            var out = []
+            for (var j = 0; j < items.length; ++j) {
+                if (items[j] && items[j].act !== undefined)
+                    out.push(String(items[j].act))
+            }
+            return out
+        }
+        return []
     }
 
     function dispatch(act) {
@@ -768,6 +900,21 @@ Rectangle {
         if (act.indexOf("eol:") === 0) { view.eolMode = act.substring(4); return }
         if (act.indexOf("menu:") === 0) { topBar.openGroup(act.substring(5)); return }
         if (act.indexOf("folder:") === 0) { activateFolder(act.substring(7)); return }
+
+        /*
+         * 带路径的文件动作（左树右键菜单用，见 js/EditorMenus.js 的
+         * fileContextMenu / folderContextMenu）。路径里带盘符冒号，
+         * 所以只能按前缀长度切，不能按 ':' 分。
+         */
+        if (act.indexOf("fileOpen:") === 0) { openTreeFile(act.substring(9)); return }
+        if (act.indexOf("fileRename:") === 0) { renameTreeFile(act.substring(11)); return }
+        if (act.indexOf("fileDelete:") === 0) { deleteTreeFile(act.substring(11)); return }
+        if (act.indexOf("fileReveal:") === 0) { revealPath(act.substring(11)); return }
+        if (act.indexOf("folderReveal:") === 0) { revealPath(act.substring(13)); return }
+        if (act.indexOf("removeImport:") === 0) {
+            removeImportedFolder(act.substring(13))
+            return
+        }
         /* ---- 左侧项目树（标题栏那排按钮 / 标题上的"更多"菜单） ---- */
         if (act === "treeNew") { newEntry(); return }
         if (act === "treeLocate") { locateCurrentItem(); return }
@@ -776,6 +923,9 @@ Rectangle {
         if (act === "treeHide") { toggleFolderTree(); return }
         if (act === "treeSortNewest") { setNewestFirst(true); return }
         if (act === "treeSortOldest") { setNewestFirst(false); return }
+        if (act === "treeImportFolder") { importFolder(); return }
+        if (act === "treeOpenRoot") { revealPath(Store.rootPath); return }
+        if (act === "treeChooseRoot") { chooseStorageRoot(); return }
 
         /*
          * 带下标的标签动作（tab 右键菜单用，见 openTabMenu）。
@@ -797,7 +947,8 @@ Rectangle {
         if (act === "closeOtherTabs") { closeOtherTabs(); return }
         if (act === "closeAllTabs") { closeAllTabs(); return }
         if (act === "print") { view.printDocument(); return }
-        if (act === "refresh") { refresh(); return }
+        /* 刷新 = 重扫磁盘（文件可能在别的程序里被改过 / 删过），再重建左树 */
+        if (act === "refresh") { Store.rescan(); refresh(); return }
         if (act === "quit") { Win.closeWindow(); return }
         if (act === "clearsearch") { searchText = ""; topBar.clearSearch(); return }
 
@@ -865,6 +1016,8 @@ Rectangle {
         /* ---- 其它 ---- */
         if (act === "shortcuts") { showShortcuts(); return }
         if (act === "settings") { showShortcuts(); return }
+        /* 设置面板的"存储"栏：保存位置 / 导入的文件夹 */
+        if (act === "storage") { showStorage(); return }
         if (act === "about") { showAbout(); return }
     }
 
@@ -944,6 +1097,14 @@ Rectangle {
              */
             menuX: window.menuTopLeft().x,
             menuY: window.menuTopLeft().y,
+
+            /* 设置面板（存储那一栏的绑定会在打开时才算出来，自检据此确认它没报错） */
+            settingsOpened: settingsPanel.opened,
+            settingsSection: settingsPanel.section,
+            storageRoot: Store.rootPath,
+            storageFiles: Store.fileCount,
+            storageEntries: Store.entryCount,
+            storageImported: Store.importedFolders.length,
 
             /*
              * tab 栏和顶上那条横向滚动条的几何（tab 撑满容器时才出现）。
@@ -1043,7 +1204,7 @@ Rectangle {
          */
 
         /*
-         * 左树：宽度 / 是不是收起来 / 条目排序都按上次的样子回来。
+         * 左树：宽度 / 是不是收起来 / 文件排序都按上次的样子回来。
          * 必须在 refresh() 之前 —— 列表就是按 newestFirst 排的。
          * 宽度照夹一遍：设置文件被手改成 3 这种值，面板会窄到连按钮都放不下。
          */
@@ -1054,7 +1215,29 @@ Rectangle {
         folderTreeHidden = Cmd.recall("treeHidden", "0") === "1"
         newestFirst = Cmd.recall("treeNewestFirst", "1") === "1"
 
+        /*
+         * 展开状态：设置里存的是"哪些文件夹开着"（一行一个 key）。
+         *
+         * 注意顺序：refresh() 要先跑 —— "第一次启动默认展开今天那一组"要知道
+         * 今天那个日期目录的 key，而 key 是数据里带出来的，得先有数据。
+         */
         refresh()
+
+        var openKeys = Cmd.recall("treeExpanded", "")
+        var map = ({})
+        if (openKeys !== "") {
+            var openList = openKeys.split("\n")
+            for (var t = 0; t < openList.length; ++t)
+                if (openList[t] !== "")
+                    map[openList[t]] = true
+        } else {
+            /* 第一次启动：一进来就看见最新的那一组，而不是一排折着的空文件夹 */
+            var todayKey = Folders.firstDateKey(cbm.nodes)
+            if (todayKey !== "")
+                map[todayKey] = true
+        }
+        expanded = map
+        rebuild()
 
         /*
          * 恢复上次的字号 / 换行 / 行号 / 空白字符设置。
@@ -1131,6 +1314,20 @@ Rectangle {
             Cmd.remember("rulerVisible", editor.view.rulerVisible ? "1" : "0")
             Cmd.remember("rulerColumn", String(editor.view.rulerColumn))
         }
+        /*
+         * 编辑区里保存了一份文件之后，重扫一遍元数据。
+         *
+         * 内容改了之后条目摘要 / 计数就变了（数据库里存的是元数据，不是正文），
+         * 不重扫的话左树右边那个"几条"还是旧的，搜索也搜不到新写进去的东西。
+         *
+         * 用 Qt.callLater 推到下一拍再扫：这个信号是在 C++ 的保存流程里发出来的，
+         * 当场就在里面扫盘 + 重建左树，等于在保存到一半的时候再扎回去一圈。
+         */
+        function onSaved(path) {
+            if (path !== "")
+                Qt.callLater(function () { Store.rescan() })
+        }
+
         function onErrorOccurred(message) {
             /*
              * 自检模式（--self-test）里不弹模态框。
@@ -1402,18 +1599,31 @@ Rectangle {
                 readonly property real panelRight: mapToItem(window.contentItem, width, 0).x
 
                 rows: window.treeRows
-                selected: window.selectedItem
+                selectedPath: window.selectedPath
                 onFolderClicked: (key) => window.toggleFolder(key)
-                onItemClicked: (item) => window.selectItem(item)
+                onFileClicked: (row) => window.openTreeFile(row)
+
+                /*
+                 * 行上按右键：文件给"打开 / 重命名 / 删除 / 在文件夹中显示"，
+                 * 文件夹给"新建 / 刷新 / 在文件夹中显示"（导入的目录多一条移除）。
+                 * 坐标由委托换算成场景坐标（见 TreeDelegate 的 onClicked）。
+                 */
+                onRowContextMenuRequested: (row, x, y) => {
+                    var items = (row.kind === "file")
+                                ? Menus.fileContextMenu(row)
+                                : Menus.folderContextMenu(row)
+                    ddMenu.openAtPoint(null, x, y, items)
+                }
 
                 /* 标题栏那排按钮：动作全在 Main 这边（数据都在这儿） */
                 onNewEntryRequested: window.newEntry()
-                onRefreshRequested: window.refresh()
+                /* 刷新 = 重扫磁盘（文件可能被别的程序改过 / 删过）再重建左树 */
+                onRefreshRequested: { Store.rescan(); window.refresh() }
                 onLocateRequested: window.locateCurrentItem()
                 onCollapseAllRequested: window.setAllFolders(false)
                 onExpandAllRequested: window.setAllFolders(true)
                 onHideRequested: window.toggleFolderTree()
-                /* 当前标签不是列表里的条目时，准星按钮置灰（没什么可定位的） */
+                /* 当前标签不是左树里的文件时，准星按钮置灰（没什么可定位的） */
                 locateEnabled: window.canLocateCurrent()
                 /* 标题"项目 ∨"和右边那个 ⋯ 弹的是同一份菜单 */
                 onMenuRequested: (anchor) =>
@@ -1461,15 +1671,14 @@ Rectangle {
                 Layout.rightMargin: 5
 
                 /*
-                 * 图片条目走这里；文本条目直接进编辑器的标签。
-                 * （正文由 EditorView 的原生 QScintilla 渲染：
-                 *   同一条 66 万字符的条目，QML 侧 2.5~4.3 秒，
-                 *   原生 27ms —— 见 src/EditorViewItem.h）
+                 * 图片不再单独预览。
+                 *
+                 * 上一版图片是左树里的一条"图片条目"，点它走这块图片面板；现在
+                 * 图片跟在当天的 md 里（`![](assets/xxx.png)`），左树列的只有
+                 * md 文件，点开看到的就是那一段 markdown 引用。面板留着不接数据，
+                 * 以后要做"md 里图片的行内预览"再从这里接。
                  */
-                previewItem: {
-                    var it = window.selectedItem
-                    return (it && it.type === "image") ? it : null
-                }
+                previewItem: null
 
                 onTabCloseRequested: (index) => window.closeTab(index)
                 onTabCloseAllRequested: window.closeAllTabs()
@@ -1494,7 +1703,7 @@ Rectangle {
             id: statusBar
             Layout.fillWidth: true
             view: window.view
-            count: cbm.entries.length
+            count: Store.entryCount
         }
             }
         }

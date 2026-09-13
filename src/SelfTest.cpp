@@ -5,13 +5,17 @@
 
 #include <QApplication>
 #include <QColor>
+#include <QDate>
+#include <QDateTime>
 #include <QEventLoop>
+#include <QImage>
 #include <QPalette>
 #include <QCoreApplication>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
 #include <QMetaObject>
+#include <QRegularExpression>
 #include <QTextStream>
 #include <QThread>
 #include <QVariant>
@@ -167,6 +171,17 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store) {
     auto treeMenuActs = [qmlRoot]() {
         QVariant result;
         QMetaObject::invokeMethod(qmlRoot, "treeMenuActs", Q_RETURN_ARG(QVariant, result));
+        return result.toList();
+    };
+
+    /*
+     * 读左树某一类行的**右键**菜单条目（见 Main.qml 的 treeRowMenuActs）。
+     * kind 传 "file" / "folder"：找树里第一个这一类行，用它构造菜单。
+     */
+    auto treeRowMenuActs = [qmlRoot](const QString &kind) {
+        QVariant result;
+        QMetaObject::invokeMethod(qmlRoot, "treeRowMenuActs", Q_RETURN_ARG(QVariant, result),
+                                  Q_ARG(QVariant, QVariant(kind)));
         return result.toList();
     };
 
@@ -1117,114 +1132,142 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store) {
     dispatch(QStringLiteral("toggleReadOnly"));
     check(!view->readOnly(), QStringLiteral("只读模式切回来"));
 
-    /* ---- 剪贴板条目载入（左侧列表点条目走的就是这里）---- */
-    const QVariantList items = store ? store->items(QString()) : QVariantList();
-    if (!items.isEmpty()) {
-        const QVariantMap first = items.first().toMap();
-        const qint64 id = first.value(QStringLiteral("id")).toLongLong();
-        const QString title = first.value(QStringLiteral("title")).toString();
-        view->openClipboardItem(id, title);
-        check(view->hasDocument(), QStringLiteral("openClipboardItem() 载入剪贴板条目"));
-        check(view->displayName() == title || !title.isEmpty(),
-              QStringLiteral("标签标题取自剪贴板条目"), view->displayName());
-    } else {
-        out() << "  --    剪贴板库为空，跳过条目载入检查" << Qt::endl;
-    }
-
     /*
-     * ============ 左边列表点条目：一个条目一条标签 ============
+     * ================= 剪贴板内容：落成 md 文件 + 元数据 =================
      *
-     * 原来 openClipboardItem() 是"复用那条没改过内容的剪贴板标签"——点来点去
-     * 始终是同一个标签在换内容，看着就是"不管点哪个文件都只有一个标签在变"。
-     * 现在按条目 id 认标签：
+     * 内容不再进数据库了：复制进来的东西写进
+     *     <保存目录>/<日期>/<时分秒>.md
+     * 库里只剩元数据（文件清单 + 每条的时间 / 类型 / 标题 / 摘要 / 去重哈希）。
+     * 这一段走的就是采集那条链路 —— ClipboardManager 调的 captureText / captureImage。
      *
-     *   没开过的条目 -> 新开一条；
-     *   开过的条目   -> 切回它自己那条（正文在它那份 QsciDocument 里，不重灌）。
-     *
-     * 所以这里量三件事：点新条目会多一条标签；点开的条目不再多开；
-     * 以及"切回来"是真的切换（标签下标回到原来那条、正文没被换掉）。
-     * 找两条**正文不一样**的文本条目来做判定 —— 正文一样就分不出切到哪条了。
+     * **跑在临时保存目录上**：先把保存位置换到临时目录，全部跑完再换回来
+     * （见下面"新建 / 保存 / 改名 / 删除"那一段的收尾）。
+     * 不能拿用户真实的目录来跑：采集是"往当天那份 md 里追加"落地的，往用户那份
+     * 文件里写一段、再整份删掉，就把用户自己的东西一起删了。
      */
+    QString savedRoot;
     if (store) {
-        auto straight = [](const QString &s) {
-            QString copy = s;
-            copy.remove(QLatin1Char('\r'));  // Scintilla 会把 CRLF 归一，比较时先抹平
-            return copy;
+        savedRoot = store->rootPath();
+        const QString tempRoot = dir.filePath(QStringLiteral("clipstore"));
+        check(store->setRootPath(tempRoot), QStringLiteral("保存位置可改（自检用临时目录）"));
+        check(store->rootPath() == QDir::cleanPath(tempRoot),
+              QStringLiteral("改完读回来还是那个目录"), store->rootPath());
+
+        /* ---- 文本：写进当天的 md ---- */
+        const QString marker =
+            QStringLiteral("自检内容 %1").arg(QDateTime::currentMSecsSinceEpoch());
+        check(store->captureText(marker), QStringLiteral("采集文本：写进了当天的 md"));
+        check(!store->captureText(marker),
+              QStringLiteral("同一段文本不会写第二遍（按内容去重）"));
+
+        const QString dateKey = QDate::currentDate().toString(QStringLiteral("yyyy-MM-dd"));
+        const QDir day(store->rootPath() + QLatin1Char('/') + dateKey);
+        check(day.exists(), QStringLiteral("日期目录按 2026-09-13 这种名字建"), day.path());
+
+        /*
+         * 在目录里**按内容**找文件。
+         *
+         * 不按文件名找：自检里几条内容往往落在同一秒里，名字会带 -2 / -3 后缀，
+         * 而排序上 "073100-2.md" 反而排在 "073100.md" 前面（'-' < '.'），
+         * 拿"最后一个"当"最新那个"是不成立的。
+         */
+        auto fileContaining = [](const QDir &folder, const QString &needle) {
+            const QStringList names =
+                folder.entryList({ QStringLiteral("*.md") }, QDir::Files, QDir::Name);
+            for (const QString &name : names) {
+                if (readFile(folder.absoluteFilePath(name)).contains(needle))
+                    return folder.absoluteFilePath(name);
+            }
+            return QString();
         };
 
-        const QVariantList all = store->items(QString());
-        QVariantMap entryA, entryB;
-        for (const QVariant &v : all) {
-            const QVariantMap m = v.toMap();
-            if (m.value(QStringLiteral("type")).toString() != QLatin1String("text"))
-                continue;
-            if (entryA.isEmpty()) {
-                entryA = m;
-                continue;
-            }
-            if (straight(store->contentOf(m.value(QStringLiteral("id")).toLongLong()))
-                != straight(store->contentOf(entryA.value(QStringLiteral("id")).toLongLong()))) {
-                entryB = m;
-                break;
-            }
+        const QString firstFile = fileContaining(day, marker);
+        check(!firstFile.isEmpty(), QStringLiteral("当天的目录里有一份 md 装着刚采集的内容"));
+        if (!firstFile.isEmpty()) {
+            const QString name = QFileInfo(firstFile).fileName();
+            check(QRegularExpression(QStringLiteral("^\\d{6}(-\\d+)?\\.md$")).match(name).hasMatch(),
+                  QStringLiteral("文件名是时分秒（73100.md 这种）"), name);
+            const QString body = readFile(firstFile);
+            check(body.contains(QStringLiteral("## ")),
+                  QStringLiteral("每条内容前面是 \"## 时分秒\" 的分段行"));
+            check(body.startsWith(QStringLiteral("# ") + dateKey),
+                  QStringLiteral("文件开头是当天的日期标题"));
         }
 
-        if (entryA.isEmpty() || entryB.isEmpty()) {
-            out() << "  --    剪贴板里没有两条正文不同的文本条目，跳过" << Qt::endl;
-        } else {
-            const qint64 idA = entryA.value(QStringLiteral("id")).toLongLong();
-            const QString titleA = entryA.value(QStringLiteral("title")).toString();
-            const qint64 idB = entryB.value(QStringLiteral("id")).toLongLong();
-            const QString titleB = entryB.value(QStringLiteral("title")).toString();
-
-            view->openClipboardItem(idA, titleA);
-            const int afterA = view->documents().size();
-            const int indexA = view->currentIndex();
-            const QString textA = view->currentText();
-
-            view->openClipboardItem(idB, titleB);
-            check(view->documents().size() == afterA + 1,
-                  QStringLiteral("点另一个条目会新开一条标签（不再共用一个标签换内容）"),
-                  QStringLiteral("%1 -> %2 条").arg(afterA).arg(view->documents().size()));
-            check(view->currentText() != textA,
-                  QStringLiteral("新标签里装的是另一个条目的正文"),
-                  QStringLiteral("长度 %1").arg(view->currentText().size()));
-
-            const int indexB = view->currentIndex();
-
-            /* 在这条标签上改一笔：下面看它会不会被下一次点击冲掉 */
-            view->duplicateLine();
-            const QString textBEdited = view->currentText();
-            check(view->modified(), QStringLiteral("在标签里改一笔 -> 已修改状态"));
-
-            view->openClipboardItem(idA, titleA);
-            check(view->documents().size() == afterA + 1,
-                  QStringLiteral("再点开过的条目不再新开标签（切回原来那条）"),
-                  QStringLiteral("实际 %1 条").arg(view->documents().size()));
-            check(view->currentIndex() == indexA, QStringLiteral("切回来的就是那个条目自己那条"),
-                  QStringLiteral("下标 %1（应该是 %2）").arg(view->currentIndex()).arg(indexA));
-            check(view->currentText() == textA,
-                  QStringLiteral("那条的正文原样还在"));
-
-            view->openClipboardItem(idB, titleB);
-            check(view->documents().size() == afterA + 1,
-                  QStringLiteral("点回改过的那条也不新开标签"));
-            check(view->currentIndex() == indexB && view->currentText() == textBEdited,
-                  QStringLiteral("改过的那条改动还在，没被重灌成原文"),
-                  QStringLiteral("下标 %1 / 正文 %2 字符")
-                      .arg(view->currentIndex()).arg(view->currentText().size()));
-
-            /*
-             * 收尾：把这两条关掉。
-             *
-             * 上面那条现在是"已修改"，C++ 的 closeDocument() 不问保存直接关
-             * （问保存的是 QML 的 closeTab）——不留着它，最后那次
-             * dispatch(closeAllTabs) 才不会被"要不要保存"的弹窗卡住。
-             * 先关下标大的，小的那个下标才不会跟着挪。
-             */
-            view->closeDocument(qMax(indexA, indexB));
-            view->closeDocument(qMin(indexA, indexB));
+        /* ---- 图片：PNG 落到 assets/，md 里写相对引用 ---- */
+        QImage shot(24, 24, QImage::Format_ARGB32);
+        shot.fill(QColor(0x4c, 0x96, 0xd8));
+        check(store->captureImage(shot), QStringLiteral("采集图片：PNG 落到当天目录的 assets/"));
+        {
+            const QStringList pngs = QDir(day.absoluteFilePath(QStringLiteral("assets")))
+                                         .entryList({ QStringLiteral("*.png") }, QDir::Files);
+            check(pngs.size() == 1, QStringLiteral("assets/ 里正好一张 PNG"),
+                  QStringLiteral("实际 %1 张").arg(pngs.size()));
+            const QString imageFile = fileContaining(day, QStringLiteral("](assets/"));
+            check(!imageFile.isEmpty()
+                      && readFile(imageFile).contains(QStringLiteral("![图片](assets/")),
+                  QStringLiteral("md 里用相对路径引用了那张图"), imageFile);
         }
+
+        /* ---- 20K：写满就另起一份 ---- */
+        const QString big = QStringLiteral("自检大块内容 ") + QString(21 * 1024, QLatin1Char('y'));
+        check(store->captureText(big), QStringLiteral("超过 20K 的正文也能落盘（自己占一份）"));
+        const QString afterBig =
+            QStringLiteral("自检大块之后的第二条 %1").arg(QDateTime::currentMSecsSinceEpoch());
+        check(store->captureText(afterBig), QStringLiteral("紧接着的那一条也写进去了"));
+
+        const QString bigFile = fileContaining(day, big);
+        const QString nextFile = fileContaining(day, afterBig);
+        check(!bigFile.isEmpty() && !nextFile.isEmpty(),
+              QStringLiteral("两份内容都找得到自己的文件"));
+        check(bigFile != nextFile,
+              QStringLiteral("上一份超过 20K 之后，下一条落在了**新的一份**里"),
+              QStringLiteral("%1 / %2").arg(QFileInfo(bigFile).fileName(),
+                                            QFileInfo(nextFile).fileName()));
+        check(!readFile(bigFile).contains(marker),
+              QStringLiteral("超大的那一份是另起的：里面没有更早那条内容"));
+        check(QFileInfo(bigFile).size() > 20 * 1024,
+              QStringLiteral("单条内容本身就超过 20K 时照写（不截断）"),
+              QStringLiteral("%1 字节").arg(QFileInfo(bigFile).size()));
+
+        /* ---- 元数据：有记录，正文不进库 ---- */
+        check(store->entryCount() >= 4, QStringLiteral("元数据里有条目记录（只记元数据）"),
+              QStringLiteral("%1 条").arg(store->entryCount()));
+        check(store->fileCount() >= 3, QStringLiteral("元数据里有文件记录"),
+              QStringLiteral("%1 份").arg(store->fileCount()));
+
+        const QVariantList clipTree = store->tree(QString(), true);
+        check(!clipTree.isEmpty(), QStringLiteral("左树数据能从元数据建出来"));
+        if (!clipTree.isEmpty()) {
+            const QVariantMap top = clipTree.first().toMap();
+            check(top.value(QStringLiteral("kind")).toString() == QLatin1String("date"),
+                  QStringLiteral("树的第一层是日期文件夹"));
+            check(top.value(QStringLiteral("label")).toString() == dateKey,
+                  QStringLiteral("日期文件夹的名字就是这一天"),
+                  top.value(QStringLiteral("label")).toString());
+            check(top.value(QStringLiteral("files")).toInt() >= 3,
+                  QStringLiteral("日期文件夹下面挂着那几份 md"),
+                  QStringLiteral("%1 份").arg(top.value(QStringLiteral("files")).toInt()));
+        }
+
+        /* 搜索：按条目摘要找得到（库里存的是摘要，不是正文） */
+        check(!store->tree(marker, true).isEmpty(),
+              QStringLiteral("按内容搜得到：只留命中的文件"));
+        check(store->tree(QStringLiteral("绝对不存在的关键词 zzz"), true).isEmpty(),
+              QStringLiteral("搜不到的词 -> 空树"));
+
+        /*
+         * ---- 程序自己往剪贴板里写的内容不算采集对象 ----
+         *
+         * 编辑器里 Ctrl+C、菜单里的"复制全文"、左树回填剪贴板……都会触发
+         * QClipboard::dataChanged，不挡掉的话刚复制的东西立刻又被采集一遍。
+         * 机制就是这一个标记：置上 -> 下一次采集跳过 -> 用完就清。
+         */
+        store->markOwnCopy();
+        check(store->takeSkipNextCapture(),
+              QStringLiteral("自己人写的剪贴板变化：下一次采集会跳过"));
+        check(!store->takeSkipNextCapture(),
+              QStringLiteral("这个标记只生效一次（不会把后面真正的外部复制吃掉）"));
     }
 
     /* 缩进参考线：默认开、颜色和另外两条竖线一样（不是正文色、不是 Scintilla 默认） */
@@ -1709,12 +1752,12 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store) {
     /*
      * ================= 左侧项目树标题栏那排按钮 =================
      *
-     * 标题栏现在是 PyCharm 项目面板那六件事：新建条目 / 刷新 / 全部折叠 /
-     * 全部展开 / 更多 / 收起面板。这里钉三件事：
+     * 标题栏现在摆着七件事：新建 md / 刷新 / 定位 / 全部折叠 / 全部展开 / 更多 /
+     * 收起面板。这里钉三件事：
      *
-     *  1) 六个按钮真的摆在标题栏里（个数是从标题栏那排 RowLayout 里数出来的，
+     *  1) 七个按钮真的摆在标题栏里（个数是从标题栏那排 RowLayout 里数出来的，
      *     不是写死的常量，见 FolderTree.toolbarButtonCount）；
-     *  2) 全部折叠 / 全部展开真的把四个日期分组收拢 / 铺开（量的是 treeRows
+     *  2) 全部折叠 / 全部展开真的把日期文件夹收拢 / 铺开（量的是 treeRows
      *     的行数，不是只看那个布尔量）；
      *  3) 收起面板把**布局槽位**收成 0，再点一次原样回来 ——
      *     只改标志位、宽度没跟着走，从界面上是一眼能看出来的。
@@ -1727,8 +1770,10 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store) {
             acts += (acts.isEmpty() ? QString() : QStringLiteral(" | ")) + a.toString();
         check(acts == QStringLiteral("treeNew | refresh | treeLocate | treeExpandAll"
                                      " | treeCollapseAll | treeSortNewest | treeSortOldest"
+                                     " | treeImportFolder | treeOpenRoot | treeChooseRoot"
                                      " | treeHide"),
-              QStringLiteral("左树\"更多\"菜单 = 新建 / 刷新 / 定位 / 全展开 / 全折叠 / 排序 / 收起面板"),
+              QStringLiteral("左树\"更多\"菜单 = 新建 / 刷新 / 定位 / 全展开 / 全折叠 / "
+                             "排序 / 导入文件夹 / 保存位置 / 收起面板"),
               acts);
 
         const QVariantMap ui = uiState();
@@ -1739,16 +1784,20 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store) {
 
         const QVariantMap before = treeState();
         const int folders = before.value(QStringLiteral("folderCount")).toInt();
-        check(folders == 4, QStringLiteral("左树是四个日期分组"),
+        /*
+         * 日期文件夹的个数由**磁盘上有哪些日期目录**决定（自检跑在临时保存
+         * 目录上，所以只有今天一个），导入的目录算在同一个计数里。
+         */
+        check(folders >= 1, QStringLiteral("左树上至少有一个日期文件夹"),
               QStringLiteral("实际 %1 个").arg(folders));
 
         dispatch(QStringLiteral("treeCollapseAll"));
         {
             const QVariantMap s = treeState();
             check(s.value(QStringLiteral("openFolders")).toInt() == 0,
-                  QStringLiteral("全部折叠：四个分组都收起来了"));
+                  QStringLiteral("全部折叠：日期文件夹都收起来了"));
             check(s.value(QStringLiteral("rows")).toInt() == folders,
-                  QStringLiteral("折叠后树里只剩分组那几行"),
+                  QStringLiteral("折叠后树里只剩文件夹那几行"),
                   QStringLiteral("实际 %1 行").arg(s.value(QStringLiteral("rows")).toInt()));
         }
 
@@ -1756,11 +1805,81 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store) {
         {
             const QVariantMap s = treeState();
             check(s.value(QStringLiteral("openFolders")).toInt() == folders,
-                  QStringLiteral("全部展开：四个分组都开了"));
+                  QStringLiteral("全部展开：日期文件夹都开了"));
             check(s.value(QStringLiteral("rows")).toInt() >= folders,
-                  QStringLiteral("展开后行数不少于分组数"),
+                  QStringLiteral("展开后行数不少于文件夹数"),
                   QStringLiteral("实际 %1 行").arg(s.value(QStringLiteral("rows")).toInt()));
+            /* 展开之后，当天的那些 md 应该真的作为文件行出现在树里 */
+            check(s.value(QStringLiteral("rows")).toInt() > folders,
+                  QStringLiteral("展开后有文件行（日期文件夹下面挂着 md）"),
+                  QStringLiteral("%1 行 / %2 个文件夹")
+                      .arg(s.value(QStringLiteral("rows")).toInt()).arg(folders));
         }
+
+        /*
+         * 左树右键菜单：文件一条路、文件夹一条路（见 js/EditorMenus.js 的
+         * fileContextMenu / folderContextMenu）。这里钉"菜单里有这几条"
+         * 以及"每条都带着那个文件 / 文件夹的路径" —— 动作名是
+         * fileOpen:<路径> 这种前缀形式，dispatch 按前缀切。
+         */
+        {
+            QStringList fileActs;
+            for (const QVariant &a : treeRowMenuActs(QStringLiteral("file")))
+                fileActs << a.toString();
+            check(fileActs.size() == 4,
+                  QStringLiteral("文件右键菜单四条（打开 / 重命名 / 删除 / 在文件夹中显示）"),
+                  QStringLiteral("实际 %1 条").arg(fileActs.size()));
+            check(fileActs.value(0).startsWith(QStringLiteral("fileOpen:"))
+                      && fileActs.value(1).startsWith(QStringLiteral("fileRename:"))
+                      && fileActs.value(2).startsWith(QStringLiteral("fileDelete:"))
+                      && fileActs.value(3).startsWith(QStringLiteral("fileReveal:")),
+                  QStringLiteral("四条各带自己的动作前缀"),
+                  fileActs.join(QLatin1Char('/')));
+            {
+                /* 菜单里带的那条路径得是磁盘上真有的那份 md */
+                const QString acted = fileActs.value(0).mid(int(qstrlen("fileOpen:")));
+                check(!acted.isEmpty() && QFileInfo::exists(acted),
+                      QStringLiteral("菜单里带的就是磁盘上那份文件"), acted);
+            }
+
+            QStringList folderActs;
+            for (const QVariant &a : treeRowMenuActs(QStringLiteral("folder")))
+                folderActs << a.toString();
+            check(folderActs.size() == 3
+                      && folderActs.value(0) == QLatin1String("treeNew")
+                      && folderActs.value(1) == QLatin1String("refresh")
+                      && folderActs.value(2).startsWith(QStringLiteral("folderReveal:")),
+                  QStringLiteral("文件夹右键菜单三条（新建 / 刷新 / 在文件夹中显示）"),
+                  folderActs.join(QLatin1Char('/')));
+        }
+
+        /*
+         * 设置面板的"存储"栏。
+         *
+         * 那一栏里全是绑定（保存位置 / 文件数 / 内容条数 / 导入的文件夹），
+         * 打开它等于把这些绑定真算一遍 —— QML 侧的绑定错误只有算过才暴露
+         * （"Sequence length out of range" 就是这么抓出来的）。
+         */
+        dispatch(QStringLiteral("storage"));
+        settle();
+        {
+            const QVariantMap panel = uiState();
+            check(panel.value(QStringLiteral("settingsOpened")).toBool()
+                      && panel.value(QStringLiteral("settingsSection")).toString()
+                             == QLatin1String("storage"),
+                  QStringLiteral("dispatch(storage) 打开设置面板的\"存储\"栏"),
+                  panel.value(QStringLiteral("settingsSection")).toString());
+            check(panel.value(QStringLiteral("storageRoot")).toString() == store->rootPath(),
+                  QStringLiteral("\"存储\"栏显示的就是当前保存位置"),
+                  panel.value(QStringLiteral("storageRoot")).toString());
+            check(panel.value(QStringLiteral("storageEntries")).toInt() == store->entryCount(),
+                  QStringLiteral("\"存储\"栏的内容条数和元数据一致"),
+                  QStringLiteral("面板 %1 / 元数据 %2")
+                      .arg(panel.value(QStringLiteral("storageEntries")).toInt())
+                      .arg(store->entryCount()));
+        }
+        QMetaObject::invokeMethod(qmlRoot, "closeSettings");
+        settle();
 
         dispatch(QStringLiteral("treeHide"));
         settle();
@@ -1785,135 +1904,140 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store) {
     }
 
     /*
-     * ================= 新建条目 / Ctrl+S 写回库 =================
+     * ================= 新建 md / Ctrl+S 写回文件 / 改名 / 删除 =================
      *
-     * 走路：ClipboardStore::createTextEntry（左侧树 "+" 那条路）
-     *       -> 编辑器标签 -> 改一笔 -> saveCurrent()
-     *       -> 库里的正文和标题都跟着变。
+     * 走路：Store.createFile（左侧树 "+" 那条路）
+     *       -> 编辑器标签 -> 改一笔 -> saveCurrent() -> 磁盘上那份 md 跟着变；
+     *       再走一遍重命名 / 删除（左树右键菜单那两条）。
      *
-     * 跑在**真实的库**上，所以收尾必须把它造的那条删掉
-     * （ClipboardStore::removeItem 就是为这个留的），
-     * 否则自检跑一次用户列表里就多一条"自检新建的条目"。
+     * 同样跑在临时保存目录上（保存位置在上一段换成临时目录的），收尾时换回来。
      */
     if (store) {
-        const qint64 id = store->createTextEntry(QStringLiteral("自检新建的条目"));
-        check(id > 0, QStringLiteral("新建条目写进库里（左侧树 \"+\" 那条路）"));
-        check(store->titleOf(id) == QStringLiteral("自检新建的条目"),
-              QStringLiteral("标题按正文首行起"), store->titleOf(id));
+        const QString path = store->createFile(QStringLiteral("自检新建的内容"));
+        check(!path.isEmpty(), QStringLiteral("新建文件：在今天的目录里建出一份 md"), path);
+        check(QFileInfo::exists(path), QStringLiteral("新建的文件真的在磁盘上"));
+        check(QFileInfo(path).fileName().contains(QRegularExpression(QStringLiteral("^\\d{6}"))),
+              QStringLiteral("新建的文件名也是时分秒"), QFileInfo(path).fileName());
 
-        if (id > 0) {
-            view->openClipboardItem(id, store->titleOf(id));
-            check(view->hasDocument(), QStringLiteral("新建的条目能打开成标签"));
+        view->openFile(path);
+        check(view->hasDocument(), QStringLiteral("新建的 md 能打开成标签"));
+        check(QFileInfo(view->filePath()).absoluteFilePath() == QFileInfo(path).absoluteFilePath(),
+              QStringLiteral("标签认得这份文件的路径"), view->filePath());
+        check(view->currentText().contains(QStringLiteral("自检新建的内容")),
+              QStringLiteral("新建时给的那段内容是文件正文的一部分"));
 
-            /* 改一笔：复制一行，正文变成两行 */
-            view->duplicateLine();
-            check(view->modified(), QStringLiteral("改一笔 -> 已修改状态"));
+        /* 改一笔：复制一行（新建出来的文件第一行是 "# 日期" 标题，复制的是它） */
+        const QString beforeEdit = readFile(path);
+        view->duplicateLine();
+        check(view->modified(), QStringLiteral("改一笔 -> 已修改状态"));
 
-            check(view->saveCurrent(), QStringLiteral("剪贴板条目 Ctrl+S 写回库里"),
-                  view->lastError());
-            check(!view->modified(), QStringLiteral("写回之后修改标记清掉"));
-            check(store->contentOf(id) == view->currentText(),
-                  QStringLiteral("库里那一条的正文 = 编辑器里的正文"),
-                  QStringLiteral("库里 %1 字符 / 编辑器 %2 字符")
-                      .arg(store->contentOf(id).size()).arg(view->currentText().size()));
-            check(view->displayName() == store->titleOf(id),
-                  QStringLiteral("标签标题跟着库里的新标题变"),
-                  QStringLiteral("标签 %1 / 库里 %2")
-                      .arg(view->displayName(), store->titleOf(id)));
-            check(!store->updateTextEntry(id + 1000000, QStringLiteral("x")),
-                  QStringLiteral("写回不存在的条目会失败（不会悄悄新建一条）"));
-
+        check(view->saveCurrent(), QStringLiteral("md 标签 Ctrl+S 写回文件"), view->lastError());
+        check(!view->modified(), QStringLiteral("写回之后修改标记清掉"));
+        {
             /*
-             * 准星按钮（定位当前文件）：当前标签是列表里的条目，
-             * 按一下要"展开它所在的那一组 + 选中这一条"。
-             *
-             * 先全部折叠：不然它所在的那组本来开着，展不展开根本看不出来。
+             * 判据是"磁盘上那份 = 编辑器里的正文"，不是"某段文字出现几次"：
+             * 文件格式（日期标题 + "## 时分秒" 分段）以后可能变，这条断言不该跟着变。
+             * Scintilla 会把 CRLF 归一，比较时先把 \r 抹平。
              */
-            dispatch(QStringLiteral("treeCollapseAll"));
-            check(treeState().value(QStringLiteral("openFolders")).toInt() == 0,
-                  QStringLiteral("定位用例：先全部折叠，看它会不会自己展开"));
-
-            dispatch(QStringLiteral("treeLocate"));
-            {
-                const QVariantMap s = treeState();
-                check(s.value(QStringLiteral("currentClipId")).toLongLong() == id,
-                      QStringLiteral("定位用例：当前标签认得出是哪一条（按 id，不按标题）"),
-                      QStringLiteral("认出来的 id %1（应为 %2）")
-                          .arg(s.value(QStringLiteral("currentClipId")).toLongLong()).arg(id));
-                check(s.value(QStringLiteral("selectedId")).toLongLong() == id,
-                      QStringLiteral("定位用例：列表里选中的就是当前标签那一条"),
-                      QStringLiteral("选中的 id %1").arg(s.value(QStringLiteral("selectedId")).toLongLong()));
-                check(s.value(QStringLiteral("openFolders")).toInt() >= 1,
-                      QStringLiteral("定位用例：它所在的那一组被展开了"));
-
-                /*
-                 * 蓝底只给选中的条目：一级菜单（分组）不亮。
-                 *
-                 * 量的是委托自己报的 rowHighlight（见 FolderTree.highlightCounts），
-                 * 不是把 QML 里那个表达式在 C++ 这侧再算一遍。
-                 */
-                const QVariantMap hl = s.value(QStringLiteral("highlighted")).toMap();
-                check(hl.value(QStringLiteral("folders")).toInt() == 0,
-                      QStringLiteral("一级菜单不亮蓝底（今天/昨天/近 7 天/更早）"),
-                      QStringLiteral("亮着的分组行 %1")
-                          .arg(hl.value(QStringLiteral("folders")).toInt()));
-                check(hl.value(QStringLiteral("items")).toInt() == 1,
-                      QStringLiteral("蓝底只留在选中的那一条上"),
-                      QStringLiteral("亮着的条目行 %1")
-                          .arg(hl.value(QStringLiteral("items")).toInt()));
-            }
-
-            /*
-             * 滚动的意义在于"目标在屏幕外"。
-             *
-             * 上面那条是**最新**的一条，本来就在列表顶上；这里换一条最老的
-             * （列表最下面，列表有两百来条），定位之后它必须出现在可视区里 ——
-             * 只展开、只高亮而不滚动，用户还是看不见它在哪。
-             */
-            const QVariantList history = store->items(QString());
-            if (!history.isEmpty()) {
-                const QVariantMap oldest = history.last().toMap();
-                if (oldest.value(QStringLiteral("type")).toString() == QLatin1String("text")) {
-                    view->openClipboardItem(oldest.value(QStringLiteral("id")).toLongLong(),
-                                            oldest.value(QStringLiteral("title")).toString());
-                    dispatch(QStringLiteral("treeLocate"));
-                    settle();
-                    {
-                        const QVariantMap s = treeState();
-                        check(s.value(QStringLiteral("selectedId")).toLongLong()
-                              == oldest.value(QStringLiteral("id")).toLongLong(),
-                              QStringLiteral("定位用例：列表里最老的那条也能定位上"));
-                        check(s.value(QStringLiteral("locatedVisible")).toBool(),
-                              QStringLiteral("定位用例：在屏幕外的目标被滚进了可视区"),
-                              QStringLiteral("选中 id %1 / 当前标签 id %2")
-                                  .arg(s.value(QStringLiteral("selectedId")).toLongLong())
-                                  .arg(s.value(QStringLiteral("currentClipId")).toLongLong()));
-                    }
-                    view->closeDocument(view->currentIndex());
-                } else {
-                    out() << "  --    最老的一条不是文本条目，跳过\"滚进可视区\"检查" << Qt::endl;
-                }
-            }
-
-            /* 收尾：关掉标签，再把造出来的那条删干净 */
-            view->closeDocument(view->currentIndex());
-            check(store->removeItem(id), QStringLiteral("清掉自检造的那条（不留在用户库里）"));
-            check(store->contentOf(id).isEmpty(),
-                  QStringLiteral("删掉的条目确实读不回来了"));
+            auto straight = [](QString s) {
+                s.remove(QLatin1Char('\r'));
+                return s;
+            };
+            const QString disk = readFile(path);
+            check(disk.length() > beforeEdit.length(),
+                  QStringLiteral("改的那一笔真的落到了磁盘上（文件变长了）"),
+                  QStringLiteral("%1 -> %2 字符").arg(beforeEdit.length()).arg(disk.length()));
+            check(straight(disk) == straight(view->currentText()),
+                  QStringLiteral("磁盘上那份文件 = 编辑器里的正文"),
+                  QStringLiteral("文件 %1 字符 / 编辑器 %2 字符")
+                      .arg(disk.size()).arg(view->currentText().size()));
+            check(disk.contains(QStringLiteral("自检新建的内容")),
+                  QStringLiteral("新建时给的那段内容还在文件里"));
         }
 
+        /* ---- 左树定位当前文件 ---- */
+        dispatch(QStringLiteral("treeCollapseAll"));
+        check(treeState().value(QStringLiteral("openFolders")).toInt() == 0,
+              QStringLiteral("定位用例：先全部折叠，看它会不会自己展开"));
+
+        dispatch(QStringLiteral("treeLocate"));
+        settle();
+        {
+            const QVariantMap s = treeState();
+            check(s.value(QStringLiteral("currentPath")).toString()
+                      == QFileInfo(path).absoluteFilePath(),
+                  QStringLiteral("定位用例：当前标签认得出是哪一份文件（按路径认）"),
+                  s.value(QStringLiteral("currentPath")).toString());
+            check(s.value(QStringLiteral("selectedPath")).toString()
+                      == QFileInfo(path).absoluteFilePath(),
+                  QStringLiteral("定位用例：左树里选中的就是当前标签那一份"),
+                  s.value(QStringLiteral("selectedPath")).toString());
+            check(s.value(QStringLiteral("openFolders")).toInt() >= 1,
+                  QStringLiteral("定位用例：它所在的那个日期目录被展开了"));
+
+            /*
+             * 蓝底只给选中的文件：日期文件夹那一级不亮。
+             *
+             * 量的是委托自己报的 rowHighlight（见 FolderTree.highlightCounts），
+             * 不是把 QML 里那个表达式在 C++ 这侧再算一遍。
+             */
+            const QVariantMap hl = s.value(QStringLiteral("highlighted")).toMap();
+            check(hl.value(QStringLiteral("folders")).toInt() == 0,
+                  QStringLiteral("日期文件夹不亮蓝底"),
+                  QStringLiteral("亮着的文件夹行 %1")
+                      .arg(hl.value(QStringLiteral("folders")).toInt()));
+            check(hl.value(QStringLiteral("files")).toInt() == 1,
+                  QStringLiteral("蓝底只留在选中的那一份文件上"),
+                  QStringLiteral("亮着的文件行 %1")
+                      .arg(hl.value(QStringLiteral("files")).toInt()));
+        }
+
+        /* ---- 重命名：磁盘上的文件和开着的标签一起改 ---- */
+        const QString newName = QStringLiteral("selfcheck-renamed.md");
+        const QString renamed = QFileInfo(path).absolutePath() + QLatin1Char('/') + newName;
+        check(store->renameFile(path, newName), QStringLiteral("重命名：文件改名成功"));
+        check(QFileInfo::exists(renamed), QStringLiteral("改完名字的文件在磁盘上"), renamed);
+        check(!QFileInfo::exists(path), QStringLiteral("老名字那份已经不在了"));
+        check(view->updateDocumentPath(path, renamed),
+              QStringLiteral("打开着的标签跟着换路径（不换的话下一次 Ctrl+S 会写回老名字）"));
+        check(QFileInfo(view->filePath()).absoluteFilePath() == QFileInfo(renamed).absoluteFilePath(),
+              QStringLiteral("标签上的路径就是新名字"), view->filePath());
+        check(!store->renameFile(QStringLiteral("这个文件不存在.md"), QStringLiteral("x")),
+              QStringLiteral("重命名不存在的文件会失败（不会悄悄新建一份）"));
+
+        /* ---- 删除：文件从磁盘上消失，元数据也跟着清 ---- */
+        const int entriesBefore = store->entryCount();
+        view->closeDocument(view->indexOfPath(renamed));
+        check(store->deleteFile(renamed), QStringLiteral("删除：文件真的被删掉了"));
+        check(!QFileInfo::exists(renamed), QStringLiteral("磁盘上那份已经不在了"));
+        check(store->entryCount() < entriesBefore,
+              QStringLiteral("删掉文件之后它的条目元数据也清了"),
+              QStringLiteral("%1 -> %2").arg(entriesBefore).arg(store->entryCount()));
+        check(!store->deleteFile(renamed),
+              QStringLiteral("再删一次会失败（文件已经不在了）"));
+
         /*
-         * 不在列表里的标签（未命名空白文档）没什么可定位的：
-         * 准星按钮该是灰的，按下去也不能把列表里的选中项改掉。
+         * 不在左树管得着的范围里的标签（未命名空白文档）没什么可定位的：
+         * 准星按钮该是灰的。
          */
         dispatch(QStringLiteral("new"));
         {
             const QVariantMap s = treeState();
             check(!s.value(QStringLiteral("locateEnabled")).toBool()
-                  && s.value(QStringLiteral("currentClipId")).toLongLong() < 0,
-                  QStringLiteral("定位按钮：未命名空白标签时置灰（没有可定位的条目）"));
+                      && s.value(QStringLiteral("currentPath")).toString().isEmpty(),
+                  QStringLiteral("定位按钮：未命名空白标签时置灰（没有可定位的文件）"));
         }
         dispatch(QStringLiteral("closeTab"));
+
+        /*
+         * 收尾：保存位置换回用户原来那个。
+         *
+         * setRootPath 会顺带重扫一遍，所以元数据也跟着回到真实目录上
+         * （临时目录那些记录会在"扫不到的文件"那一步被清掉）。
+         */
+        check(store->setRootPath(savedRoot), QStringLiteral("收尾：保存位置换回原目录"));
+        check(store->rootPath() == QDir::cleanPath(savedRoot),
+              QStringLiteral("收尾：读回来就是用户原来那个目录"), store->rootPath());
     }
 
     /*

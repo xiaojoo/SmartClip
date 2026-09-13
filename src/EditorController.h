@@ -77,6 +77,29 @@ public:
     Q_INVOKABLE QString saveFileDialog(const QString &suggestedName = QString());
 
     /*
+     * 选一个**目录**（导入文件夹 / 改保存位置走这条）。
+     *
+     * startDir 是对话框打开时落在哪儿；用户取消返回空串。
+     */
+    Q_INVOKABLE QString chooseFolderDialog(const QString &title,
+                                           const QString &startDir = QString());
+
+    /*
+     * 让用户填一行文本（重命名文件用）。
+     * 取消或原样返回时 QML 那边自己判断要不要动手。
+     */
+    Q_INVOKABLE QString askText(const QString &title, const QString &label,
+                                const QString &text);
+
+    /*
+     * 在系统文件管理器里定位一个文件 / 打开一个目录。
+     *
+     * 传文件就打开它所在的目录，传目录就打开这个目录 —— 用户想看看
+     * "东西到底存哪儿了"、想手动整理这些 md 时用得上。
+     */
+    Q_INVOKABLE void revealInExplorer(const QString &path);
+
+    /*
      * "有未保存改动"时的三选一。
      * 返回 0 = 保存，1 = 不保存，2 = 取消。
      */

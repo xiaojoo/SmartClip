@@ -1,103 +1,222 @@
 #pragma once
 
 #include <QObject>
-#include <QVariantList>
+#include <QSet>
 #include <QSqlDatabase>
+#include <QStringList>
+#include <QVariantList>
 
+class QDateTime;
 class QImage;
 
+/*
+ * 剪贴板内容的落盘 + 元数据。
+ *
+ * ===========================================================================
+ * 内容不进数据库
+ * ===========================================================================
+ * 剪贴板内容全部落成**真实文件**，数据库里只留元数据（文件清单 + 每条的
+ * 时间、类型、标题、摘要、去重哈希）。这样做的直接好处：
+ *   * 内容用任何编辑器 / 记事本 / Markdown 阅读器都能直接看、直接改；
+ *   * 保存目录指向网盘就同步走了，不需要这个程序在场；
+ *   * 库文件小，坏了大不了重扫一遍磁盘重建（见 rescan()）。
+ *
+ * 磁盘布局（rootPath 可在设置面板里改，默认「文档/SmartClip」）：
+ *
+ *     <root>/2026-09-13/073100.md          当天的剪贴板内容
+ *     <root>/2026-09-13/073545.md          前一个文件超过 20K 之后的新文件
+ *     <root>/2026-09-13/assets/*.png       图片（md 里用相对路径引用）
+ *
+ * 文件名 = 写进这个文件的**第一条内容的时间**（时分秒），所以名字本身就
+ * 说明"这个文件是从几点几分开始记的"，按名字排序天然是时间顺序。
+ *
+ * 文件内容格式（追加，一段一条）：
+ *
+ *     # 2026-09-13
+ *
+ *     ## 07:31:00
+ *
+ *     剪贴板正文…
+ *
+ * 图片那一段的正文是 `![图片](assets/20260913-073100-123.png)` ——
+ * 存的是相对路径，整个日期目录搬走也还指向得到。
+ */
 class ClipboardStore final : public QObject {
     Q_OBJECT
+
+    /* 剪贴板文件的保存根目录（设置面板里可改） */
+    Q_PROPERTY(QString rootPath READ rootPath NOTIFY rootPathChanged)
+    /*
+     * 用户导入的"外部文件夹"（看里面的 md / txt，新内容不会写进去）。
+     *
+     * 暴露给 QML 的是 QVariantList 而不是 QStringList：QStringList 在 QML 里
+     * 当属性读时会被当成"序列"再转一层，直接取 .length / 下标会报
+     * "Sequence length out of range"（设置面板那一栏踩过）。QVariantList
+     * 就是普通的 JS 数组，读起来没有这些坑。
+     */
+    Q_PROPERTY(QVariantList importedFolders READ importedFolderList NOTIFY importedFoldersChanged)
+
+    /* 状态栏用：一共多少个文件 / 多少条内容 */
+    Q_PROPERTY(int fileCount READ fileCount NOTIFY changed)
+    Q_PROPERTY(int entryCount READ entryCount NOTIFY changed)
+
 public:
     explicit ClipboardStore(QObject *parent = nullptr);
+
+    /*
+     * 打开元数据库并扫一遍磁盘。
+     *
+     * 会把上一版那个"正文存在库里"的 clipboard_items 表**直接删掉**
+     * （连同旧的那批 images/*.png，见 .cpp 的 migrateFromLegacy()）。
+     */
     bool open();
-    bool addText(const QString &text);
-    bool addImage(const QImage &image);
+
+    /* ---- 剪贴板采集（ClipboardManager 调） ---- */
+
+    /* 文本：去重之后追加到当天的 md；真的写进去了返回 true */
+    bool captureText(const QString &text);
+    /* 图片：PNG 落到当天目录的 assets/，md 里写一条引用 */
+    bool captureImage(const QImage &image);
+
+    /* ---- "程序自己写进剪贴板的内容不采集" ---- */
 
     /*
-     * 手工新建一条文本条目（左侧树标题栏那个"+"，见 Main.qml 的 newEntry）。
+     * 标记"这一次剪贴板变化是我们自己造成的"。
      *
-     * 和 addText() 的差别只在去重：
-     *   addText()  剪贴板采集那条路，hash 列有唯一约束（同一段文本不会存第二遍）；
-     *   createTextEntry()  用户自己新建的，故意不写 hash（留 NULL），
-     *              否则第二、第三条空白条目会被 INSERT OR IGNORE 静默丢掉。
-     * 返回新条目的 id，失败返回 -1。
+     * 编辑器里的 Ctrl+C / 菜单里的复制 / 点列表回填剪贴板……都会触发
+     * QClipboard::dataChanged，不挡掉的话刚复制的正文立刻又被采集一遍。
+     * 见 ClipboardManager::capture 的第一行。
+     *
+     * 这个标记只在 markOwnCopy() 之后的 2 秒内有效（见 .cpp 的
+     * takeSkipNextCapture）：Windows 的剪贴板通知是异步回来的，正常
+     * 几毫秒就到；真要是因为"按了 Ctrl+C 但没选中任何东西"这类空操作
+     * 把标记留在那儿，它自己会过期，不会把用户下一次真正的外部复制吃掉。
      */
-    Q_INVOKABLE qint64 createTextEntry(const QString &text);
-
-    /*
-     * 把编辑器里改过的正文写回某个文本条目。
-     *
-     * 剪贴板条目没有磁盘文件，Ctrl+S 走的就是这条（见
-     * EditorViewItem::saveCurrent 的剪贴板分支）。标题跟着正文首行走。
-     * 条目不存在 / 不是文本条目返回 false。
-     */
-    Q_INVOKABLE bool updateTextEntry(qint64 id, const QString &text);
-
-    /* 条目标题（写回之后标签上的名字要跟着变） */
-    Q_INVOKABLE QString titleOf(qint64 id) const;
-
-    /*
-     * 删掉一条条目（图片条目连文件一起删）。
-     *
-     * 界面上还没有入口：只有自检用它清掉自己造的那条测试数据 ——
-     * 自检跑在**真实的库**上，造出来的东西不能留在用户列表里。
-     */
-    Q_INVOKABLE bool removeItem(qint64 id);
-    /*
-     * 列表数据。
-     *
-     * 注意：这里的 "content" 字段给的是**摘要**（单行、截断），
-     * 不是正文。正文一律不进 QML —— 见下面 previewFor() 的说明。
-     */
-    Q_INVOKABLE QVariantList items(const QString &query = {}) const;
-
-    Q_INVOKABLE void copyItem(qint64 id) const;
-
-    /*
-     * 按 id 取正文（或图片路径）。
-     *
-     * 正文不进 QML 之后，需要看正文的地方（编辑器）要用到它时现取。
-     * 图片条目返回的是文件路径，和历史行为一致。
-     */
-    Q_INVOKABLE QString contentOf(qint64 id) const;
-
-
-    /*
-     * 把任意文本写回系统剪贴板。
-     *
-     * 给"复制此行"用：虚拟化正文没有跨行选区，复制粒度是行，
-     * 而那一行是正文里的一个片段、在库里没有自己的条目，
-     * 所以不能走 copyItem(id)。
-     *
-     * 同样要置 skipNextCapture：这次写入会触发 QClipboard::dataChanged，
-     * 不挡掉的话采集线程会把刚复制的内容又当成新剪贴板内容存一遍。
-     */
-    Q_INVOKABLE void copyText(const QString &text) const;
-
+    void markOwnCopy();
     bool takeSkipNextCapture();
 
-signals:
-    void changed();
+    /* 把文本写回系统剪贴板（编辑器的"复制全文 / 复制此行"走这里） */
+    Q_INVOKABLE void copyText(const QString &text);
 
-private:
-    QString dataDir() const;
-    QString titleFor(const QString &text) const;
+    /* ---- 保存位置 / 导入的文件夹 ---- */
+
+    QString rootPath() const { return m_rootPath; }
+    /* 换根目录：建目录、重扫、记进 QSettings；失败返回 false */
+    Q_INVOKABLE bool setRootPath(const QString &path);
+
+    QStringList importedFolders() const;
+    /* QML 侧读的那一份（QVariantList，见上面 Q_PROPERTY 的说明） */
+    QVariantList importedFolderList() const;
+    Q_INVOKABLE bool addImportedFolder(const QString &path);
+    Q_INVOKABLE bool removeImportedFolder(const QString &path);
+
+    /* ---- 左树数据 ---- */
 
     /*
-     * 给列表用的正文摘要。
+     * 返回**嵌套**的树：日期文件夹 -> md 文件（导入的文件夹是另一棵，
+     * 它里面的子目录会一层层挂下去）。
      *
-     * 为什么必须有这个东西：
-     * 库里最长的条目有 66 万字符。原来 items() 把整篇 content 塞进
-     * QVariantList 交给 QML，于是"点开一条 3000 行的条目"这个动作里，
-     * 光是把这个 25 万字符的值赋给 QML 属性就同步阻塞 2078ms（实测，
-     * 而且关掉虚拟化视图也一样慢，所以跟渲染无关）。
+     * query 非空时只留命中它的文件（按条目的标题 / 摘要匹配，见 searchFiles）。
      *
-     * 列表只需要一行摘要，所以这里把正文压成单行、限长，
-     * 正文改由 contentOf(id) 按需取。
+     * 文件夹节点 { key, label, kind("date"/"imported"/"folder"), path, depth,
+     *              files, entries, children: [...] }
+     * 文件节点   { key(path), label, kind: "file", path, depth, entries, size, imported }
      */
+    Q_INVOKABLE QVariantList tree(const QString &query = QString(), bool newestFirst = true) const;
+
+    /* 重扫磁盘刷新元数据缓存（启动 / F5 / 建删改文件之后都会调） */
+    Q_INVOKABLE void rescan();
+
+    /* ---- 文件操作 ---- */
+
+    /* 在今天这一组里新建一个 md 并返回它的路径（左侧树那个 "+"）；失败返回空串 */
+    Q_INVOKABLE QString createFile(const QString &text = QString());
+    /* 改名（只改文件名，不动目录）；同名文件已存在则失败 */
+    Q_INVOKABLE bool renameFile(const QString &path, const QString &newName);
+    /* 删文件（它引用到的图片一起清掉，除非还有别的文件引用） */
+    Q_INVOKABLE bool deleteFile(const QString &path);
+    Q_INVOKABLE bool fileExists(const QString &path) const;
+    /* 读文件正文（"复制全文"这类用；失败返回空串） */
+    Q_INVOKABLE QString textOf(const QString &path) const;
+
+    int fileCount() const { return m_fileCount; }
+    int entryCount() const { return m_entryCount; }
+
+signals:
+    /* 内容 / 文件有变化：QML 侧据此重建左树 */
+    void changed();
+    void rootPathChanged();
+    void importedFoldersChanged();
+
+private:
+    /*
+     * 往当天的 md 里追加一条。
+     *
+     * now       这条内容的时间（文件名、标题里的时间都用它）
+     * type      "text" / "image"
+     * title     摘要标题（左树和搜索用）
+     * payload   写进文件的那一段正文（图片那一段是 markdown 引用）
+     * hash      文本去重用（图片给空串 = 不去重）
+     * assetPath 图片文件路径（文本给空串）
+     */
+    bool appendEntry(const QDateTime &now, const QString &type, const QString &title,
+                     const QString &payload, const QString &hash, const QString &assetPath);
+
+    QString dateDir(const QString &dateKey) const;
+    /*
+     * 当前该往哪个文件里追加（今天这一组）。
+     *
+     * 记在 clip_state 表里，而不是"目录里最新的那个 md" —— 后者会把
+     * 用户自己新建 / 手写的 md 也一起append，而那一份是人家在写的笔记。
+     */
+    QString captureTarget(const QString &dateKey, const QString &dir) const;
+    /* 该目录里下一个可用的 <时分秒>.md（同一秒撞名就 -2、-3…） */
+    QString newFilePath(const QString &dir, const QDateTime &now) const;
+
+    /* 元数据：插一条条目 + 更新它所在文件的汇总行 */
+    void recordEntry(const QString &filePath, const QDateTime &when, const QString &type,
+                     const QString &title, const QString &preview, qint64 bytes,
+                     const QString &hash, const QString &assetPath);
+    void refreshFileRow(const QString &filePath, const QString &dateKey, bool imported);
+    void forgetFile(const QString &filePath);
+    bool hashExists(const QString &hash) const;
+    /* 搜索：命中 query 的文件路径集合（按条目标题 / 摘要 + 文件名） */
+    QSet<QString> searchFiles(const QString &query) const;
+
+    /* 扫一个目录里的 md / txt（imported = 是不是"导入的文件夹"） */
+    void scanFolder(const QString &dir, bool imported, QSet<QString> &seen, int depth);
+    /*
+     * 把一个 md 文件解析成条目元数据（文件没变过就直接返回）。
+     *
+     * 自己写的文件按 "## 时分秒" 分段；外部文件（导入的文件夹里那些）
+     * 没有这个记号时整篇算一条，时间取文件的修改时间。
+     */
+    void reindexFile(const QString &path, bool imported);
+    void recount();
+
+    /*
+     * 上一版把正文存在 SQLite 里（clipboard_items 表 + images/*.png）。
+     * 这一版内容全在文件里，旧表对不上了：连表带图片一起清掉。
+     */
+    void migrateFromLegacy();
+
+    static QString defaultRoot();
+    static QString settingsKey(const QString &key);
+    static QString titleFor(const QString &text);
     static QString previewFor(const QString &text);
 
     QSqlDatabase m_db;
+    QString m_rootPath;
+    QStringList m_imported;
     mutable bool m_skipNextCapture = false;
+    /* 标记是什么时候置上的（见 takeSkipNextCapture 的 2 秒有效期） */
+    qint64 m_skipStamp = 0;
+
+    int m_fileCount = 0;
+    int m_entryCount = 0;
+
+    /* md 写满多少字节就换下一个文件（20K） */
+    static constexpr qint64 kFileLimit = 20 * 1024;
+    /* 导入的文件夹往下钻几层（防止软链接套娃） */
+    static constexpr int kMaxDepth = 8;
 };

@@ -35,7 +35,12 @@ find_package(Qt6 6.5 REQUIRED COMPONENTS Core Gui Qml Quick QuickControls2 Quick
 # 内置的 QScintilla（编辑器内核，见 third/qscintilla/CMakeLists.txt）
 add_subdirectory(third/qscintilla)
 
-qt_add_executable(SmartClip
+# ---------------------------------------------------------------------------
+# 本源文件清单
+#
+# 单独列出来是给下面的"头文件依赖"用的（见"为什么每个源文件都依赖全部头"）。
+# ---------------------------------------------------------------------------
+set(SMARTCLIP_SOURCES
     src/main.cpp
     src/ClipboardStore.h
     src/ClipboardStore.cpp
@@ -50,6 +55,34 @@ qt_add_executable(SmartClip
     src/SelfTest.h
     src/SelfTest.cpp
 )
+
+qt_add_executable(SmartClip ${SMARTCLIP_SOURCES})
+
+# ---------------------------------------------------------------------------
+# 【必须留着】每个 .cpp 都依赖**全部**工程头文件
+#
+# 这套配置（中文版 MSVC + NMake Makefiles JOM）**不跟踪 #include 出来的头**：
+# 只改 src/ClipboardStore.h、不改任何 .cpp，重新构建时只有
+# mocs_compilation.cpp 会被重编，main.cpp / EditorViewItem.cpp 一个都不动
+# （实测，见 build.log 里那些"注意: 包含文件"—— 编译器 /showIncludes 的输出
+# 是中文的，CMake 那侧按英文前缀解析，于是什么依赖都没记下来；换成 Ninja 或
+# VS 生成器、或者构建前 set VSLANG=1033，也都能好）。
+#
+# 后果不是"少编一次"这么轻：头里加/删一个成员之后，被改到的那个 .cpp 按新
+# 布局编，没重编的 .cpp 还按旧布局用同一个类 —— 同一个对象在两份代码里大小
+# 不一样，成员会被写到对象外面去。实测症状：QML 读一个 QStringList 属性读出
+# 1872555072 这种"长度"，紧接着在 getter 里访问冲突崩溃（0xC0000005），
+# 而且崩溃点离真正的原因（没重编）隔着好几层，极难查。
+#
+# 这个工程只有 7 个源文件，让每个源文件都依赖全部工程头：改头必然全量重编，
+# 慢几秒，换掉一整类"改完头文件出玄学崩溃"。
+# ---------------------------------------------------------------------------
+file(GLOB SMARTCLIP_HEADERS CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/*.h")
+foreach(_src IN LISTS SMARTCLIP_SOURCES)
+    if(_src MATCHES "\\.(cpp|cc|cxx)$")
+        set_property(SOURCE "${_src}" APPEND PROPERTY OBJECT_DEPENDS ${SMARTCLIP_HEADERS})
+    endif()
+endforeach()
 
 # ---------------------------------------------------------------------------
 # Qt CMake 策略

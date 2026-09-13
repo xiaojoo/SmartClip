@@ -18,7 +18,7 @@ Rectangle {
     implicitHeight: 26
     color: "#313335"
 
-    /* 剪贴板条目数 */
+    /* 剪贴板内容条数（元数据里的总条数，见 ClipboardStore::entryCount） */
     property int count: 0
 
     /* 编辑器状态（Main.qml 把 EditorView 传进来） */
@@ -141,6 +141,6 @@ Rectangle {
 
         Divider {}
 
-        Info { text: root.count + " 项剪贴板" }
+        Info { text: root.count + " 条内容" }
     }
 }

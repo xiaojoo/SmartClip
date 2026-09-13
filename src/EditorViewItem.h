@@ -389,7 +389,6 @@ public:
     /* ---- 文档生命周期 ---- */
     Q_INVOKABLE int newDocument();
     Q_INVOKABLE int openFile(const QString &path);
-    Q_INVOKABLE int openClipboardItem(qint64 id, const QString &title);
     Q_INVOKABLE bool saveCurrent();
     Q_INVOKABLE bool saveCurrentAs(const QString &path);
     Q_INVOKABLE bool saveDocument(int index, const QString &path);
@@ -402,14 +401,17 @@ public:
     Q_INVOKABLE int indexOfPath(const QString &path) const;
     Q_INVOKABLE QString lastError() const { return m_lastError; }
 
+    /*
+     * 文件在磁盘上被改名之后，把打开着的那个标签也跟着改过来。
+     *
+     * 左树右键"重命名"改的是真实文件；标签里缓存着旧路径，不跟着换的话
+     * 再按 Ctrl+S 就会往一个已经不存在的老名字上写。
+     * 返回有没有找到那个标签。
+     */
+    Q_INVOKABLE bool updateDocumentPath(const QString &oldPath, const QString &newPath);
+
     /* 当前文档的正文（诊断 / 自检用；正常编辑不经过 QML 属性） */
     Q_INVOKABLE QString currentText() const;
-
-    /*
-     * 兼容旧接口：按条目 id 载入正文 —— 正文全程留在 C++，
-     * 不经过 QML 任何属性或参数。
-     */
-    Q_INVOKABLE void load(qint64 id);
 
     /* 释放原生子窗口的资源（QML 侧在组件销毁时调用） */
     Q_INVOKABLE void detach();
@@ -578,7 +580,6 @@ private:
     struct Doc {
         QsciDocument *document = nullptr;  // 见 .cpp 里为什么用指针
         QString filePath;
-        QString clipTitle;                 // 来自剪贴板时的标题
         QString language = QStringLiteral("plain");
         QString encoding = QStringLiteral("UTF-8");
         /*
@@ -589,15 +590,6 @@ private:
          * 这里，切回来时接着用。Scintilla 自己的保存点随文档走，两边一致。
          */
         bool modified = false;
-        bool clipboard = false;            // 来自剪贴板（没有磁盘文件）
-        /*
-         * 来源条目的 id（只在 clipboard 为真时有意义）。
-         *
-         * 标签的身份：左边列表里点过的条目按 id 认标签 —— 同一条目只开一条
-         * 标签，再点就是切回它，见 .cpp 的 openClipboardItem()。
-         * 另存为 / 变成文件之后 clipboard 关掉，这个 id 也跟着清掉。
-         */
-        qint64 clipId = -1;
         int untitledNo = 0;                // 未命名标签的序号
         long cursorPos = 0;                // 光标绝对位置（切标签时恢复）
         int firstVisibleLine = 0;           // 首行（保持滚动位置）
@@ -620,12 +612,6 @@ private:
 
     /* 把正文灌进当前文档（不动文档元信息） */
     void setContentCurrent(const QString &text);
-
-    /*
-     * 把剪贴板条目的正文写回库里（这类标签没有磁盘文件）。
-     * 见 .cpp 的 saveCurrent() 里为什么要分这一支。
-     */
-    bool saveClipboardEntry(int index);
 
     /* 去掉边框、深色滚动条 */
     void styleChrome();

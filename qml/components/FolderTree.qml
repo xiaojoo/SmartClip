@@ -16,10 +16,18 @@ Rectangle {
     anchors.rightMargin: 6
 
     property var rows: []
-    property var selected: null
+    /*
+     * 当前选中的**文件路径**（不是对象、也不是 id）。
+     *
+     * 树上现在没有"条目"这个概念了：一行要么是文件夹、要么是磁盘上真实存在的
+     * 一个 md 文件，所以"选中的是谁"用路径认最稳 —— 重命名、刷新都还在。
+     */
+    property string selectedPath: ""
 
     signal folderClicked(string key)
-    signal itemClicked(var item)
+    signal fileClicked(var row)
+    /* 行上按右键：Main 那边据此弹"打开 / 重命名 / 删除"那一份菜单 */
+    signal rowContextMenuRequested(var row, real x, real y)
 
     /*
      * 标题栏那排工具按钮（对齐 PyCharm 的项目面板）。
@@ -49,22 +57,24 @@ Rectangle {
     readonly property int toolIconSize: 13
 
     /*
-     * 准星按钮能不能点（由 Main 按"当前标签是不是列表里的条目"给）。
-     * 当前标签是磁盘文件或未命名空白文档时没什么可定位的，那就置灰。
+     * 准星按钮能不能点（由 Main 按"当前标签是不是左树里的文件"给）。
+     * 当前标签是未命名空白文档、或从菜单打开的其他文件时没什么可定位的，那就置灰。
      */
     property bool locateEnabled: true
 
     /*
-     * 某一条现在是不是落在可视区里（自检量"定位真的把目标滚进来了"用）。
+     * 某个文件现在是不是落在可视区里（自检量"定位真的把目标滚进来了"用）。
      *
      * 列表是虚拟化的：行太远时委托根本没被创建，itemAtIndex() 直接给 null ——
      * 那也算"不在可视区里"。拿到了就比 y 和 viewport 的上下边界
      * （y 是内容坐标，要加上 contentY 才是屏幕上的位置）。
      */
-    function rowVisible(id) {
+    function rowVisible(path) {
+        if (!path)
+            return false
         for (var i = 0; i < rows.length; ++i) {
             var r = rows[i]
-            if (r.kind !== "item" || r.item.id !== id)
+            if (r.kind !== "file" || r.path !== path)
                 continue
             var it = view.itemAtIndex(i)
             if (!it)
@@ -76,15 +86,15 @@ Rectangle {
     }
 
     /*
-     * 把某一条滚进可视区（定位当前标签的最后一步，见 Main.locateCurrentItem）。
+     * 把某个文件滚进可视区（定位当前标签的最后一步，见 Main.locateCurrentFile）。
      *
-     * 按**条目 id** 找行，不按下标：树是每次重建的，下标随时会变。
+     * 按**文件路径**找行，不按下标：树是每次重建的，下标随时会变。
      * 返回有没有找到那一行（没找到通常是搜索框把它过滤掉了）。
      */
-    function scrollToItem(id) {
+    function scrollToPath(path) {
         for (var i = 0; i < rows.length; ++i) {
             var r = rows[i]
-            if (r.kind === "item" && r.item.id === id) {
+            if (r.kind === "file" && r.path === path) {
                 view.positionViewAtIndex(i, ListView.Contain)
                 return true
             }
@@ -100,11 +110,11 @@ Rectangle {
      * 表达式改了它跟着改，什么也钉不住）。
      *
      * 只数已经实例化的行（列表是虚拟化的，屏幕外的行没有委托）——
-     * 对"一级菜单不许亮"这条足够：分组行就在列表顶部，永远看得见。
+     * 对"文件夹那一级不许亮"这条足够：分组行就在列表顶部，永远看得见。
      */
     function highlightCounts() {
         var folderRows = 0
-        var itemRows = 0
+        var fileRows = 0
         for (var i = 0; i < rows.length; ++i) {
             var it = view.itemAtIndex(i)
             if (!it || it.rowHighlight !== true)
@@ -112,9 +122,9 @@ Rectangle {
             if (rows[i].kind === "folder")
                 ++folderRows
             else
-                ++itemRows
+                ++fileRows
         }
-        return { folders: folderRows, items: itemRows }
+        return { folders: folderRows, files: fileRows }
     }
 
     readonly property color borderColor: "#43454a"
@@ -134,7 +144,7 @@ Rectangle {
          *
          * 左边是标题（点一下弹"项目树"菜单，和右边那个 ⋯ 是同一份），
          * 右边一排工具按钮 —— PyCharm 项目面板那几件事：
-         * 新建条目 / 刷新 / 定位当前文件 / 全部折叠 / 全部展开 / 更多 / 收起面板。
+         * 新建文件 / 刷新 / 定位当前文件 / 全部折叠 / 全部展开 / 更多 / 收起面板。
          *
          * 按钮只有图标，说明文字走 AppToolTip（ToolButton 自带）。
          * 宽度不够时标题先被挤掉：按钮那排锚在右边，标题锚在左边，
@@ -196,7 +206,7 @@ Rectangle {
                     iconSize: root.toolIconSize
                     provider: icons
                     kind: "plus"
-                    tip: "新建条目"
+                    tip: "新建文件（今天这一组里的一份 md）"
                     onClicked: root.newEntryRequested()
                 }
                 ToolButton {
@@ -309,46 +319,29 @@ Rectangle {
                 width: view.width - 18
 
                 /*
-                 * 蓝底只给**选中的条目**。
+                 * 蓝底只给**选中的文件**。
                  *
-                 * 分组（今天 / 昨天 / 近 7 天 / 更早）原来也会跟着 activeKey
-                 * 亮一条蓝底（照 IDE "当前工具窗口"来的）。实际看着太抢眼：
-                 * 一级菜单是容器，点它只是展开 / 收起，不该比里面选中的条目还显眼。
-                 * 现在分组一律不亮，"选中的是哪一个条目"一眼就能看出来。
+                 * 日期文件夹（一级菜单）和导入的文件夹原来也会跟着亮，实际看着
+                 * 太抢眼：文件夹是容器，点它只是展开 / 收起，不该比里面选中的
+                 * 那个文件还显眼。现在文件夹一律不亮，"打开的是哪一份"一眼可见。
                  */
-                rowHighlight: modelData.kind === "item" && root.selected
-                              && root.selected.id === modelData.item.id
+                rowHighlight: modelData.kind === "file" && root.selectedPath !== ""
+                              && modelData.path === root.selectedPath
 
                 onRowClicked: modelData.kind === "folder"
                               ? root.folderClicked(modelData.key)
-                              : root.itemClicked(modelData.item)
+                              : root.fileClicked(modelData)
+
+                onRowContextMenu: (x, y) => root.rowContextMenuRequested(modelData, x, y)
                 }
             }
         }
 
-        // Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: borderColor }
-
-        // Item { Layout.fillWidth: true; Layout.preferredHeight: 8 }
-
-        // RowLayout {
-        //     Layout.fillWidth: true
-        //     Layout.leftMargin: 12
-        //     Layout.rightMargin: 8
-        //     spacing: 6
-        //     Label { text: "外部库"; color: root.textMuted; font.pixelSize: 12; Layout.fillWidth: true }
-        //     AppIcon { provider: icons; kind: "chevron-down"; tint: root.textMuted; size: 10 }
-        // }
-
-        // RowLayout {
-        //     Layout.fillWidth: true
-        //     Layout.preferredHeight: 24
-        //     Layout.leftMargin: 34
-        //     Layout.rightMargin: 8
-        //     spacing: 6
-        //     AppIcon { provider: icons; kind: "trash"; tint: root.textMuted; size: 12 }
-        //     Label { text: "回收站"; color: root.textMuted; font.pixelSize: 12; Layout.fillWidth: true }
-        // }
-
-        // Item { Layout.fillWidth: true; Layout.preferredHeight: 8 }
+        /*
+         * 面包屑里原来还画过一块"外部库 / 回收站"（一直是注释掉的装饰）。
+         * 现在"外部库"这件事真的做了：导入的文件夹会和日期文件夹一起挂在
+         * 同一个列表里（见 ClipboardStore::tree 与"更多"菜单的"导入文件夹…"），
+         * 所以这块占位注释也没必要留了。
+         */
     }
 }

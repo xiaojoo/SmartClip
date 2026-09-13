@@ -53,7 +53,7 @@ Popup {
     /* 改键失败的原因（撞键 / 不认识的键），显示在右栏底部 */
     property string hint: ""
 
-    /* 显示的栏目：shortcuts / about */
+    /* 显示的栏目：shortcuts / storage / about */
     property string section: "shortcuts"
 
     /* 顶部标题栏文案（"=" 栏目名），以及它在拖拽时的偏移 */
@@ -98,6 +98,7 @@ Popup {
     /* 栏目表：左边"操作步骤"那一列 */
     readonly property var navItems: [
         { key: "shortcuts", label: "快捷键", icon: "gear" },
+        { key: "storage",   label: "存储",   icon: "folder" },
         { key: "about",     label: "关于",   icon: "info" }
     ]
 
@@ -768,6 +769,217 @@ Popup {
                         }
                     }
     
+                    /* ============ 存储 ============ */
+                    /*
+                     * 剪贴板内容现在是**磁盘上的 md 文件**（日期目录 / 时分秒.md），
+                     * 数据库里只剩元数据。这一栏就是把"东西到底存哪儿了"讲清楚，
+                     * 顺带给两个入口：换保存位置、把别的文件夹挂上来看。
+                     */
+                    Column {
+                        anchors.fill: parent
+                        anchors.margins: 14
+                        spacing: 10
+                        visible: root.section === "storage"
+
+                        Text {
+                            text: "剪贴板存储"
+                            color: root.textBright
+                            font.pixelSize: 14
+                            font.bold: true
+                        }
+
+                        Rectangle {
+                            width: parent.width
+                            height: storageInfo.height + 28
+                            radius: 6
+                            color: root.rowHover
+                            border.width: 1
+                            border.color: root.borderColor
+
+                            Column {
+                                id: storageInfo
+                                anchors.left: parent.left
+                                anchors.leftMargin: 14
+                                anchors.right: parent.right
+                                anchors.rightMargin: 14
+                                anchors.verticalCenter: parent.verticalCenter
+                                spacing: 7
+
+                                Repeater {
+                                    model: [
+                                        { k: "保存位置", v: Store.rootPath },
+                                        { k: "文件",     v: Store.fileCount + " 份 md" },
+                                        { k: "内容",     v: Store.entryCount + " 条" },
+                                        { k: "切分",     v: "每份 md 写满 20K 就另起一份，名字取那一条的时间" },
+                                        { k: "图片",     v: "PNG 存在当天的 assets/ 里，md 里用相对路径引用" }
+                                    ]
+
+                                    delegate: Row {
+                                        required property var modelData
+                                        width: parent.width
+                                        spacing: 12
+
+                                        Text {
+                                            width: 74
+                                            text: modelData.k
+                                            color: root.mutedColor
+                                            font.pixelSize: 12
+                                        }
+                                        Text {
+                                            width: parent.width - 86
+                                            text: modelData.v
+                                            color: root.textColor
+                                            font.pixelSize: 12
+                                            elide: Text.ElideMiddle
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        Row {
+                            spacing: 10
+
+                            Repeater {
+                                model: [
+                                    { label: "选择保存位置…", act: "treeChooseRoot" },
+                                    { label: "打开保存位置",   act: "treeOpenRoot" },
+                                    { label: "刷新列表",       act: "refresh" }
+                                ]
+
+                                delegate: Rectangle {
+                                    required property var modelData
+                                    width: 118
+                                    height: 24
+                                    radius: 4
+                                    color: storageBtnHit.containsMouse ? root.rowHover : "transparent"
+                                    border.width: 1
+                                    border.color: root.borderColor
+
+                                    Text {
+                                        anchors.centerIn: parent
+                                        text: modelData.label
+                                        color: storageBtnHit.containsMouse ? root.textBright : root.textColor
+                                        font.pixelSize: 12
+                                    }
+
+                                    MouseArea {
+                                        id: storageBtnHit
+                                        anchors.fill: parent
+                                        hoverEnabled: true
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: root.commandRequested(modelData.act)
+                                    }
+                                }
+                            }
+                        }
+
+                        Text {
+                            text: "导入的文件夹"
+                            color: root.textBright
+                            font.pixelSize: 13
+                            font.bold: true
+                        }
+
+                        Text {
+                            width: parent.width
+                            wrapMode: Text.WordWrap
+                            color: root.mutedColor
+                            font.pixelSize: 11
+                            text: "挂上来看的：里面的 md / txt 会显示在左树上、也能搜到，"
+                                  + "但新复制的内容永远只写进上面的保存位置，不会动这些文件夹。"
+                        }
+
+                        Rectangle {
+                            width: parent.width
+                            height: Math.max(30, importedColumn.height + 16)
+                            radius: 6
+                            color: root.rowHover
+                            border.width: 1
+                            border.color: root.borderColor
+
+                            Column {
+                                id: importedColumn
+                                anchors.left: parent.left
+                                anchors.leftMargin: 14
+                                anchors.right: parent.right
+                                anchors.rightMargin: 14
+                                anchors.verticalCenter: parent.verticalCenter
+                                spacing: 6
+
+                                Text {
+                                    visible: Store.importedFolders.length === 0
+                                    text: "（还没导入任何文件夹）"
+                                    color: root.mutedColor
+                                    font.pixelSize: 12
+                                }
+
+                                Repeater {
+                                    model: Store.importedFolders
+
+                                    delegate: Row {
+                                        required property string modelData
+                                        width: parent.width
+                                        spacing: 10
+
+                                        Text {
+                                            width: parent.width - 90
+                                            text: modelData
+                                            color: root.textColor
+                                            font.pixelSize: 12
+                                            elide: Text.ElideMiddle
+                                        }
+                                        Rectangle {
+                                            width: 70
+                                            height: 22
+                                            radius: 4
+                                            color: removeHit.containsMouse ? root.rowHover : "transparent"
+                                            border.width: 1
+                                            border.color: root.borderColor
+
+                                            Text {
+                                                anchors.centerIn: parent
+                                                text: "移除"
+                                                color: removeHit.containsMouse ? root.textBright : root.textColor
+                                                font.pixelSize: 11
+                                            }
+                                            MouseArea {
+                                                id: removeHit
+                                                anchors.fill: parent
+                                                hoverEnabled: true
+                                                cursorShape: Qt.PointingHandCursor
+                                                onClicked: root.commandRequested("removeImport:" + modelData)
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        Rectangle {
+                            width: 118
+                            height: 24
+                            radius: 4
+                            color: importHit.containsMouse ? root.rowHover : "transparent"
+                            border.width: 1
+                            border.color: root.borderColor
+
+                            Text {
+                                anchors.centerIn: parent
+                                text: "导入文件夹…"
+                                color: importHit.containsMouse ? root.textBright : root.textColor
+                                font.pixelSize: 12
+                            }
+                            MouseArea {
+                                id: importHit
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: root.commandRequested("treeImportFolder")
+                            }
+                        }
+                    }
+
                     /* ============ 关于 ============ */
                     Column {
                         anchors.fill: parent

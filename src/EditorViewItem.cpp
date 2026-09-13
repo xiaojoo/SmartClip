@@ -11,6 +11,7 @@
 #include <QFileInfo>
 #include <QFontMetrics>
 #include <QGuiApplication>
+#include <QKeyEvent>
 #include <QMenu>
 #include <QPair>
 #include <QPainter>
@@ -1819,6 +1820,30 @@ bool EditorViewItem::eventFilter(QObject *watched, QEvent *event) {
         return true;    /* 吃掉：别让 Scintilla 再弹它自己那个原生菜单 */
     }
 
+    /*
+     * 键盘上的复制 / 剪切。
+     *
+     * 这两条是 Scintilla 自己在 keyPressEvent 里处理的，不经过 cut() / copy()
+     * 那两个包装函数，所以"这次剪贴板变化是我们自己造成的"要在这里补一次 ——
+     * 否则用户在编辑区里 Ctrl+C 一段正文，几毫秒后它又作为"新剪贴板内容"
+     * 被采集进当天的 md 里。
+     *
+     * 只**真有选区**时才置标记：按了 Ctrl+C 而没有选中任何东西是个空操作，
+     * 剪贴板根本不会变，那个标记就会一直挂到下一次外部复制上（标记本身
+     * 也有 2 秒有效期兜底，见 ClipboardStore::takeSkipNextCapture）。
+     */
+    if (event->type() == QEvent::KeyPress && m_store && watched == m_sci
+        && m_sci->hasSelectedText()) {
+        auto *ke = static_cast<QKeyEvent *>(event);
+        const Qt::KeyboardModifiers mods = ke->modifiers();
+        const int key = ke->key();
+        const bool ctrl = mods.testFlag(Qt::ControlModifier);
+        const bool shift = mods.testFlag(Qt::ShiftModifier);
+        if ((ctrl && (key == Qt::Key_C || key == Qt::Key_X || key == Qt::Key_Insert))
+            || (shift && key == Qt::Key_Delete))
+            m_store->markOwnCopy();
+    }
+
     return QQuickItem::eventFilter(watched, event);
 }
 
@@ -2252,8 +2277,6 @@ QString EditorViewItem::displayName() const {
     const Doc &d = m_docs.at(m_current);
     if (!d.filePath.isEmpty())
         return QFileInfo(d.filePath).fileName();
-    if (d.clipboard)
-        return d.clipTitle.isEmpty() ? QStringLiteral("剪贴板内容") : d.clipTitle;
     return QStringLiteral("未命名 %1").arg(d.untitledNo);
 }
 
@@ -2363,14 +2386,6 @@ QVariantList EditorViewItem::documents() const {
         m.insert(QStringLiteral("filePath"), d.filePath);
         m.insert(QStringLiteral("modified"), d.modified);
         m.insert(QStringLiteral("active"), i == m_current);
-        m.insert(QStringLiteral("clipboard"), d.clipboard);
-        /*
-         * 来源条目的 id（不是剪贴板条目时是 -1）。
-         *
-         * 给"在左侧列表里定位当前标签"用（见 Main.qml 的 locateCurrentItem）：
-         * 认条目要按 id 认，标题是会跟着正文变的，认标题迟早对不上。
-         */
-        m.insert(QStringLiteral("clipId"), d.clipId);
         m.insert(QStringLiteral("language"), d.language);
         out.append(m);
     }
@@ -2380,8 +2395,6 @@ QVariantList EditorViewItem::documents() const {
 QString EditorViewItem::titleOf(const Doc &d) const {
     if (!d.filePath.isEmpty())
         return QFileInfo(d.filePath).fileName();
-    if (d.clipboard)
-        return d.clipTitle.isEmpty() ? QStringLiteral("剪贴板内容") : d.clipTitle;
     return QStringLiteral("未命名 %1").arg(d.untitledNo);
 }
 
@@ -2576,9 +2589,6 @@ int EditorViewItem::openFile(const QString &path) {
     setContentCurrent(text);
 
     m_docs[m_current].filePath = abs;
-    m_docs[m_current].clipboard = false;
-    m_docs[m_current].clipId = -1;
-    m_docs[m_current].clipTitle.clear();
     m_docs[m_current].encoding = detectedEncoding;
     m_docs[m_current].language = languageForPath(abs);
 
@@ -2595,67 +2605,6 @@ int EditorViewItem::openFile(const QString &path) {
     return m_current;
 }
 
-int EditorViewItem::openClipboardItem(qint64 id, const QString &title) {
-    ensureWrapped();
-    if (!m_sci)
-        return -1;
-
-    if (!m_store) {
-        m_lastError = QStringLiteral("数据源未设置");
-        emit errorOccurred(m_lastError);
-        return -1;
-    }
-
-    const QString text = m_store->contentOf(id);
-
-    /*
-     * 一个条目一条标签：**点过的条目各占一条标签**，同一条目只占一条。
-     *
-     *   没开过 -> 新开一条；
-     *   已经开着 -> 切回它那条（正文在它自己那份 QsciDocument 里，不重灌）。
-     *
-     * 原来这里是"复用那条没改过内容的剪贴板标签"：点来点去始终是同一个标签
-     * 在换内容，看起来就是"不管点哪个文件都只有一个标签在变"。按 id 认标签
-     * 之后，左边点过的条目才一条条攒得下来，而且：
-     *   * 正在改的那条不会被下一次点击冲掉 —— 点回它只是切过去，改动原样还在；
-     *   * 同一条目不会开出两条一模一样的标签（和 openFile() 按文件路径认标签
-     *     是同一套规矩，见 indexOfPath）。
-     */
-    for (int i = 0; i < m_docs.size(); ++i) {
-        const Doc &d = m_docs.at(i);
-        if (d.clipboard && d.clipId == id) {
-            activateDocument(i);
-            return m_current;
-        }
-    }
-
-    const int target = newDocument();
-    if (target < 0)
-        return -1;
-
-    QElapsedTimer timer;
-    timer.start();
-
-    setContentCurrent(text);
-
-    m_docs[m_current].clipboard = true;
-    m_docs[m_current].clipId = id;
-    m_docs[m_current].clipTitle = title;
-    m_docs[m_current].encoding = QStringLiteral("UTF-8");
-    m_docs[m_current].language = QStringLiteral("plain");
-
-    applyStyle();
-    m_docs[m_current].modified = false;
-    m_sci->SendScintilla(QsciScintillaBase::SCI_SETSAVEPOINT);
-
-    m_lastLoadMs = int(timer.elapsed());
-    m_lastLoadChars = text.size();
-
-    emitDocumentsState();
-    QTimer::singleShot(0, this, [this]() { updateHorizontalScroll(); });
-    return m_current;
-}
-
 QString EditorViewItem::currentText() const {
     if (!m_sci || !hasDocument())
         return QString();
@@ -2665,8 +2614,6 @@ QString EditorViewItem::currentText() const {
      */
     return m_sci->text();
 }
-
-void EditorViewItem::load(qint64 id) { openClipboardItem(id, QString()); }
 
 void EditorViewItem::setContentCurrent(const QString &text) {
     if (!m_sci)
@@ -2713,60 +2660,45 @@ bool EditorViewItem::saveCurrent() {
         return false;
 
     /*
-     * 剪贴板条目（左侧列表点开的、或标题栏 "+" 新建的）在库里，没有磁盘文件：
-     * Ctrl+S 是**写回库里那一条**。
-     *
-     * 原来这里对空 filePath 一律 return false，于是 Main.qml 的 saveFile()
-     * 看到 filePath 为空就转去"另存为"——新建的条目一按 Ctrl+S 就弹文件
-     * 对话框，正文永远回不到左边那条上。现在这一类走 saveClipboardEntry()，
-     * 真正的未命名空白文档仍然由 QML 那边问路径。
+     * 没有路径的文档保存不了，交给 QML 那边转"另存为"（见 Main.saveFile）：
+     * 剪贴板内容现在也是真实文件了（日期目录里的 md），从左边点开就带着路径，
+     * 所以这里只剩"未命名空白文档"这一种情况。
      */
     const Doc &d = m_docs.at(m_current);
-    if (d.filePath.isEmpty()) {
-        if (d.clipboard && d.clipId >= 0 && m_store)
-            return saveClipboardEntry(m_current);
+    if (d.filePath.isEmpty())
         return false;
-    }
     return saveDocument(m_current, d.filePath);
 }
 
-bool EditorViewItem::saveClipboardEntry(int index) {
-    if (index < 0 || index >= m_docs.size() || !m_sci || !m_store)
+bool EditorViewItem::updateDocumentPath(const QString &oldPath, const QString &newPath) {
+    if (oldPath.isEmpty() || newPath.isEmpty())
         return false;
 
-    if (index != m_current) {
-        activateDocument(index);
-        if (m_current != index)
-            return false;
+    const QString from = QFileInfo(oldPath).absoluteFilePath();
+    const QString to = QFileInfo(newPath).absoluteFilePath();
+
+    bool found = false;
+    for (int i = 0; i < m_docs.size(); ++i) {
+        if (QFileInfo(m_docs.at(i).filePath).absoluteFilePath() != from)
+            continue;
+        m_docs[i].filePath = to;
+        /* md -> md 语言不变；别的扩展名顺手跟着认一遍 */
+        const QString guess = languageForPath(to);
+        if (guess != m_docs.at(i).language) {
+            m_docs[i].language = guess;
+            if (i == m_current) {
+                applyLanguageLexer();
+                emit languageChanged();
+            }
+        }
+        found = true;
     }
 
-    const qint64 id = m_docs.at(index).clipId;
-    if (!m_store->updateTextEntry(id, m_sci->text())) {
-        m_lastError = QStringLiteral("无法写回剪贴板条目：%1").arg(id);
-        emit errorOccurred(m_lastError);
-        return false;
+    if (found) {
+        emit documentsChanged();
+        emit currentChanged();
     }
-
-    /*
-     * 标题跟着正文首行走（Store 那边改的），标签上的名字要一起变 ——
-     * 否则列表里已经是新标题，标签还挂着"新建条目"。
-     */
-    m_docs[index].clipTitle = m_store->titleOf(id);
-
-    m_bulkLoading = true;
-    m_sci->SendScintilla(QsciScintillaBase::SCI_SETSAVEPOINT);
-    m_bulkLoading = false;
-    m_docs[index].modified = false;
-
-    /*
-     * saved() 照发，但路径给空串：这一条**没有**落进任何文件，
-     * 发这个信号只是让"保存过了"这件事和别的标签一样有回声。
-     */
-    emit saved(QString());
-    emit modifiedChanged();
-    emit documentsChanged();
-    emit currentChanged();
-    return true;
+    return found;
 }
 
 bool EditorViewItem::saveCurrentAs(const QString &path) {
@@ -2806,9 +2738,6 @@ bool EditorViewItem::saveDocument(int index, const QString &path) {
 
     const QString abs = QFileInfo(path).absoluteFilePath();
     m_docs[index].filePath = abs;
-    m_docs[index].clipboard = false;
-    m_docs[index].clipId = -1;
-    m_docs[index].clipTitle.clear();
 
     /* 未命名文件另存为之后按扩展名认语言 */
     if (m_docs.at(index).language == QLatin1String("plain")) {
@@ -3121,13 +3050,20 @@ void EditorViewItem::redo() {
 }
 
 void EditorViewItem::cut() {
-    if (m_sci && hasDocument() && !m_readOnly)
+    if (m_sci && hasDocument() && !m_readOnly) {
+        /* 剪切也会写系统剪贴板：这一趟不算"外部复制"，别采集（见 markOwnCopy） */
+        if (m_store && m_sci->hasSelectedText())
+            m_store->markOwnCopy();
         m_sci->cut();
+    }
 }
 
 void EditorViewItem::copy() {
-    if (m_sci && hasDocument())
+    if (m_sci && hasDocument()) {
+        if (m_store && m_sci->hasSelectedText())
+            m_store->markOwnCopy();
         m_sci->copy();
+    }
 }
 
 void EditorViewItem::paste() {

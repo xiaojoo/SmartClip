@@ -2,6 +2,7 @@
 
 #include <QAction>
 #include <QCoreApplication>
+#include <QDesktopServices>
 #include <QDialog>
 #include <QDir>
 #include <QFileDialog>
@@ -11,6 +12,7 @@
 #include <QMessageBox>
 #include <QPushButton>
 #include <QSettings>
+#include <QUrl>
 #include <QWidget>
 
 namespace {
@@ -347,6 +349,50 @@ QString EditorController::saveFileDialog(const QString &suggestedName) {
         QSettings().setValue(settingsKey(QStringLiteral("lastDir")), m_lastDir);
     }
     return path;
+}
+
+QString EditorController::chooseFolderDialog(const QString &title, const QString &startDir) {
+    const QString start = !startDir.isEmpty() ? startDir
+                         : (m_lastDir.isEmpty() ? QDir::homePath() : m_lastDir);
+
+    const QString dir = QFileDialog::getExistingDirectory(
+        m_widget, title.isEmpty() ? tr("选择文件夹") : title, start,
+        QFileDialog::ShowDirsOnly | QFileDialog::DontResolveSymlinks);
+
+    if (!dir.isEmpty()) {
+        m_lastDir = dir;
+        QSettings().setValue(settingsKey(QStringLiteral("lastDir")), m_lastDir);
+    }
+    return dir;
+}
+
+QString EditorController::askText(const QString &title, const QString &label,
+                                  const QString &text) {
+    QInputDialog dialog(m_widget);
+    dialog.setStyleSheet(QString::fromLatin1(kDialogStyle));  /* 灰黑底，见文件头的说明 */
+    dialog.setWindowTitle(title.isEmpty() ? tr("SmartClip") : title);
+    dialog.setLabelText(label);
+    dialog.setInputMode(QInputDialog::TextInput);
+    dialog.setTextValue(text);
+    if (dialog.exec() != QDialog::Accepted)
+        return QString();
+    return dialog.textValue().trimmed();
+}
+
+void EditorController::revealInExplorer(const QString &path) {
+    if (path.isEmpty())
+        return;
+
+    /*
+     * 传文件就打开它所在的目录（并尽量选中它），传目录就直接打开 ——
+     * 一个入口应付"在文件夹中显示"和"打开保存位置"两件事。
+     */
+    const QFileInfo info(path);
+    const QString dir = info.isDir() ? info.absoluteFilePath() : info.absolutePath();
+    if (dir.isEmpty())
+        return;
+
+    QDesktopServices::openUrl(QUrl::fromLocalFile(dir));
 }
 
 int EditorController::confirmSave(const QString &name) {
