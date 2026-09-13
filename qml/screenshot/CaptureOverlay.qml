@@ -623,7 +623,13 @@ Rectangle {
     function runAction(act) {
         root.commitEditing()
         if (act === "cancel") {
-            Shot.endCapture()
+            /*
+             * 取消走 Shot.cancelCapture()，别用 endCapture()：抓屏是延时的
+             * （见 Screenshot::beginCapture），用户按完快捷键马上按 Esc 时选区
+             * 窗口还藏着，那一下必须把**待抓的那次**掐掉，否则延时一到它照样
+             * 铺满全屏 —— 就是"取消截图时全屏框闪现一次才关闭"。
+             */
+            Shot.cancelCapture()
             return
         }
         const items = root.annotationsData()
@@ -865,7 +871,7 @@ Rectangle {
          */
         onDoubleClicked: (mouse) => {
             if (mouse.button === Qt.LeftButton)
-                Shot.endCapture()
+                Shot.cancelCapture()
         }
     }
 
@@ -1840,7 +1846,7 @@ Rectangle {
             if (root.selected >= 0)
                 root.selected = -1
             else
-                Shot.endCapture()
+                Shot.cancelCapture()
         }
     }
 

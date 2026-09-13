@@ -96,6 +96,12 @@ function fileMenu(ov) {
         { label: "新建", act: "new", shortcut: "Ctrl+N", icon: "new" },
         { label: "打开…", act: "open", shortcut: "Ctrl+O", icon: "open" },
         /*
+         * 打开文件夹 = 把某个目录挂到左边那棵树上（这就是本程序里"打开一个
+         * 项目"的意思）。走的是树那边"导入文件夹…"同一条路，act 都不换 ——
+         * 以前"文件"里只有"打开文件"，想开一个目录只能绕到左边树的"更多"里找。
+         */
+        { label: "打开文件夹…", act: "treeImportFolder", icon: "folder" },
+        /*
          * 截图（选区 / 加文字 / 固定到桌面，见 src/Screenshot.h）。
          * 放在"文件"里是因为产物也是一份文件（png）；默认键位取
          * Ctrl+Alt+A —— 国内截图工具的通用键位，改键在设置面板里。

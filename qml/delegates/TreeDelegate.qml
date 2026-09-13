@@ -35,6 +35,15 @@ Rectangle {
     readonly property color selColor:    "#214283"
     /* 右键那一行的底色：灰黑，比面板底色（#1e1f22）亮一档就够，不抢蓝底的风头 */
     readonly property color contextColor: "#34373b"
+
+    /*
+     * 自检用：图标那一格在场景里的 x。
+     *
+     * 一级（文件夹）和二级（文件）的图标必须落在同一列上 —— 这条是画出来的
+     * 几何，不是某个属性值，所以让委托自己报坐标，自检比对两级的 x 是否相等
+     * （见 FolderTree.iconColumnXs）。
+     */
+    readonly property real iconCellX: iconCellItem ? iconCellItem.mapToItem(null, 0, 0).x : -1
     readonly property color textBright:  "#e8e8e8"
     readonly property color textColor:   "#bbbbbb"
     readonly property color textMuted:   "#7d7d7d"
@@ -46,7 +55,29 @@ Rectangle {
     readonly property bool isFolder: modelData && modelData.kind === "folder"
     readonly property bool isDate: isFolder && modelData.folderKind === "date"
     readonly property bool isImportRoot: isFolder && modelData.folderKind === "imported"
+    /* 依赖 / 构建目录（没进去扫，计数那栏写"未索引"，见 ClipboardStore::scanFolder） */
+    readonly property bool skipped: isFolder && modelData.skipped === true
     readonly property int  depth: modelData && modelData.depth !== undefined ? modelData.depth : 0
+
+    /*
+     * 图标落在哪一列上（就是 RowLayout 的左边距）。
+     *
+     * 文件夹行是 [缩进][展开箭头 13 + 间距 3][图标]；文件行没有箭头那一格，
+     * 但得把上级文件夹的缩进**和那一格**一起补上（16 - 14 = 2px 的差值就是
+     * 这么来的），二级图标才和一级图标对齐 —— 少补这 2px 的话，一行行看下来
+     * 那条图标列是歪的（用户报的"一级图标和二级图标没对齐"）。
+     *
+     * 缩进仍然封顶 6 层：导入目录能套很深，再往里就不该一直往右跑了。
+     */
+    readonly property int indentStep: 14
+    readonly property int chevronCell: 16   /* 13 的箭头 + 3 的间距 */
+    /* 两种图标共用的一格（文件夹图标本来就是 15，文件图标 13 靠左放） */
+    readonly property int iconCell: 15
+    readonly property int iconInset: {
+        var d = Math.min(Math.max(root.depth, 0), 6)
+        return root.isFolder ? 6 + d * indentStep
+                             : 6 + Math.max(0, d - 1) * indentStep + chevronCell
+    }
 
     IconProvider { id: icons }
 
@@ -77,7 +108,7 @@ Rectangle {
     RowLayout {
         anchors.fill: parent
         spacing: 3
-        anchors.leftMargin: 6 + Math.min(root.depth, 6) * 14
+        anchors.leftMargin: root.iconInset
         anchors.rightMargin: 6
 
         AppIcon {
@@ -89,12 +120,24 @@ Rectangle {
             Layout.alignment: Qt.AlignVCenter
         }
 
-        AppIcon {
-            provider: icons
-            kind: root.isFolder ? (root.isImportRoot ? "open" : "folder") : "file"
-            tint: root.isFolder ? (root.isImportRoot ? importColor : folderColor) : accentColor
-            size: root.isFolder ? 15 : 13
+        /*
+         * 图标那一格：文件夹图标 15、文件图标 13，都给同样宽的一格、图标靠左放。
+         * 这样两级图标不但左边缘对齐，后面那个名字也跟着对齐（不然名字会差 2px）。
+         */
+        Item {
+            id: iconCellItem
+            Layout.preferredWidth: root.iconCell
+            Layout.preferredHeight: root.iconCell
             Layout.alignment: Qt.AlignVCenter
+
+            AppIcon {
+                anchors.left: parent.left
+                anchors.verticalCenter: parent.verticalCenter
+                provider: icons
+                kind: root.isFolder ? (root.isImportRoot ? "open" : "folder") : "file"
+                tint: root.isFolder ? (root.isImportRoot ? importColor : folderColor) : accentColor
+                size: root.isFolder ? 15 : 13
+            }
         }
 
         Label {
@@ -108,9 +151,12 @@ Rectangle {
         /*
          * 右边的计数：文件夹给"里面几个文件"，文件给"里面几条内容"。
          * 数字后面那个小字是单位，只给文件夹写（一行里已经够挤了）。
+         *
+         * 依赖 / 构建目录（node_modules、target…）没进去扫，计数无从谈起 ——
+         * 那里写"未索引"，比写个"0 个文件"诚实（见 ClipboardStore::scanFolder）。
          */
         Label {
-            text: root.isFolder ? (modelData.files + " 个文件")
+            text: root.isFolder ? (root.skipped ? "未索引" : (modelData.files + " 个文件"))
                                 : (modelData.entries + " 条")
             color: textMuted
             font.pixelSize: 11

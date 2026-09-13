@@ -883,6 +883,8 @@ Rectangle {
         return { folderCount: keys.length,
                  openFolders: open,
                  rows: treeRows.length,
+                 /* 最外层那几行（日期文件夹 + 导入的根）：全部折叠时行数就是它 */
+                 topLevelRows: cbm.nodes.length,
                  items: files,
                  entries: Store.entryCount,
                  hidden: folderTreeHidden,
@@ -899,7 +901,9 @@ Rectangle {
                  /* 定位的最后一步（滚进可视区）有没有真的生效 */
                  locatedVisible: folderTree.rowVisible(selectedPath),
                  /* 亮着蓝底的行：文件夹必须恒为 0，文件最多 1（见 FolderTree.highlightCounts） */
-                 highlighted: folderTree.highlightCounts() }
+                 highlighted: folderTree.highlightCounts(),
+                 /* 一级 / 二级图标各落在哪一列上（必须一样，见 FolderTree.iconColumnXs） */
+                 iconColumns: folderTree.iconColumnXs() }
     }
 
     /*
@@ -1052,6 +1056,20 @@ Rectangle {
         var items = (row.kind === "file") ? Menus.fileContextMenu(row)
                                           : Menus.folderContextMenu(row)
         ddMenu.openAtPoint(null, x, y, items)
+    }
+
+    /*
+     * 自检用：某个下拉菜单（"文件" / "编辑" …）里的动作名。
+     * 和界面上弹的是**同一份**构造（TopBar.menuItems -> Menus.menuItems）。
+     */
+    function topMenuActs(label) {
+        var items = topBar.menuItems(label)
+        var out = []
+        for (var i = 0; i < items.length; ++i) {
+            if (items[i] && items[i].act !== undefined)
+                out.push(String(items[i].act))
+        }
+        return out
     }
 
     /*

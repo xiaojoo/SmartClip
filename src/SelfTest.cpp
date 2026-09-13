@@ -22,6 +22,7 @@
 #include <QDate>
 #include <QDateTime>
 #include <QEventLoop>
+#include <QElapsedTimer>
 #include <QImage>
 #include <QPalette>
 #include <QCoreApplication>
@@ -1916,9 +1917,19 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
             const QVariantMap s = treeState();
             check(s.value(QStringLiteral("openFolders")).toInt() == 0,
                   QStringLiteral("全部折叠：日期文件夹都收起来了"));
-            check(s.value(QStringLiteral("rows")).toInt() == folders,
-                  QStringLiteral("折叠后树里只剩文件夹那几行"),
-                  QStringLiteral("实际 %1 行").arg(s.value(QStringLiteral("rows")).toInt()));
+            /*
+             * 折叠干净之后，剩下的就是"最外层那几行"。
+             *
+             * 这里不能拿 folderCount 比：导入的目录能往下套（chat/frontend），
+             * 那些子目录折叠时本来就不占行 —— 用户设置里挂着导入目录时，
+             * 老写法会数出"行 2 / 文件夹 3"这种假红。
+             */
+            check(s.value(QStringLiteral("rows")).toInt()
+                      == before.value(QStringLiteral("topLevelRows")).toInt(),
+                  QStringLiteral("折叠后树里只剩最外层那几行"),
+                  QStringLiteral("实际 %1 行 / 最外层 %2 行")
+                      .arg(s.value(QStringLiteral("rows")).toInt())
+                      .arg(before.value(QStringLiteral("topLevelRows")).toInt()));
         }
 
         dispatch(QStringLiteral("treeExpandAll"));
@@ -2011,6 +2022,156 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
                       QStringLiteral("菜单行 %1 / 灰黑底 %2")
                           .arg(s.value(QStringLiteral("contextPath")).toString())
                           .arg(hl.value(QStringLiteral("context")).toInt()));
+            }
+
+            /*
+             * 一级（日期文件夹）和二级（文件）的图标要落在同一列上。
+             *
+             * 文件夹行比文件行多一格展开箭头，那一格文件行不占宽 —— 少补
+             * 16-14=2px 的话两级的图标就是歪的（用户报的"没对齐"）。量的是
+             * 委托自己报出来的坐标（TreeDelegate.iconCellX），不是把缩进公式
+             * 在 C++ 这侧再算一遍。
+             */
+            {
+                const QVariantMap cols =
+                    treeState().value(QStringLiteral("iconColumns")).toMap();
+                const double folderX = cols.value(QStringLiteral("folder")).toDouble();
+                const double fileX = cols.value(QStringLiteral("file")).toDouble();
+                check(folderX > 0 && fileX > 0 && qAbs(folderX - fileX) < 0.5,
+                      QStringLiteral("左树：一级 / 二级图标左边对齐"),
+                      QStringLiteral("文件夹图标 x=%1 / 文件图标 x=%2").arg(folderX).arg(fileX));
+            }
+
+            /*
+             * 导入的文件夹要**原样**列出来：什么后缀都收（src 里的 .cpp/.h）、
+             * 隐藏目录（.idea）要进去、一个文件都没有的空目录也得有一行。
+             *
+             * 用户报的就是这个：导入 H:\test 之后，TetrisGame\src 整块不见了
+             * （上一版只收 md / markdown / txt），.idea 那个空目录也没有节点
+             * （树是按文件拼的，没文件的目录出不来）。这里照那个形状造一份：
+             *
+             *     imported-project/
+             *         README.md
+             *         src/main.cpp
+             *         .idea/            <- 空目录
+             *         shot.png          <- 二进制，不许当文本解析
+             */
+            {
+                const QString projectDir = dir.filePath(QStringLiteral("imported-project"));
+                QDir().mkpath(projectDir + QStringLiteral("/src"));
+                QDir().mkpath(projectDir + QStringLiteral("/.idea"));
+                /* 依赖目录：只该留一行，里面的东西不进去扫（见 ClipboardStore::scanFolder） */
+                QDir().mkpath(projectDir + QStringLiteral("/node_modules/dep"));
+                auto writeFile = [](const QString &path, const QByteArray &bytes) {
+                    QFile f(path);
+                    if (f.open(QIODevice::WriteOnly | QIODevice::Truncate))
+                        f.write(bytes);
+                };
+                writeFile(projectDir + QStringLiteral("/README.md"), "## 07:31:00\nhello\n");
+                writeFile(projectDir + QStringLiteral("/src/main.cpp"), "int main() {}\n");
+                writeFile(projectDir + QStringLiteral("/node_modules/dep/index.js"),
+                          "module.exports = 1;\n");
+                /* 带 NUL 的假图片：looksLikeText 该把它当二进制 */
+                writeFile(projectDir + QStringLiteral("/shot.png"),
+                          QByteArray("\x89PNG\r\n\x1a\n\0\0\0\rIHDR", 16));
+
+                check(store->addImportedFolder(projectDir),
+                      QStringLiteral("导入用例：整个项目目录挂到左树上"));
+                settle();
+
+                /* 直接在"树"那份数据上找 —— QML 画的左树就是它 */
+                std::function<bool(const QVariantList &, const QString &)> hasLabel =
+                    [&](const QVariantList &list, const QString &label) -> bool {
+                    for (const QVariant &v : std::as_const(list)) {
+                        const QVariantMap m = v.toMap();
+                        if (m.value(QStringLiteral("label")).toString() == label)
+                            return true;
+                        if (hasLabel(m.value(QStringLiteral("children")).toList(), label))
+                            return true;
+                    }
+                    return false;
+                };
+                const QVariantList nodes = store->tree(QString(), true);
+                check(hasLabel(nodes, QStringLiteral("src")),
+                      QStringLiteral("导入：子目录 src 在树上（里面的 .cpp 也算数）"));
+                check(hasLabel(nodes, QStringLiteral("main.cpp")),
+                      QStringLiteral("导入：src 里的 .cpp 文件在树上"));
+                check(hasLabel(nodes, QStringLiteral(".idea")),
+                      QStringLiteral("导入：空目录 .idea 也在树上"));
+                check(hasLabel(nodes, QStringLiteral("shot.png")),
+                      QStringLiteral("导入：png 这类二进制也在树上"));
+
+                /*
+                 * 依赖目录（node_modules…）：**留一行，但不进去扫**。
+                 *
+                 * 这是"导入大文件夹卡死"的正解：H:\chat 三万四千个文件，三万三千
+                 * 个在 node_modules 里，全过一遍库就是十几秒的卡死（实测）。主流
+                 * 编辑器也是这么办的（排除依赖 / 构建目录）。那一行标成"未索引"，
+                 * 不冒充"0 个文件"。
+                 */
+                {
+                    std::function<QVariantMap(const QVariantList &, const QString &)> findLabel =
+                        [&](const QVariantList &list, const QString &label) -> QVariantMap {
+                        for (const QVariant &v : std::as_const(list)) {
+                            const QVariantMap m = v.toMap();
+                            if (m.value(QStringLiteral("label")).toString() == label)
+                                return m;
+                            const QVariantMap nested =
+                                findLabel(m.value(QStringLiteral("children")).toList(), label);
+                            if (!nested.isEmpty())
+                                return nested;
+                        }
+                        return {};
+                    };
+                    const QVariantMap deps = findLabel(nodes, QStringLiteral("node_modules"));
+                    check(!deps.isEmpty(),
+                          QStringLiteral("导入：依赖目录 node_modules 留了一行"));
+                    check(deps.value(QStringLiteral("skipped")).toBool(),
+                          QStringLiteral("导入：那一行标着「未索引」（没进去扫）"),
+                          QStringLiteral("skipped=%1")
+                              .arg(deps.value(QStringLiteral("skipped")).toString()));
+                    /*
+                     * 判据只看这一棵子树：用户设置里可能还挂着别的导入目录，
+                     * 树里别处出现同名的 index.js 不算数（第一版就这么误报了）。
+                     */
+                    check(deps.value(QStringLiteral("children")).toList().isEmpty()
+                              && deps.value(QStringLiteral("files")).toInt() == 0,
+                          QStringLiteral("导入：依赖目录里的文件一个都没列（不扫进去）"),
+                          QStringLiteral("子节点 %1 / 文件 %2")
+                              .arg(deps.value(QStringLiteral("children")).toList().size())
+                              .arg(deps.value(QStringLiteral("files")).toInt()));
+                }
+
+                /* 二进制不当文本读：条数必须是 0，不能从乱码里数出几段来 */
+                {
+                    QVariant entries = -1;
+                    for (const QVariant &v : std::as_const(nodes)) {
+                        const QVariantMap root0 = v.toMap();
+                        if (root0.value(QStringLiteral("label")).toString()
+                            != QLatin1String("imported-project"))
+                            continue;
+                        for (const QVariant &c : root0.value(QStringLiteral("children")).toList()) {
+                            const QVariantMap m = c.toMap();
+                            if (m.value(QStringLiteral("label")).toString()
+                                == QLatin1String("shot.png"))
+                                entries = m.value(QStringLiteral("entries"));
+                        }
+                    }
+                    check(entries.toInt() == 0,
+                          QStringLiteral("导入：png 按二进制处理（不解析内容，条数 0）"),
+                          QStringLiteral("条数 %1").arg(entries.toInt()));
+                }
+
+                /* 编辑器也不许把二进制当文本打开（灌进去就是乱码，存回去就毁了） */
+                check(view->openFile(projectDir + QStringLiteral("/shot.png")) < 0,
+                      QStringLiteral("二进制文件编辑器不开（拒绝而不是灌乱码）"),
+                      view->lastError());
+
+                /* 收尾：别把用户自己的导入列表改了 */
+                check(store->removeImportedFolder(projectDir),
+                      QStringLiteral("导入用例：收尾把目录移除"));
+                settle();
+                QDir(projectDir).removeRecursively();
             }
         }
 
@@ -2300,6 +2461,24 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
               QStringLiteral("dispatch(menu:文件) 打开下拉菜单"));
         check(ui.value(QStringLiteral("menuHasIcons")).toBool(),
               QStringLiteral("文件菜单条目带图标（图标在左、快捷键在右）"));
+    }
+
+    /*
+     * "文件"菜单里既要能打开文件，也要能打开文件夹（= 把目录挂到左树上，
+     * 就是本程序里"打开一个项目"的意思）—— 上一版只有"打开…"，想开目录
+     * 得绕到左边树的"更多"里去找。这里核对的就是界面上那份菜单本身。
+     */
+    {
+        QVariant acts;
+        QMetaObject::invokeMethod(qmlRoot, "topMenuActs", Q_RETURN_ARG(QVariant, acts),
+                                  Q_ARG(QVariant, QVariant(QStringLiteral("文件"))));
+        QStringList names;
+        for (const QVariant &a : acts.toList())
+            names << a.toString();
+        check(names.contains(QStringLiteral("open"))
+                  && names.contains(QStringLiteral("treeImportFolder")),
+              QStringLiteral("\"文件\"菜单里既能打开文件、也能打开文件夹"),
+              names.join(QLatin1Char('/')));
     }
 
     dispatch(QStringLiteral("menu:视图"));
@@ -3111,6 +3290,40 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
         check(shot->active(),
               QStringLiteral("全局热键那条路：命令一发，选区窗口就开出来了"));
         shot->endCapture();
+
+        /*
+         * 取消截图（Esc / 双击）必须落在"抓屏延时"里也算数。
+         *
+         * 用户报的就是这个：按了截图快捷键、马上按 Esc 取消，屏幕先亮起一整块
+         * 全屏选区、要再按一次 Esc 才关得掉 —— 约 30ms 的延时（见
+         * Screenshot::beginCapture）里用户已经取消了，可那会儿 endCapture
+         * 什么都关不掉（没有 active 状态可收），延时到点 grabAndShow() 照样
+         * 把选区窗口铺出来。
+         *
+         * 这里钉两层：取消之后窗口**一直**藏着（要等过延时，否则测不出"照样
+         * 铺出来"那一半），以及收工时窗口表面是干净的全屏选区、没有虚线框
+         * 残留（残留的就是用户看到的那块"全屏框"）。
+         */
+        {
+            shot->beginCapture();
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
+            shot->cancelCapture();     /* 界面那边 Esc / 双击叫的就是这个 */
+
+            check(!shot->active() && !shot->overlayVisible(),
+                  QStringLiteral("截图：抓屏延时里按取消，选区窗口立刻收起来"));
+
+            /* 等过那段延时：窗口不许再冒出来 */
+            QElapsedTimer waited;
+            waited.start();
+            while (waited.elapsed() < 400) {
+                QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+                QThread::msleep(5);
+            }
+            check(!shot->active() && !shot->overlayVisible(),
+                  QStringLiteral("截图：取消之后延时到点也不会冒出全屏选区（取消要算数）"),
+                  QStringLiteral("active=%1 / 窗口可见=%2")
+                      .arg(shot->active() ? 1 : 0).arg(shot->overlayVisible() ? 1 : 0));
+        }
     }
 
     /*

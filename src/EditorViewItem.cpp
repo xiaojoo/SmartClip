@@ -2643,6 +2643,31 @@ int EditorViewItem::openFile(const QString &path) {
         return -1;
     }
 
+    /*
+     * 二进制不往编辑器里灌。
+     *
+     * 左树现在把导入目录里的东西**原样**列出来（见 ClipboardStore::scanFolder），
+     * 里面难免有 png / exe / 压缩包。灌进 Scintilla 就是一屏乱码，更糟的是用户
+     * 顺手 Ctrl+S 会把原文件写坏 —— 宁可不打开。判据和 store 那边一致：开头
+     * 有没有 NUL 字节。
+     *
+     * 这里只把原因写进 lastError，不 emit errorOccurred：两个调用方
+     * （Main.qml 的 openFile / openTreeFile）拿到 -1 都会自己把 lastError
+     * 弹出来，再 emit 一次就是两张卡片叠在一起。
+     */
+    {
+        QFile probe(abs);
+        if (probe.open(QIODevice::ReadOnly)) {
+            const QByteArray head = probe.read(4096);
+            probe.close();
+            if (head.contains('\0')) {
+                m_lastError = QStringLiteral("这是二进制文件，编辑器不打开：%1")
+                                  .arg(fi.fileName());
+                return -1;
+            }
+        }
+    }
+
     QFile file(abs);
     if (!file.open(QIODevice::ReadOnly)) {
         m_lastError = QStringLiteral("无法打开文件：%1").arg(file.errorString());

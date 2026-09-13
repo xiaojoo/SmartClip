@@ -295,6 +295,16 @@ void Screenshot::beginCapture() {
 }
 
 void Screenshot::grabAndShow() {
+    /*
+     * 延时这段窗口期里用户取消了（见 cancelCapture）：主窗口已经放回来了，
+     * 这里就什么都别做 —— 尤其**不能** show() 选区窗口，否则就是"取消截图时
+     * 全屏框闪一下"。
+     */
+    if (!m_pending) {
+        m_screen = nullptr;
+        return;
+    }
+
     m_pending = false;
 
     QScreen *screen = m_screen;
@@ -472,6 +482,20 @@ void Screenshot::showOverlay() {
         view->setFocus();
 }
 
+bool Screenshot::cancelPendingCapture() {
+    if (!m_pending)
+        return false;
+    /*
+     * 抓屏还没发生，所以没有图、没有选区窗口：
+     * 把等着的那个定时回调变成空操作（清 m_pending，见 grabAndShow 开头），
+     * 主窗口原地放回来（排除法下它本来就没被藏过，用户看不见这一下）。
+     */
+    m_pending = false;
+    m_screen = nullptr;
+    restoreHost();
+    return true;
+}
+
 void Screenshot::endCapture() {
     /*
      * 取色框 / 保存框开着的时候**不许**关选区窗口。
@@ -483,6 +507,18 @@ void Screenshot::endCapture() {
      * （用户确认或取消）之后才允许关 —— QML 那侧同时也把快捷键让开。
      */
     if (m_modalOpen)
+        return;
+
+    /*
+     * 抓屏还在延时里（beginCapture 到 grabAndShow 之间）就收工：这就是
+     * "取消截图"落在快捷键那一下上的情形。那会儿窗口没露过面、也没有图，
+     * 该做的只是把这次抓屏掐掉 + 放回主窗口。
+     *
+     * 少了这一步的后果（用户报的）：Esc 什么都没关掉，延时到点后
+     * grabAndShow() 照样铺出选区窗口 —— 屏幕先亮一下全屏框，再按一次 Esc
+     * 才关得掉。走 cancelCapture() 那条路也是落到这里。
+     */
+    if (cancelPendingCapture())
         return;
 
     /*
@@ -527,6 +563,15 @@ void Screenshot::endCapture() {
     m_active = false;
     m_shot = QImage();
     emit stateChanged();
+}
+
+void Screenshot::cancelCapture() {
+    /*
+     * 取消 = 收工。两条路（抓屏还在延时里 / 选区窗口已经开着）都由
+     * endCapture 里的 pending 判断分开处理，所以这里直接转过去 ——
+     * 界面那边 Esc 和双击都只叫这一个，不用自己分辨当前在哪一段。
+     */
+    endCapture();
 }
 
 void Screenshot::restoreHost() {

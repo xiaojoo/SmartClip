@@ -95,6 +95,22 @@ public:
     Q_INVOKABLE void endCapture();
 
     /*
+     * 用户按 Esc / 双击取消这次截图 —— 界面（CaptureOverlay.qml 的 Esc
+     * Shortcut、框上双击）走的是这一个，而不是直接 endCapture。
+     *
+     * 为什么要多这么一个入口：抓屏是**延时**的（beginCapture 里那 30ms /
+     * 150ms，见那里的说明），而"取消"经常就落在这段窗口期里 —— 用户按完
+     * 快捷键马上按 Esc 就是。那会儿选区窗口还藏得好好的，endCapture 却
+     * 什么都关不掉（没有 active 状态可收），于是等延时到点，grabAndShow()
+     * 照样把窗口铺出来：屏幕先亮起一整块全屏选区、用户只好再按一次 Esc，
+     * 看着就是"取消截图时全屏框闪现了一次才关闭"。
+     *
+     * 这里把待抓的那次直接掐掉（m_pending 清掉 + 把主窗口放回来），
+     * 延时回调一进来就自己收工 —— 窗口从头到尾没被 show() 过，一帧都不闪。
+     */
+    Q_INVOKABLE void cancelCapture();
+
+    /*
      * 三条出口。sel 是选区（屏幕坐标，逻辑像素），texts 是标注：
      *   [ { x, y, text, size, color } ]，x/y 也是屏幕坐标。
      * 落在选区外的标注自然被裁掉（合成时以选区的图为画布）。
@@ -148,6 +164,11 @@ signals:
 private:
     /* 真正去 grabWindow() 那一步（beginCapture 里延时到桌面重画之后调） */
     void grabAndShow();
+    /*
+     * 掐掉"已经排上队、还没抓"的那次抓屏（见 cancelCapture）。
+     * 没有待抓的（没在 pending）返回 false，调用方接着按正常收工走。
+     */
+    bool cancelPendingCapture();
     /* 建选区窗口（不显示）；窗口是复用的，见 prewarm */
     QWidget *createOverlay();
     void showOverlay();

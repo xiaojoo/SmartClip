@@ -142,6 +142,27 @@ Rectangle {
         return { folders: folderRows, files: fileRows, context: contextRows }
     }
 
+    /*
+     * 一级（文件夹）和二级（文件）的图标各落在哪一列上（自检用）。
+     *
+     * 两级必须一样 —— 这是"画出来"的几何，不是某个属性值，所以问委托自己
+     * （TreeDelegate.iconCellX）。没实例化的行（列表是虚拟化的）跳过。
+     */
+    function iconColumnXs() {
+        var folderX = -1
+        var fileX = -1
+        for (var i = 0; i < rows.length; ++i) {
+            var it = view.itemAtIndex(i)
+            if (!it)
+                continue
+            if (rows[i].kind === "folder" && folderX < 0)
+                folderX = it.iconCellX
+            else if (rows[i].kind === "file" && fileX < 0)
+                fileX = it.iconCellX
+        }
+        return { folder: folderX, file: fileX }
+    }
+
     readonly property color borderColor: "#43454a"
     readonly property color textBright:  "#ced0d6"
     readonly property color textMuted:   "#6f737a"

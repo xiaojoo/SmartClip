@@ -3,6 +3,7 @@
 #include <QClipboard>
 #include <QDateTime>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
 #include <QGuiApplication>
@@ -36,6 +37,72 @@ QString readAllText(const QString &path) {
     if (!file.open(QIODevice::ReadOnly))
         return QString();
     return QString::fromUtf8(file.readAll());
+}
+
+/*
+ * 这个文件按"文本"处理吗（决定要不要解析里面的 "## 时分秒" 分段）。
+ *
+ * 判据是**开头有没有 NUL 字节**：源码 / 配置 / 日志都不会有，png、exe、
+ * 压缩包这类几乎一定有。导入的文件夹现在是原样列出来的（见 scanFolder），
+ * 里面什么后缀都可能有 —— 挨个当文本读进来解析，一个 .exe 就能把一次重扫
+ * 拖垮，解析出来的"条数"也是乱码里数出来的。
+ *
+ * 顺带卡一道大小：超过 kMaxParseBytes 的文件也不解析（分段是给剪贴板内容
+ * 用的，那种文件最多几十 KB）。
+ */
+constexpr qint64 kMaxParseBytes = 4 * 1024 * 1024;
+
+/*
+ * 只列名字、不读内容的目录：依赖包 / 构建产物 / 版本库内部。
+ *
+ * 主流编辑器都是这个路子（VS Code 的 files.exclude、PyCharm 的 Excluded
+ * Directories）：node_modules 里几万个文件，读进来既没意义又慢 —— 用户导入
+ * H:\chat（3.4 万个文件，其中 3.3 万在 node_modules 里）时卡死就是它。
+ *
+ * 树里照样看得到这些目录和文件（上一版要的"遍历出所有内容"没变），
+ * 只是不解析内容：条数记 0，也不进内容搜索（按文件名还是搜得到，
+ * 见 searchFiles 里那条 path LIKE）。
+ */
+bool contentSkipped(const QString &path) {
+    static const QSet<QString> kSkip = {
+        QStringLiteral("node_modules"), QStringLiteral(".pnpm"), QStringLiteral("bower_components"),
+        QStringLiteral(".git"),         QStringLiteral(".svn"),  QStringLiteral(".hg"),
+        QStringLiteral("target"),       QStringLiteral("dist"),  QStringLiteral("out"),
+        QStringLiteral("build"),        QStringLiteral("bin"),   QStringLiteral("obj"),
+        QStringLiteral(".venv"),        QStringLiteral("venv"),  QStringLiteral("__pycache__"),
+        QStringLiteral(".gradle"),      QStringLiteral(".npm-cache"), QStringLiteral(".cache"),
+        QStringLiteral(".next"),        QStringLiteral(".nuxt"), QStringLiteral(".vite"),
+        QStringLiteral("coverage")
+    };
+    const QStringList parts =
+        QDir::fromNativeSeparators(path).split(QLatin1Char('/'), Qt::SkipEmptyParts);
+    for (const QString &part : std::as_const(parts)) {
+        if (kSkip.contains(part))
+            return true;
+    }
+    return false;
+}
+
+/*
+ * 读一个文本文件：返回是不是文本，内容写进 out。
+ *
+ * 只开一次文件：先前是 looksLikeText() 读 4KB 探一遍、readAllText() 再整个
+ * 读一遍，同样一个文件两遍 I/O。二进制只读开头那 4KB 就返回，不把整个
+ * 大文件拖进内存。
+ */
+bool readTextFile(const QFileInfo &info, QString *out) {
+    out->clear();
+    if (!info.isFile() || info.size() > kMaxParseBytes)
+        return false;
+    QFile file(info.absoluteFilePath());
+    if (!file.open(QIODevice::ReadOnly))
+        return false;
+    const QByteArray head = file.read(4096);
+    if (head.contains('\0'))
+        return false;                   /* 二进制：剩下的不读了 */
+    const QByteArray rest = file.readAll();
+    *out = QString::fromUtf8(head + rest);
+    return true;
 }
 
 }  // namespace
@@ -77,7 +144,18 @@ bool ClipboardStore::open() {
     if (!m_db.open())
         return false;
 
+    /*
+     * 落盘策略放宽一点。
+     *
+     * 这个库是**缓存**不是唯一副本：内容全在 md 文件里，库坏了大不了重扫一遍
+     * 磁盘重建（见文件头）。默认的 journal + FULL 是每写一条就 fsync 一次 ——
+     * 导入一个几万文件的项目时，那点落盘开销比解析本身还贵。WAL 让读写不
+     * 互相阻塞，synchronous=NORMAL 省掉每条语句的 fsync，实测导入快一个量级。
+     */
     QSqlQuery query(m_db);
+    query.exec(QStringLiteral("PRAGMA journal_mode=WAL"));
+    query.exec(QStringLiteral("PRAGMA synchronous=NORMAL"));
+
     if (!query.exec(QStringLiteral(
             "CREATE TABLE IF NOT EXISTS clip_files ("
             "path TEXT PRIMARY KEY, folder TEXT NOT NULL, date_key TEXT NOT NULL, "
@@ -315,15 +393,24 @@ void ClipboardStore::recordEntry(const QString &filePath, const QDateTime &when,
     query.exec();
 }
 
-void ClipboardStore::refreshFileRow(const QString &filePath, const QString &dateKey, bool imported) {
+/*
+ * 写 / 更新 clip_files 里那一行。
+ *
+ * entries 传 >= 0 就是**已知条数**（刚插完几条自己数着），不再去 SELECT
+ * COUNT(*)：扫一个新导入的目录时每个文件都要来一条 COUNT，三万个文件就是
+ * 三万条查询，白等。传 -1（默认）才按老办法问数据库 —— 只有"追加内容"那条
+ * 路（appendEntry）需要，它调用一次，无所谓。
+ */
+void ClipboardStore::refreshFileRow(const QString &filePath, const QString &dateKey, bool imported,
+                                    int entries) {
     const QFileInfo info(filePath);
 
-    int entries = 0;
-    QSqlQuery count(m_db);
-    count.prepare(QStringLiteral("SELECT COUNT(*) FROM clip_entries WHERE file_path = ?"));
-    count.addBindValue(filePath);
-    if (count.exec() && count.next())
-        entries = count.value(0).toInt();
+    if (entries < 0) {
+        QSqlQuery count(m_db);
+        count.prepare(QStringLiteral("SELECT COUNT(*) FROM clip_entries WHERE file_path = ?"));
+        count.addBindValue(filePath);
+        entries = (count.exec() && count.next()) ? count.value(0).toInt() : 0;
+    }
 
     QSqlQuery query(m_db);
     query.prepare(QStringLiteral(
@@ -367,6 +454,38 @@ void ClipboardStore::recount() {
 
 void ClipboardStore::rescan() {
     QSet<QString> seen;
+    m_importedDirs.clear();
+
+    /*
+     * 整趟扫盘包在**一个事务**里。
+     *
+     * 每个文件要写好几条 SQL（删旧条目、插条目、更新文件行）；SQLite 默认
+     * 每条语句自己一个事务，导入一个几万文件的项目就是十几万次提交 ——
+     * 用户报的"导入大文件夹慢得离谱"主要就是它。包成一个事务之后只有
+     * 最后一次提交要等落盘。
+     */
+    const bool batched = m_db.transaction();
+
+    /*
+     * 上次扫盘的结果整表读进内存（路径 -> 大小 / 修改时间 / 是否导入）。
+     *
+     * 先前是**每个文件**一条 SELECT 去查缓存：一个三万多文件的项目就是三万多次
+     * prepare + exec，光这一趟实测十几秒 —— 用户报的"导入大文件夹慢得离谱"
+     * 主要就是它。这张表本来就只有几万行，一次读进来在内存里比快得多。
+     */
+    QHash<QString, FileCacheEntry> cached;
+    {
+        QSqlQuery all(m_db);
+        if (all.exec(QStringLiteral("SELECT path, size, mtime, imported FROM clip_files"))) {
+            while (all.next()) {
+                FileCacheEntry entry;
+                entry.size = all.value(1).toLongLong();
+                entry.mtime = all.value(2).toString();
+                entry.imported = all.value(3).toBool();
+                cached.insert(all.value(0).toString(), entry);
+            }
+        }
+    }
 
     QDir root(m_rootPath);
     if (root.exists()) {
@@ -376,80 +495,145 @@ void ClipboardStore::rescan() {
             /* 根目录下只认 "2026-09-13" 这种日期目录，别把用户别的文件夹也索引进来 */
             if (!dateDirPattern().match(dir.fileName()).hasMatch())
                 continue;
-            scanFolder(dir.absoluteFilePath(), false, seen, 0);
+            scanFolder(dir.absoluteFilePath(), false, seen, 0, &cached);
         }
     }
 
     for (const QString &imported : std::as_const(m_imported))
-        scanFolder(QDir::cleanPath(imported), true, seen, 0);
+        scanFolder(QDir::cleanPath(imported), true, seen, 0, &cached);
 
-    /* 缓存里有、这次没扫到的：文件被删掉或改名了，元数据跟着清 */
-    QStringList stale;
-    QSqlQuery query(m_db);
-    if (query.exec(QStringLiteral("SELECT path FROM clip_files"))) {
-        while (query.next()) {
-            const QString path = query.value(0).toString();
-            if (!seen.contains(path))
-                stale.append(path);
-        }
+    /*
+     * 缓存里有、这次没扫到的：文件被删掉或改名了，元数据跟着清。
+     * 判据直接用刚才读进内存的那张表，不用再查一遍库。
+     */
+    for (auto it = cached.constBegin(); it != cached.constEnd(); ++it) {
+        if (!seen.contains(it.key()))
+            forgetFile(it.key());
     }
-    for (const QString &path : std::as_const(stale))
-        forgetFile(path);
+
+    if (batched)
+        m_db.commit();
 
     recount();
     emit changed();
 }
 
-void ClipboardStore::scanFolder(const QString &dir, bool imported, QSet<QString> &seen, int depth) {
+void ClipboardStore::scanFolder(const QString &dir, bool imported, QSet<QString> &seen, int depth,
+                                QHash<QString, FileCacheEntry> *cache) {
     QDir folder(dir);
     if (!folder.exists())
         return;
 
-    const QFileInfoList files = folder.entryInfoList(
-        { QStringLiteral("*.md"), QStringLiteral("*.markdown"), QStringLiteral("*.txt") },
-        QDir::Files | QDir::Readable, QDir::Name);
+    /*
+     * 导入的文件夹**原样**列出来：什么后缀都收（cpp / h / xml / png…），
+     * 隐藏目录（.idea 这种点开头的）也进去 —— 用户要的是"打开一个项目"，
+     * 上一版只收 md / markdown / txt，于是 H:\test\TetrisGame\src 整块不见了
+     * （里面的 .cpp/.h 一个都不匹配）。
+     *
+     * 自己的日期目录仍然只认 md：那里是我们写剪贴板内容的地方，多出来的
+     * 只有 assets 里的图片。
+     */
+    const QFileInfoList files =
+        imported
+            ? folder.entryInfoList(QDir::Files | QDir::Readable | QDir::Hidden, QDir::Name)
+            : folder.entryInfoList({ QStringLiteral("*.md") },
+                                   QDir::Files | QDir::Readable, QDir::Name);
     for (const QFileInfo &file : files) {
-        if (!imported && file.suffix().compare(QLatin1String("md"), Qt::CaseInsensitive) != 0)
-            continue;   /* 自己的日期目录里只认 md */
         seen.insert(file.absoluteFilePath());
-        reindexFile(file.absoluteFilePath(), imported);
+        reindexFile(file.absoluteFilePath(), imported, cache);
     }
 
     /* 只有导入的文件夹往下钻：自己的日期目录里只有 md 和一个 assets 子目录 */
     if (!imported || depth >= kMaxDepth)
         return;
 
+    /* 这个目录本身也记一笔：里面一个文件都没有时，树还得有它这一行 */
+    m_importedDirs.insert(QDir::cleanPath(dir));
+
+    /*
+     * 子目录也带上隐藏的：.idea / .vscode 这类项目配置目录本来就是项目的一部分。
+     * （原来还专门跳过叫 assets 的子目录 —— 那是我们日期目录里的规矩，可这段
+     * 只对导入目录跑，等于把别人项目里的 assets 也吞了，一并去掉。）
+     */
     const QFileInfoList subDirs =
-        folder.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name);
+        folder.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot | QDir::Hidden, QDir::Name);
     for (const QFileInfo &sub : subDirs) {
-        if (sub.fileName().compare(QLatin1String("assets"), Qt::CaseInsensitive) == 0)
+        const QString subPath = QDir::cleanPath(sub.absoluteFilePath());
+        /*
+         * 依赖 / 构建目录（node_modules、target、dist…）：**只留它这一行，
+         * 不往里走**。
+         *
+         * 这是导入大目录卡住的根儿：H:\chat 三万四千个文件，三万三千个在
+         * node_modules 里。名字都列出来、每个都过一遍库（哪怕不读内容），
+         * 实测就是十几秒的卡死 —— 主流编辑器也是这么办的：PyCharm 把这类
+         * 目录标成"排除"，VS Code 从搜索里排除掉。
+         *
+         * 只跳子目录，用户**自己导入的那个根**照常扫（哪怕它就叫 node_modules）。
+         */
+        if (contentSkipped(subPath)) {
+            m_importedDirs.insert(subPath);      /* 行还在，只是不进去 */
             continue;
-        scanFolder(sub.absoluteFilePath(), imported, seen, depth + 1);
+        }
+        scanFolder(subPath, imported, seen, depth + 1, cache);
     }
 }
 
-void ClipboardStore::reindexFile(const QString &path, bool imported) {
+void ClipboardStore::reindexFile(const QString &path, bool imported,
+                                 QHash<QString, FileCacheEntry> *cache) {
     const QFileInfo info(path);
     const QString stamp = info.lastModified().toString(Qt::ISODate);
 
-    /* 大小和修改时间都没动过 -> 这个文件的元数据还是对的，不用重新解析 */
-    QSqlQuery cached(m_db);
-    cached.prepare(QStringLiteral("SELECT size, mtime, imported FROM clip_files WHERE path = ?"));
-    cached.addBindValue(path);
-    if (cached.exec() && cached.next()
-        && cached.value(0).toLongLong() == info.size()
-        && cached.value(1).toString() == stamp
-        && cached.value(2).toBool() == imported)
-        return;
-
-    const QString text = readAllText(path);
+    /*
+     * 大小和修改时间都没动过 -> 这个文件的元数据还是对的，不用重新解析。
+     * 判据来自内存里那张表（见 rescan），不再一个文件查一次库。
+     */
+    const bool had = cache && cache->contains(path);
+    if (had) {
+        const FileCacheEntry known = cache->value(path);
+        if (known.size == info.size() && known.mtime == stamp && known.imported == imported)
+            return;
+    }
 
     /* 日期取上一级目录名（2026-09-13）；不是日期目录就用文件自己的时间 */
     QString dateKey = info.dir().dirName();
     if (!dateDirPattern().match(dateKey).hasMatch())
         dateKey = info.lastModified().toString(QStringLiteral("yyyy-MM-dd"));
 
-    forgetFile(path);
+    /* 只有真有旧行才删：冷导入时每个文件都删两下纯属白费 */
+    auto dropOld = [this, had, &path]() {
+        if (had)
+            forgetFile(path);
+    };
+
+    /*
+     * 依赖 / 构建目录（node_modules、target…）里的东西连读都不读：它们只是
+     * 被列出来、不进内容索引（条数 0；按文件名还是搜得到，见 searchFiles）。
+     * 二进制文件同理，只记大小 / 时间 —— 见 readTextFile 的说明。
+     */
+    if (imported && contentSkipped(path)) {
+        dropOld();
+        refreshFileRow(path, dateKey, imported, 0);
+        if (cache)
+            cache->insert(path, FileCacheEntry{info.size(), stamp, imported});
+        return;
+    }
+
+    /*
+     * 文本才读进来分段。
+     *
+     * 二进制（png / exe / 压缩包）读不成文本：一个条目都不记，条数 0 ——
+     * 记一条"空条目"只会让树上那个"1 条"骗人，搜索里也搜不出任何东西。
+     */
+    QString text;
+    if (!readTextFile(info, &text)) {
+        dropOld();
+        refreshFileRow(path, dateKey, imported, 0);
+        if (cache)
+            cache->insert(path, FileCacheEntry{info.size(), stamp, imported});
+        return;
+    }
+
+    dropOld();
 
     /* 按 "## 时分秒" 分段 */
     struct Segment {
@@ -486,6 +670,7 @@ void ClipboardStore::reindexFile(const QString &path, bool imported) {
         segments.append(whole);
     }
 
+    int written = 0;
     for (const Segment &segment : std::as_const(segments)) {
         const QString body = segment.body.trimmed();
 
@@ -516,9 +701,12 @@ void ClipboardStore::reindexFile(const QString &path, bool imported) {
                                  : QString();
 
         recordEntry(path, when, type, title, previewFor(body), body.toUtf8().size(), hash, asset);
+        ++written;
     }
 
-    refreshFileRow(path, dateKey, imported);
+    refreshFileRow(path, dateKey, imported, written);
+    if (cache)
+        cache->insert(path, FileCacheEntry{info.size(), stamp, imported});
 }
 
 /* ------------------------------------------------------------------ */
@@ -592,6 +780,7 @@ QVariantList ClipboardStore::tree(const QString &query, bool newestFirst) const 
         QString path;
         int depth = 0;
         bool chronological = false;   /* 名字就是时间（日期目录那一支） */
+        bool skipped = false;         /* 依赖 / 构建目录：只列一行，没进去扫 */
         QList<Node *> children;
         QList<const MetaFile *> leaves;
     };
@@ -656,6 +845,66 @@ QVariantList ClipboardStore::tree(const QString &query, bool newestFirst) const 
             parent->leaves.append(&file);
     }
 
+    /*
+     * 一个文件都没有的目录也要有节点。
+     *
+     * 上面那一轮是**按文件**拼的，目录是文件的"路径顺带"出来的；导入的项目里
+     * 那种空目录（H:\test\.idea）就再也没有出场机会 —— 用户报的"没遍历出所有
+     * 内容"里就有它。rescan 时把扫到的目录都记在 m_importedDirs 里，这里补上：
+     * 按路径从浅到深走，父目录一定已经建好了（导入根自己就是最浅的那一级）。
+     *
+     * 只在**没有搜索词**的时候补：搜索是在筛文件，把没命中的目录也画出来
+     * 就成了"搜了个不存在的词，树上却还挂着一堆空目录"。
+     */
+    if (needle.isEmpty() && !m_importedDirs.isEmpty()) {
+        QStringList dirs(m_importedDirs.begin(), m_importedDirs.end());
+        std::sort(dirs.begin(), dirs.end(), [](const QString &a, const QString &b) {
+            const int da = a.count(QLatin1Char('/'));
+            const int db = b.count(QLatin1Char('/'));
+            return da != db ? da < db : a < b;
+        });
+        for (const QString &dir : std::as_const(dirs)) {
+            const QString key = QStringLiteral("dir:") + dir;
+            if (pool.find(key) != pool.end())
+                continue;
+
+            /* 挂在哪个导入根下面、往里第几层（口径和文件那条路一样） */
+            QString root;
+            for (const QString &candidate : std::as_const(m_imported)) {
+                const QString clean = QDir::cleanPath(candidate);
+                if (dir == clean || dir.startsWith(clean + QLatin1Char('/'))) {
+                    if (clean.size() > root.size())
+                        root = clean;
+                }
+            }
+            if (root.isEmpty())
+                continue;
+            const int depth =
+                dir == root ? 0
+                            : int(dir.mid(root.size())
+                                      .split(QLatin1Char('/'), Qt::SkipEmptyParts)
+                                      .size());
+
+            Node node;
+            node.key = key;
+            node.path = dir;
+            node.label = QFileInfo(dir).fileName();
+            node.depth = depth;
+            node.kind = depth == 0 ? QStringLiteral("imported") : QStringLiteral("folder");
+            /* 没进去扫的那种（依赖 / 构建目录）：树上报一声，界面标"未索引" */
+            node.skipped = contentSkipped(dir) && depth > 0;
+            auto it = pool.emplace(key, node).first;
+
+            Node *fresh = &it->second;
+            auto parentIt = pool.find(QStringLiteral("dir:")
+                                      + dir.left(dir.lastIndexOf(QLatin1Char('/'))));
+            if (depth == 0 || parentIt == pool.end())
+                roots.append(fresh);
+            else
+                parentIt->second.children.append(fresh);
+        }
+    }
+
     std::function<QVariantMap(Node *)> dump = [&](Node *node) -> QVariantMap {
         QList<Node *> childNodes = node->children;
         QList<const MetaFile *> leafFiles = node->leaves;
@@ -709,6 +958,7 @@ QVariantList ClipboardStore::tree(const QString &query, bool newestFirst) const 
         out.insert(QStringLiteral("depth"), node->depth);
         out.insert(QStringLiteral("files"), fileTotal);
         out.insert(QStringLiteral("entries"), entryTotal);
+        out.insert(QStringLiteral("skipped"), node->skipped);
         out.insert(QStringLiteral("children"), children);
         return out;
     };

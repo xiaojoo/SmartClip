@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QHash>
 #include <QObject>
 #include <QSet>
 #include <QSqlDatabase>
@@ -47,7 +48,7 @@ class ClipboardStore final : public QObject {
     /* 剪贴板文件的保存根目录（设置面板里可改） */
     Q_PROPERTY(QString rootPath READ rootPath NOTIFY rootPathChanged)
     /*
-     * 用户导入的"外部文件夹"（看里面的 md / txt，新内容不会写进去）。
+     * 用户导入的"外部文件夹"（整棵目录照原样看，新内容不会写进去）。
      *
      * 暴露给 QML 的是 QVariantList 而不是 QStringList：QStringList 在 QML 里
      * 当属性读时会被当成"序列"再转一层，直接取 .length / 下标会报
@@ -177,21 +178,45 @@ private:
     void recordEntry(const QString &filePath, const QDateTime &when, const QString &type,
                      const QString &title, const QString &preview, qint64 bytes,
                      const QString &hash, const QString &assetPath);
-    void refreshFileRow(const QString &filePath, const QString &dateKey, bool imported);
+    /* entries >= 0 = 已知条数（不再 SELECT COUNT，见 .cpp） */
+    void refreshFileRow(const QString &filePath, const QString &dateKey, bool imported,
+                        int entries = -1);
     void forgetFile(const QString &filePath);
     bool hashExists(const QString &hash) const;
     /* 搜索：命中 query 的文件路径集合（按条目标题 / 摘要 + 文件名） */
     QSet<QString> searchFiles(const QString &query) const;
 
-    /* 扫一个目录里的 md / txt（imported = 是不是"导入的文件夹"） */
-    void scanFolder(const QString &dir, bool imported, QSet<QString> &seen, int depth);
     /*
-     * 把一个 md 文件解析成条目元数据（文件没变过就直接返回）。
+     * 上次扫盘时一个文件的状态（rescan 时整表读进内存，见 .cpp）。
+     */
+    struct FileCacheEntry {
+        qint64 size = 0;
+        QString mtime;
+        bool imported = false;
+    };
+
+    /*
+     * 扫一个目录（imported = 是不是"导入的文件夹"）。
+     *
+     * 导入的那种是**整棵原样**收：什么后缀都算（cpp / xml / png…），隐藏目录
+     * （.idea）也进去；自己的日期目录只认 md。
+     *
+     * cache 是"上次扫盘的结果"（路径 -> 大小 / 时间 / 是否导入），rescan 时整表
+     * 读进内存带下来 —— 逐文件去查数据库，三万个文件就是三万次 prepare+exec，
+     * 那才是导入大目录卡住的主因（见 .cpp 里 rescan 的说明）。
+     */
+    void scanFolder(const QString &dir, bool imported, QSet<QString> &seen, int depth,
+                    QHash<QString, FileCacheEntry> *cache);
+    /*
+     * 把一个文件解析成条目元数据（文件没变过就直接返回）。
      *
      * 自己写的文件按 "## 时分秒" 分段；外部文件（导入的文件夹里那些）
-     * 没有这个记号时整篇算一条，时间取文件的修改时间。
+     * 没有这个记号时整篇算一条，时间取文件的修改时间。二进制（png / exe…）
+     * 不读内容，"条数"记 0 —— 见 .cpp 里 readTextFile 的说明。
      */
-    void reindexFile(const QString &path, bool imported);
+    void reindexFile(const QString &path, bool imported,
+                     QHash<QString, FileCacheEntry> *cache = nullptr);
+
     void recount();
 
     /*
@@ -208,6 +233,14 @@ private:
     QSqlDatabase m_db;
     QString m_rootPath;
     QStringList m_imported;
+    /*
+     * 导入目录里扫到的**每一个**目录（含隐藏目录、空目录），每次 rescan 重填。
+     *
+     * 树是从 clip_files 那个表里的**文件**拼出来的（见 tree()），所以"一个文件
+     * 都没有的目录"根本不会有节点 —— 用户报的 H:\test\.idea 就是这样消失的。
+     * 扫盘时顺手把目录也记下来，拼树时补上。
+     */
+    QSet<QString> m_importedDirs;
     mutable bool m_skipNextCapture = false;
     /* 标记是什么时候置上的（见 takeSkipNextCapture 的 2 秒有效期） */
     qint64 m_skipStamp = 0;

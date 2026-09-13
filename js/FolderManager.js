@@ -50,6 +50,11 @@ function walk(list, rows, expanded) {
             folderKind: node.kind,
             files: node.files,
             entries: node.entries,
+            /*
+             * 依赖 / 构建目录（node_modules、target…）：只列这一行，没进去扫，
+             * 界面据此把计数那栏写成"未索引"（见 TreeDelegate）。
+             */
+            skipped: !!node.skipped,
             expanded: open
         })
 
