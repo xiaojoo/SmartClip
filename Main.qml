@@ -665,7 +665,21 @@ Rectangle {
 
     /* 真把标签关掉（问句已经答完，或者本来就不需要问） */
     function finishCloseTab(index) {
+        var docs = view.documents
+        var closedPath = (index >= 0 && index < docs.length) ? docs[index].filePath : ""
         view.closeDocument(index)
+
+        /*
+         * 左树那一行的蓝底跟着撤掉。
+         *
+         * 用户报的：右边标签都关光了（编辑区回到欢迎页），左边还蓝着一行，
+         * 看着像那份还开着。蓝底本来就是"你点开的是哪一份文件"
+         * （selectedPath，见 openTreeFile / locateCurrentItem），关掉的正是它
+         * 就该清掉 —— 留着的唯一结果就是"界面上没有这个文件了，树上却还选着"。
+         */
+        if (closedPath !== "" && closedPath === selectedPath)
+            selectedPath = ""
+
         if (view.documents.length === 0)
             editor.previewItem = null
     }

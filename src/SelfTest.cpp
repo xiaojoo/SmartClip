@@ -2112,6 +2112,31 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
                       .arg(hl.value(QStringLiteral("files")).toInt()));
         }
 
+        /*
+         * 关掉标签之后，左树那一行的蓝底也要跟着撤掉。
+         *
+         * 用户报的：右边标签关光了、编辑区回到欢迎页，左边还蓝着一行，看着
+         * 像那份文件还开着。判据取两处：selectedPath 清空 + 委托自己报的亮行
+         * 数归零（不把 QML 里那个表达式在 C++ 这侧再算一遍）。
+         */
+        dispatch(QStringLiteral("closeTab"));
+        settle();
+        {
+            const QVariantMap s = treeState();
+            check(s.value(QStringLiteral("selectedPath")).toString().isEmpty(),
+                  QStringLiteral("关掉标签后左树不再选中它"),
+                  QStringLiteral("还选着 %1").arg(s.value(QStringLiteral("selectedPath")).toString()));
+            const QVariantMap hl = s.value(QStringLiteral("highlighted")).toMap();
+            check(hl.value(QStringLiteral("files")).toInt() == 0,
+                  QStringLiteral("关掉标签后那一行的蓝底也撤掉"),
+                  QStringLiteral("亮着的文件行 %1")
+                      .arg(hl.value(QStringLiteral("files")).toInt()));
+        }
+
+        /* 下面那条用例要在标签开着的前提下改名，所以重新打开它 */
+        check(view->openFile(path) >= 0, QStringLiteral("重新打开它，接着测重命名"));
+        settle();
+
         /* ---- 重命名：磁盘上的文件和开着的标签一起改 ---- */
         const QString newName = QStringLiteral("selfcheck-renamed.md");
         const QString renamed = QFileInfo(path).absolutePath() + QLatin1Char('/') + newName;
@@ -3072,9 +3097,10 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
     {
         const QString askPath = dir.filePath(QStringLiteral("ask-save.txt"));
         QFile askFile(askPath);
-        askFile.open(QIODevice::WriteOnly);
-        askFile.write("hello\n");
-        askFile.close();
+        if (askFile.open(QIODevice::WriteOnly)) {
+            askFile.write("hello\n");
+            askFile.close();
+        }
 
         check(view->openFile(askPath) >= 0, QStringLiteral("未保存问句用例：打开一个文件"));
         const int before = view->documents().size();
