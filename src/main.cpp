@@ -4,6 +4,7 @@
 #include "EditorViewItem.h"
 #include "Screenshot.h"
 #include "SelfTest.h"
+#include "TrayIcon.h"
 #include "WindowHelper.h"
 
 #include <QApplication>
@@ -16,6 +17,10 @@
 #include <QQuickStyle>
 #include <QQuickWidget>
 #include <QSystemTrayIcon>
+#include <QAction>
+#include <QIcon>
+#include <QKeySequence>
+#include <QMenu>
 #include <QTimer>
 #include <QVBoxLayout>
 #include <QWidget>
@@ -251,6 +256,16 @@ int main(int argc, char *argv[]) {
     QTimer::singleShot(0, &app, [&windowHelper]() { windowHelper.refreshMask(); });
 
     /*
+     * 托盘图标（任务栏右下角那个）：右键菜单里有"截图…"，
+     * 主窗口被压着 / 缩在一边时不用先叫它出来就能截图。
+     * 具体在那个类里，见 src/TrayIcon.h。
+     *
+     * 建在自检分支**之前**：自检要验那个菜单（见 src/SelfTest.cpp），
+     * 拿不到对象就验不了。自检模式下它只是短暂亮一下，无害。
+     */
+    TrayIcon tray(&host, &screenshot, &editorController, &app);
+
+    /*
      * 自检模式（`SmartClip.exe --self-test`，见 src/SelfTest.h）。
      *
      * 编辑区是原生子窗口，外面用合成键鼠点不动它，所以留这条进程内通道：
@@ -261,7 +276,7 @@ int main(int argc, char *argv[]) {
         int result = -1;
         /* 给 QML 引擎一点时间把原生子窗口（编辑区）真正建起来再跑检查 */
         QTimer::singleShot(600, &app, [&]() {
-            result = SelfTest::run(quick->rootObject(), &store, &screenshot);
+            result = SelfTest::run(quick->rootObject(), &store, &screenshot, &tray);
             app.quit();
         });
 
@@ -277,10 +292,6 @@ int main(int argc, char *argv[]) {
         app.exec();
         return result < 0 ? 9 : result;
     }
-
-    QSystemTrayIcon tray(QIcon::fromTheme("edit-paste"), &app);
-    tray.setToolTip("SmartClip");
-    tray.show();
 
     return app.exec();
 }

@@ -54,6 +54,8 @@ set(SMARTCLIP_SOURCES
     src/EditorViewItem.cpp
     src/Screenshot.h
     src/Screenshot.cpp
+    src/TrayIcon.h
+    src/TrayIcon.cpp
     src/SelfTest.h
     src/SelfTest.cpp
 )

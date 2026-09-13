@@ -3,10 +3,14 @@
 #include "ClipboardStore.h"
 #include "EditorViewItem.h"
 #include "Screenshot.h"
+#include "TrayIcon.h"
 
 #include <QApplication>
 #include <QClipboard>
+#include <QAction>
+#include <QIcon>
 #include <QColor>
+#include <QMenu>
 #include <QDate>
 #include <QDateTime>
 #include <QEventLoop>
@@ -90,7 +94,7 @@ bool SelfTest::enabled(int argc, char **argv) {
     return false;
 }
 
-int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot) {
+int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, TrayIcon *tray) {
     EditorViewItem *view = EditorViewItem::instance();
 
     /*
@@ -2833,6 +2837,72 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot) {
                              "（窗口留着复用，见 Screenshot::prewarm）"));
 
         QGuiApplication::clipboard()->setText(oldClipboard);
+    }
+
+    /*
+     * 托盘右键菜单：用户要的是"托盘右键里能选截图"。
+     *
+     * 托盘图标本身点不出来（Windows 会把它塞进"隐藏的图标"浮出区，位置还随
+     * 图标数量变），但**菜单对象**能直接拿 —— 所以验的是：菜单里确实有
+     * 「截图…」这一条，而且触发它真的能开出选区窗口。
+     */
+    if (tray && shot) {
+        QMenu *menu = tray->menu();
+        const QList<QAction *> acts = menu ? menu->actions() : QList<QAction *>();
+        QAction *shotAct = nullptr;
+        for (QAction *a : acts) {
+            if (a && a->text().contains(QStringLiteral("截图")))
+                shotAct = a;
+        }
+        check(menu != nullptr && shotAct != nullptr,
+              QStringLiteral("托盘：右键菜单里有「截图…」这一条"),
+              QStringLiteral("菜单条目 %1 条").arg(acts.size()));
+
+        /*
+         * 图标资源。原来用的是 QIcon::fromTheme("edit-paste")，Windows 上没有
+         * 图标主题、返回空图标，托盘上是一块空白；现在指向随包的 SVG，
+         * 这条把资源路径钉住（前缀被改过就会红）。
+         */
+        check(!QIcon(QStringLiteral(":/icons/image.svg")).isNull(),
+              QStringLiteral("托盘：图标资源 :/icons/image.svg 能加载（不是空白图标）"));
+
+        /*
+         * 白底。全局调色板是深色的，QMenu 默认跟着走 —— 但用户要白底，
+         * 所以这是一处"特意覆盖"，很容易被以后某次改动顺手带回去
+         * （谁把样式表删了、谁动了全局调色板都会）。直接把菜单画出来数像素。
+         */
+        if (menu) {
+            menu->adjustSize();
+            const QImage shot = menu->grab().toImage();
+            /* 顺手留一张渲染图，人眼也能看一眼（临时目录里，和其它自检产物一起） */
+            shot.save(dir.filePath(QStringLiteral("tray-menu.png")));
+            int light = 0;
+            int total = 0;
+            for (int y = 0; y < shot.height(); y += 2) {
+                for (int x = 0; x < shot.width(); x += 2) {
+                    const QColor c = shot.pixelColor(x, y);
+                    ++total;
+                    if (c.red() > 200 && c.green() > 200 && c.blue() > 200)
+                        ++light;
+                }
+            }
+            const int pct = total > 0 ? light * 100 / total : 0;
+            check(pct >= 60,
+                  QStringLiteral("托盘：右键菜单是白底（不是跟界面走的深色）"),
+                  QStringLiteral("亮像素 %1% / 菜单 %2x%3")
+                      .arg(pct).arg(shot.width()).arg(shot.height()));
+        }
+
+        if (shotAct) {
+            shotAct->trigger();
+            for (int i = 0; i < 60 && !shot->active(); ++i) {
+                QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+                QThread::msleep(25);
+            }
+            check(shot->active(),
+                  QStringLiteral("托盘：点菜单里的「截图…」真的开出了选区窗口"));
+            shot->endCapture();
+        }
     }
 
     out() << Qt::endl

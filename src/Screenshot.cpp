@@ -1,4 +1,5 @@
 #include "Screenshot.h"
+#include "LightMenu.h"
 
 #include <QAction>
 #include <QApplication>
@@ -145,6 +146,13 @@ private:
         QAction *resetAct = menu.addAction(QStringLiteral("原始大小"));
         menu.addSeparator();
         QAction *closeAct = menu.addAction(QStringLiteral("关闭贴图"));
+
+        /*
+         * 白底。全局调色板是深色那套，QMenu 默认跟着走 —— 这个菜单是"贴图小窗"
+         * 自己的操作菜单，和托盘那个一样要浅色。样式表和托盘菜单共用一份，
+         * 见 src/LightMenu.h。
+         */
+        applyLightMenuStyle(&menu);
 
         QAction *picked = menu.exec(global);
         if (picked == copyAct) {
