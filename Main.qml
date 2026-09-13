@@ -1427,6 +1427,27 @@ Rectangle {
     }
 
     /*
+     * 关闭键的问句卡片（完全退出 / 收进托盘）。
+     *
+     * 和上面两个一样是 Popup.Window：一个只占自己一小块的原生小窗，底下的界面
+     * 原封不动（不压暗、不遮住、不挡鼠标）。为什么不做成 C++ 的对话框，见
+     * qml/components/QuitAsk.qml 开头。
+     */
+    QuitAsk {
+        id: quitAsk
+        parent: window
+    }
+
+    Connections {
+        target: Win
+        function onQuitRequested() { quitAsk.openCentered() }
+    }
+
+    /* 自检用：直接开/收那块卡片（弹窗是原生窗口，外面不好直接操作） */
+    function openQuitAsk() { quitAsk.openCentered() }
+    function closeQuitAsk() { quitAsk.close() }
+
+    /*
      * 整个界面套一层圆角容器。
      *
      * 为什么不直接把 ApplicationWindow 自己的 color 设成圆角矩形：

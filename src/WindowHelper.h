@@ -29,7 +29,6 @@ class QQuickWindow;
  */
 class QScreen;
 class QWidget;
-class QMessageBox;
 
 class WindowHelper final : public QObject {
     Q_OBJECT
@@ -90,17 +89,24 @@ public slots:
     /*
      * 关闭键（✕）问一句：**完全退出** 还是 **收进托盘**。
      *
-     * 关键是**非模态**：不用 exec() 开嵌套事件循环 —— 那种模态框会把整个程序
-     * 挡住，用户看着就是"卡死"（上一版就是这么翻的车）。这里用 show()，
-     * 主界面、托盘、截图热键全都照常响应，框本身自己管自己的命
-     * （WA_DeleteOnClose）。再按一次 ✕ 不会叠出第二个框，只会把它提到前面。
+     * 这里只发个信号，真正的问句是 QML 侧那一小块卡片
+     * （qml/components/QuitAsk.qml，和下拉菜单同一类 Popup.Window 窗口）。
+     * 为什么不在 C++ 里弹：底下的界面必须**原封不动** —— 不压暗、不遮住、
+     * 不挡鼠标；而新建的顶层对话框又躲不掉"先映射空窗口、内容下一帧才画"
+     * 那一帧闪烁（C++ 侧试过三种补法都治不干净）。见那个 QML 文件开头的说明。
      */
     void askQuit();
+
+    /* 收进托盘：把主窗口藏了，程序继续跑（托盘图标、全局截图热键都还在） */
+    Q_INVOKABLE void hideToTray();
 
     /* 窗口圆角半径（0 = 直角，最大化时会自动置 0） */
     void setCornerRadius(int r);
 
 signals:
+    /* 用户按了关闭键：请界面把"退出问句"那块卡片弹出来 */
+    void quitRequested();
+
     void maximizedChanged();
     void transitionedChanged();
     void cornerRadiusChanged();
@@ -132,9 +138,6 @@ private:
     void applyRoundedMask();
 
     QWidget *m_widget = nullptr;
-
-    /* 正在问"完全退出 / 收进托盘"的那个框（非模态，可能没有） */
-    QMessageBox *m_quitBox = nullptr;
 
     /* QWidget 拿屏幕的方式和 QWindow 不同，这里统一包一层（可能返回 nullptr） */
     QScreen *screenOf() const;

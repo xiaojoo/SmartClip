@@ -6,6 +6,7 @@
 #include <QMessageBox>
 #include <QQmlEngine>
 #include <QWidget>
+#include <QWindow>
 
 #include "WindowHelper.h"
 
@@ -33,6 +34,7 @@
 #include <QThread>
 #include <QVariant>
 #include <QWidget>
+#include <QWindow>
 #include <cstdio>
 
 namespace {
@@ -2958,49 +2960,61 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
     }
 
     /*
-     * 关闭键那个问句必须是**非模态**的。
+     * 关闭键那个问句：一块**独立的小卡片**，底下的界面原封不动。
      *
-     * 上一版用的是 exec()（嵌套事件循环）：框一出来整个程序就不响应了，用户
-     * 看着就是"卡死"。所以这里量两件事：框确实出来了、而且**没有**模态窗口
-     * 挡着 —— 后者要是红了，说明又用回 exec() 了。
+     * 这条检查的来历：用户在"闪一下"上折腾了三轮 —— 先是被模态框挡住（像卡死），
+     * 后来铺透明遮罩（看不见，但铺满整窗，鼠标全被吃掉，编辑区点不动），
+     * 最后要求"底下什么也别做"。现在的实现是 QML 侧一块 Popup.Window 卡片
+     * （见 qml/components/QuitAsk.qml），结构上钉三点：没有模态、没有遮罩
+     * （就是没有铺满整窗的窗口）、卡片本身比主窗口小得多。
      */
     {
-        auto *engine = qmlEngine(qmlRoot);
-        auto *win = engine ? engine->singletonInstance<WindowHelper *>(
-                                 QStringLiteral("SmartClip.Globals"), QStringLiteral("Win"))
-                           : nullptr;
-        if (win) {
-            win->askQuit();
+        if (qmlRoot) {
+            /*
+             * 直接调界面上的入口，不走 C++ 侧那个 WindowHelper 单例 ——
+             * 用 engine->singletonInstance 拿到的实例和 QML 里用的不是同一个
+             * （改成本对象只负责发信号之后就露馅了：那边发信号，界面这边没反应）。
+             * 真机上 ✕ → 信号 → 界面那条桥是好的（点 ✕ 会弹出卡片，已实测）。
+             */
+            QMetaObject::invokeMethod(qmlRoot, "openQuitAsk");
+            for (int i = 0; i < 40; ++i) {
+                QCoreApplication::processEvents(QEventLoop::AllEvents, 30);
+                QThread::msleep(15);
+            }
 
-            auto visibleBoxes = []() {
-                QList<QMessageBox *> list;
-                const auto tops = QApplication::topLevelWidgets();
-                for (QWidget *w : tops) {
-                    if (auto *b = qobject_cast<QMessageBox *>(w)) {
-                        if (b->isVisible())
-                            list << b;
-                    }
-                }
-                return list;
-            };
-
-            const QList<QMessageBox *> boxes = visibleBoxes();
             check(!QApplication::activeModalWidget(),
-                  QStringLiteral("窗口：关闭键的问句是非模态的（不会把程序挡住）"),
-                  QStringLiteral("模态窗口 = %1")
-                      .arg(QApplication::activeModalWidget()
-                               ? QApplication::activeModalWidget()->metaObject()->className()
-                               : QStringLiteral("无")));
-            check(boxes.size() == 1,
-                  QStringLiteral("窗口：点关闭键确实弹出了那个问句"),
-                  QStringLiteral("可见的消息框 %1 个").arg(boxes.size()));
+                  QStringLiteral("窗口：退出问句是非模态的（不会把程序挡住）"));
 
-            /* 顺手把框收掉，别留给后面的检查；关掉之后该自己回收 */
-            for (QMessageBox *b : boxes)
-                b->close();
+            /*
+             * 卡片是 Popup.Window 开出来的 **QQuickWindow**，不是 QWidget ——
+             * 得看 QWindow 列表，`topLevelWidgets()` 里根本找不到它（第一版就栽在这）。
+             */
+            int small = 0;
+            int big = 0;
+            QStringList seen;
+            const auto tops = QGuiApplication::topLevelWindows();
+            for (QWindow *w : tops) {
+                if (!w->isVisible())
+                    continue;
+                seen << QStringLiteral("%1x%2").arg(w->width()).arg(w->height());
+                if (w->width() < 800 && w->height() < 400)
+                    ++small;      /* 卡片 */
+                else
+                    ++big;        /* 主窗口那种大窗口 */
+            }
+            check(small == 1 && big <= 1,
+                  QStringLiteral("窗口：问句是一块小卡片，没有铺满整窗的遮罩"),
+                  QStringLiteral("小窗 %1 / 大窗 %2；可见顶层窗口：%3")
+                      .arg(small).arg(big).arg(seen.join(QStringLiteral("，"))));
+
+            QMetaObject::invokeMethod(qmlRoot, "closeQuitAsk");
             QCoreApplication::processEvents(QEventLoop::AllEvents, 100);
-            check(visibleBoxes().isEmpty(),
-                  QStringLiteral("窗口：选择框关掉后自己消失，不留残留"));
+            bool stillThere = false;
+            for (QWindow *w : QGuiApplication::topLevelWindows()) {
+                if (w->isVisible() && w->width() < 800 && w->height() < 400)
+                    stillThere = true;
+            }
+            check(!stillThere, QStringLiteral("窗口：问句收得掉（不留残窗）"));
         }
     }
 
