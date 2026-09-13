@@ -646,13 +646,26 @@ Rectangle {
      * 所以这里得把标注、选区、工具、各种拖动中间状态都复位 ——
      * 少复位一样，上一次的箭头就会跟到这一次的截图里。
      */
-    function resetForCapture() {
+    function resetForCapture(rect) {
         root.commitEditing()
         textModel.clear()
         root.shapes = []
         root.history = []
+        /*
+         * 选区由**调用方**（C++ 抓屏那侧）直接给定，不靠控件尺寸去猜。
+         *
+         * 为什么：选区窗口是预建复用的（见 Screenshot::prewarm），摆到屏幕尺寸
+         * 之后 QQuickWidget 的布局是**延迟**生效的 —— 复位那一刻读 width/height
+         * 拿到的还是预热时的旧尺寸（640x480 那种），于是第一两帧按"一个小方框"
+         * 画出来：用户看到的就是"屏幕中间闪一下一个方框的轮廓"，第一次抓屏尤其
+         * 明显（后面尺寸已经是对的）。传进来的 rect 是权威值，selAuto 保持 true
+         * 只是为了让之后的 resize 同步（那时尺寸已经对了，同步出来的值一样）。
+         */
         root.selAuto = true
-        root.syncAutoSel()
+        if (rect !== undefined && rect.width > 0 && rect.height > 0)
+            root.sel = rect
+        else
+            root.syncAutoSel()
         root.selected = -1
         root.editing = -1
         root.tool = ""

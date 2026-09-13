@@ -388,6 +388,21 @@ void Screenshot::prewarm() {
         qWarning("截图：选区窗口预建失败（QML 没加载起来）");
         return;
     }
+    /*
+     * 预热这一帧要**按整块屏来画**，不能就着"还没摆过几何的小窗口"画。
+     *
+     * 窗口重新显示时，系统会先把上一次保存的那张表面呈现出来（QQuickWidget
+     * 内部预热解决不了这个，实测过）。所以这里就把几何摆成主屏大小、把界面复位
+     * 成"干净的全屏选区"，再同步画一帧 —— 那么第一次抓屏时先露出来的那张也是
+     * 干净的，不会是个小尺寸的框。
+     */
+    if (QScreen *screen = QGuiApplication::primaryScreen()) {
+        const QRect rect = screen->geometry();
+        m_overlay->setGeometry(rect);
+        if (QObject *root = overlayRoot())
+            QMetaObject::invokeMethod(root, "resetForCapture",
+                                      Q_ARG(QVariant, QVariant::fromValue(QRectF(rect))));
+    }
     if (auto *view = m_overlay->findChild<QQuickWidget *>())
         view->grabFramebuffer();
 }
@@ -405,8 +420,26 @@ void Screenshot::showOverlay() {
 
     /* 复用同一个窗口：先摆到这块屏上，再把上一次的标注清干净 */
     m_overlay->setGeometry(m_screenRect);
+    /*
+     * 把屏幕矩形**直接告诉 QML**，别让它按控件尺寸猜 —— setGeometry 之后
+     * QQuickWidget 的布局是延迟生效的，复位那一刻它还是预热时的旧尺寸，
+     * 于是第一两帧会按一个小方框画（用户看到的"闪一下方框轮廓"）。
+     */
     if (QObject *root = overlayRoot())
-        QMetaObject::invokeMethod(root, "resetForCapture");
+        QMetaObject::invokeMethod(root, "resetForCapture",
+                                  Q_ARG(QVariant, QVariant::fromValue(QRectF(m_screenRect))));
+
+    /*
+     * show() 之前**强制同步渲染一帧**。
+     *
+     * QQuickWidget 的帧是在渲染线程上异步出的：窗口重新显示时，第一帧会先呈现
+     * **上一次渲染好的那张** —— 也就是上一轮抓屏时用户框的那块选区，于是"上次的
+     * 截图框轮廓"又闪一下（实测：第二次抓屏时旧框左边线会亮 3 帧、约 14ms）。
+     * grabFramebuffer() 同步走一次完整渲染，把这帧换成新的；之后 show() 呈现的
+     * 就是干净的全屏选区。
+     */
+    if (auto *view = m_overlay->findChild<QQuickWidget *>())
+        view->grabFramebuffer();
 
     m_overlay->show();
     m_overlay->raise();
@@ -436,8 +469,36 @@ void Screenshot::endCapture() {
      * 等选区窗口一收，它已经画好了，接得上。
      */
     restoreHost();
-    if (m_overlay)
+    if (m_overlay) {
+        /*
+         * 收工前把界面复位成"干净的全屏"并同步画一帧 —— 这样下次显示时，
+         * 系统先呈现的那张残留表面也是干净的。
+         *
+         * 不做这一步的后果实测过：第二轮抓屏时，上一轮用户框的那块选区轮廓
+         * 会闪 3 帧（约 14ms）。QQuickWidget 内部预热解决不了它 —— 残留的是
+         * **窗口自己的表面**（隐藏前系统保存的那张），所以得在藏之前把它刷成干净的。
+         * 此处清标注是安全的：结果早就 compose 完、复制/保存/贴图都做过了。
+         */
+        if (QObject *root = overlayRoot())
+            QMetaObject::invokeMethod(root, "resetForCapture",
+                                      Q_ARG(QVariant, QVariant::fromValue(QRectF(m_screenRect))));
+        /*
+         * 藏起来之前，必须让窗口表面存的是**干净画面**：下次 show() 时系统先呈现的
+         * 就是这张表面，否则上一轮框选的轮廓会闪一帧（实测：命中帧截下来看，左侧压暗
+         * + x≈700 处的强调蓝框线，正是上一轮的选区）。
+         *
+         * 两步缺一不可：
+         *   grabFramebuffer() —— 强制**同步**渲染这个干净状态（QQuickWidget 平时
+         *                        是渲染线程异步出帧，光 repaint 刷进去的还是旧帧）；
+         *   repaint()         —— 把刚渲染好的这帧真正推到窗口上。
+         * 只做其中任何一个都还剩 1~3 帧残留（都实测过）。
+         */
+        if (auto *view = m_overlay->findChild<QQuickWidget *>()) {
+            view->grabFramebuffer();
+            view->repaint();
+        }
         m_overlay->hide();      /* 只是藏起来，留着下次复用（见 prewarm） */
+    }
 
     m_active = false;
     m_shot = QImage();

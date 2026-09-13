@@ -2413,6 +2413,26 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
                       .arg(frozen.width()).arg(frozen.height()).arg(dpr)
                       .arg(overlayW).arg(overlayH));
 
+            /*
+             * 复位时选区必须**按调用方给的矩形**，不能按控件尺寸猜。
+             *
+             * 这是"闪一下方框轮廓"的根：选区窗口预建复用（Screenshot::prewarm），
+             * setGeometry 之后 QQuickWidget 的布局是延迟生效的 —— 复位那一刻读
+             * width/height 拿到的还是预热时的旧尺寸（640x480 那种），于是头一两帧
+             * 按一个小方框画出来，等 resize 事件到了才变成整屏。所以改成由 C++
+             * 把屏幕矩形直接传进来（见 CaptureOverlay::resetForCapture 的说明）。
+             */
+            {
+                QMetaObject::invokeMethod(overlay, "resetForCapture",
+                                          Q_ARG(QVariant, QVariant::fromValue(QRectF(11, 22, 333, 155))));
+                const QRectF got = overlay->property("sel").toRectF();
+                check(qAbs(got.x() - 11) < 1.5 && qAbs(got.y() - 22) < 1.5
+                          && qAbs(got.width() - 333) < 1.5 && qAbs(got.height() - 155) < 1.5,
+                      QStringLiteral("截图：复位时选区按调用方给的矩形（不按控件尺寸猜）"),
+                      QStringLiteral("得到 %1×%2 @%3,%4")
+                          .arg(got.width()).arg(got.height()).arg(got.x()).arg(got.y()));
+            }
+
             /* 框一块 + 在框里落一条文字（走界面上那同一批函数） */
             const double selX = 120.0, selY = 90.0, selW = 420.0, selH = 260.0;
             QMetaObject::invokeMethod(overlay, "testSelect", Q_ARG(QVariant, selX),
@@ -2841,6 +2861,19 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
         }
 
         shot->endCapture();
+        /*
+         * 收工之后选区必须复位成整屏 —— 否则下次打开会带出上一次的框选轮廓
+         * （用户报过："下次使用的时候会调出上次的截图框轮廓"）。
+         * 这条钉住状态那一半；另一半是窗口表面残留，靠 Screenshot::endCapture 里
+         * "强制渲染 + repaint" 解决 —— 那个只能实测（实测：残留帧 3 -> 0）。
+         */
+        if (QObject *root = shot->overlayRoot()) {
+            const QRectF leftover = root->property("sel").toRectF();
+            check(leftover.width() >= 1000 && leftover.height() >= 600,
+                  QStringLiteral("截图：收工之后选区复位成整屏（下次不会带出上次的框）"),
+                  QStringLiteral("残留选区 %1×%2").arg(leftover.width()).arg(leftover.height()));
+        }
+
         check(!shot->overlayVisible() && !shot->active(),
               QStringLiteral("截图：收工之后选区窗口收起来、状态复位"
                              "（窗口留着复用，见 Screenshot::prewarm）"));
