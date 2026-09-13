@@ -2,8 +2,10 @@
 
 #include "ClipboardStore.h"
 #include "EditorViewItem.h"
+#include "Screenshot.h"
 
 #include <QApplication>
+#include <QClipboard>
 #include <QColor>
 #include <QDate>
 #include <QDateTime>
@@ -88,7 +90,7 @@ bool SelfTest::enabled(int argc, char **argv) {
     return false;
 }
 
-int SelfTest::run(QObject *qmlRoot, ClipboardStore *store) {
+int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot) {
     EditorViewItem *view = EditorViewItem::instance();
 
     /*
@@ -1042,6 +1044,20 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store) {
               QStringLiteral("面板左右各有间隙（不再顶到卡片两边）"), geom);
         check(radius >= 6, QStringLiteral("面板是圆角的"), geom);
     }
+
+    /*
+     * 自检要一个已知的起点：**自动换行是会被界面记住的**
+     * （Connections onWrapChanged -> Cmd.remember("wrap", …)）。
+     *
+     * 用户上一次开着自动换行退出的话，这个开关下次启动就是开的 —— 于是
+     * 下面"切一下应该变开 / 再切一下应该关掉"，以及后面横向滚动条那一整组
+     * （换行开着时长行会折起来，横条本来就不该有）全都不成立。
+     * 实测：只把设置里的 wrap 改成 1，同一个可执行文件这一组 6 条全红，
+     * 看着像功能坏了，其实只是起点不一样 —— 所以这里先把起点钉死，
+     * 到收尾再还原成用户自己那个值。
+     */
+    const bool wrapAtStart = view->wrapEnabled();
+    view->setWrapEnabled(false);
 
     dispatch(QStringLiteral("toggleWrap"));
     check(view->wrapEnabled(), QStringLiteral("dispatch(toggleWrap) 生效"));
@@ -2311,6 +2327,442 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store) {
      * 在事件循环还活着的时候正常 close()，这个假故障就没了。
      */
     QMetaObject::invokeMethod(qmlRoot, "closeMenu");
+
+    /* 还原用户自己的自动换行设置（起点在"dispatch(toggleWrap)"那一处钉过） */
+    view->setWrapEnabled(wrapAtStart);
+
+    /*
+     * ============ 截图（抓屏 -> 选区 -> 加文字 -> 合成 / 贴图） ============
+     *
+     * 为什么走选区窗口 QML 上那几个 test* 函数，而不是合成键鼠去点：
+     * 选区窗口是**独立的原生置顶窗口**，和编辑区那个 QScintilla 一样，
+     * 系统级的合成鼠标事件进不到里面（见文件头）。所以这里调的是
+     * CaptureOverlay.qml 里那几个函数 —— 它们和界面上的操作是**同一批**：
+     *
+     *   testSelect -> 拖框那一步（同一个 sel）
+     *   testAddText -> 文字工具点一下（同一个 addText）
+     *   textsData -> 工具条上"复制 / 保存 / 贴图"要传的那份数据
+     *
+     * 要钉的几件事：真的抓到屏了、选区窗口铺满整块屏、框出来的选区尺寸对得上、
+     * 文字真的画进了最终图（不是只有预览里有）、三条出口都能出图。
+     */
+    if (shot) {
+        /* 自检会往剪贴板里放图，先记着原来的文字，收尾放回去 */
+        const QString oldClipboard = QGuiApplication::clipboard()->text();
+
+        shot->beginCapture();
+        /*
+         * 抓屏是**延时**的（要先等主窗口藏起来那一帧重画完，见
+         * Screenshot::beginCapture），所以这里等一下选区窗口出来。
+         */
+        for (int i = 0; i < 60 && !shot->overlayRoot(); ++i) {
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+            QThread::msleep(25);
+        }
+
+        QObject *overlay = shot->overlayRoot();
+        check(overlay != nullptr, QStringLiteral("截图：抓屏之后选区窗口开出来了"));
+        check(shot->active(), QStringLiteral("截图：处于截图状态（active = true）"));
+
+        if (overlay) {
+            settle();
+
+            const double overlayW = overlay->property("width").toDouble();
+            const double overlayH = overlay->property("height").toDouble();
+            check(overlayW > 640 && overlayH > 480,
+                  QStringLiteral("截图：选区窗口铺满整块屏（不是一个小窗）"),
+                  QStringLiteral("窗口 %1x%2").arg(overlayW).arg(overlayH));
+
+            const QImage frozen =
+                shot->imageForId(QStringLiteral("full%1").arg(shot->serial()));
+            const double dpr = frozen.devicePixelRatio() > 0 ? frozen.devicePixelRatio() : 1.0;
+            check(!frozen.isNull()
+                      && frozen.width() >= qRound(overlayW * dpr) - 1
+                      && frozen.height() >= qRound(overlayH * dpr) - 1,
+                  QStringLiteral("截图：冻结图是按设备像素抓下来的（不小于窗口尺寸 × DPR）"),
+                  QStringLiteral("图 %1x%2（dpr %3）/ 窗口 %4x%5")
+                      .arg(frozen.width()).arg(frozen.height()).arg(dpr)
+                      .arg(overlayW).arg(overlayH));
+
+            /* 框一块 + 在框里落一条文字（走界面上那同一批函数） */
+            const double selX = 120.0, selY = 90.0, selW = 420.0, selH = 260.0;
+            QMetaObject::invokeMethod(overlay, "testSelect", Q_ARG(QVariant, selX),
+                                      Q_ARG(QVariant, selY), Q_ARG(QVariant, selW),
+                                      Q_ARG(QVariant, selH));
+            QMetaObject::invokeMethod(overlay, "testTextTool", Q_ARG(QVariant, true));
+
+            QVariant added;
+            QMetaObject::invokeMethod(overlay, "testAddText", Q_RETURN_ARG(QVariant, added),
+                                      Q_ARG(QVariant, selX + 40), Q_ARG(QVariant, selY + 60),
+                                      Q_ARG(QVariant, QStringLiteral("自检文字")));
+            check(added.toBool(), QStringLiteral("截图：文字工具在选区里落下一段文字"));
+
+            QVariant textsVar;
+            QMetaObject::invokeMethod(overlay, "textsData", Q_RETURN_ARG(QVariant, textsVar));
+            const QVariantList texts = textsVar.toList();
+            check(texts.size() == 1
+                      && texts.first().toMap().value(QStringLiteral("text")).toString()
+                             == QStringLiteral("自检文字"),
+                  QStringLiteral("截图：标注数据（x/y/文字/字号/颜色）齐了"),
+                  QStringLiteral("条目数 %1").arg(texts.size()));
+
+            /*
+             * QML 与 C++ 之间那份数据的**字段契约**：合成要用到框宽 / 框高 /
+             * 旋转角（见 Screenshot::compose）。哪天 QML 那边改了字段名而
+             * C++ 没跟着改，合成出来的位置就是错的，而且不报错 —— 钉一下。
+             */
+            {
+                const QVariantMap first = texts.isEmpty() ? QVariantMap()
+                                                          : texts.first().toMap();
+                check(first.contains(QStringLiteral("w"))
+                          && first.value(QStringLiteral("w")).toDouble() > 0
+                          && first.contains(QStringLiteral("h"))
+                          && first.value(QStringLiteral("h")).toDouble() > 0
+                          && first.contains(QStringLiteral("rot")),
+                      QStringLiteral("截图：标注带着框宽 / 框高 / 旋转角（合成的三个输入）"),
+                      QStringLiteral("w=%1 h=%2 rot=%3")
+                          .arg(first.value(QStringLiteral("w")).toDouble())
+                          .arg(first.value(QStringLiteral("h")).toDouble())
+                          .arg(first.value(QStringLiteral("rot")).toDouble()));
+            }
+
+            /*
+             * 文字工具是"按住左键拖出文本框"：拖出 200 × 90，框就该是这个尺寸
+             * （走的是界面上同一个 resizeBox），反向拖落出来的矩形要一样。
+             */
+            {
+                QVariant boxed;
+                QMetaObject::invokeMethod(overlay, "testBoxDrag", Q_RETURN_ARG(QVariant, boxed),
+                                          Q_ARG(QVariant, selX + 200), Q_ARG(QVariant, selY + 120),
+                                          Q_ARG(QVariant, selX + 400), Q_ARG(QVariant, selY + 210));
+                QVariant boxTexts;
+                QMetaObject::invokeMethod(overlay, "textsData", Q_RETURN_ARG(QVariant, boxTexts));
+                const QVariantMap drawn = boxTexts.toList().isEmpty()
+                                              ? QVariantMap()
+                                              : boxTexts.toList().last().toMap();
+                check(boxed.toBool()
+                          && qAbs(drawn.value(QStringLiteral("w")).toDouble() - 200.0) < 1.5
+                          && qAbs(drawn.value(QStringLiteral("h")).toDouble() - 90.0) < 1.5,
+                      QStringLiteral("截图：文字工具拖出来的框就是拖的那个尺寸（200 × 90）"),
+                      QStringLiteral("w=%1 h=%2")
+                          .arg(drawn.value(QStringLiteral("w")).toDouble())
+                          .arg(drawn.value(QStringLiteral("h")).toDouble()));
+
+                QVariant back;
+                QMetaObject::invokeMethod(overlay, "testBoxDrag", Q_RETURN_ARG(QVariant, back),
+                                          Q_ARG(QVariant, selX + 400), Q_ARG(QVariant, selY + 210),
+                                          Q_ARG(QVariant, selX + 200), Q_ARG(QVariant, selY + 120));
+                QMetaObject::invokeMethod(overlay, "textsData", Q_RETURN_ARG(QVariant, boxTexts));
+                const QVariantMap backDrawn = boxTexts.toList().isEmpty()
+                                                  ? QVariantMap()
+                                                  : boxTexts.toList().last().toMap();
+                check(back.toBool()
+                          && qAbs(backDrawn.value(QStringLiteral("x")).toDouble() - (selX + 200)) < 1.5
+                          && qAbs(backDrawn.value(QStringLiteral("y")).toDouble() - (selY + 120)) < 1.5
+                          && qAbs(backDrawn.value(QStringLiteral("w")).toDouble() - 200.0) < 1.5,
+                      QStringLiteral("截图：反向拖（右下往左上）落出来的框位置一样"),
+                      QStringLiteral("x=%1 y=%2 w=%3")
+                          .arg(backDrawn.value(QStringLiteral("x")).toDouble())
+                          .arg(backDrawn.value(QStringLiteral("y")).toDouble())
+                          .arg(backDrawn.value(QStringLiteral("w")).toDouble()));
+            }
+
+            /*
+             * 三条边手柄（左 / 右 / 下）：走的是界面上同一个 dragEdge。
+             * 靶子就是上面拖出来的那个 200 × 90 的空框。
+             */
+            {
+                QVariant all;
+                QMetaObject::invokeMethod(overlay, "textsData", Q_RETURN_ARG(QVariant, all));
+                const int boxIndex = all.toList().size() - 1;
+                auto boxState = [&]() {
+                    QVariant now;
+                    QMetaObject::invokeMethod(overlay, "textsData", Q_RETURN_ARG(QVariant, now));
+                    const QVariantList list = now.toList();
+                    return (boxIndex >= 0 && boxIndex < list.size()) ? list.at(boxIndex).toMap()
+                                                                     : QVariantMap();
+                };
+                auto dragEdge = [&](const QString &edge, double dx, double dy) {
+                    QVariant ok;
+                    QMetaObject::invokeMethod(overlay, "testEdgeDrag", Q_RETURN_ARG(QVariant, ok),
+                                              Q_ARG(QVariant, boxIndex), Q_ARG(QVariant, edge),
+                                              Q_ARG(QVariant, dx), Q_ARG(QVariant, dy));
+                    return ok.toBool();
+                };
+                auto num = [](const QVariantMap &m, const char *key) {
+                    return m.value(QString::fromLatin1(key)).toDouble();
+                };
+
+                dragEdge(QStringLiteral("right"), 100.0, 0.0);
+                QVariantMap st = boxState();
+                check(qAbs(num(st, "w") - 300.0) < 1.5
+                          && qAbs(num(st, "x") - (selX + 200)) < 1.5,
+                      QStringLiteral("截图：拖右边 → 框变宽、左边不动"),
+                      QStringLiteral("x=%1 w=%2").arg(num(st, "x")).arg(num(st, "w")));
+
+                dragEdge(QStringLiteral("left"), -80.0, 0.0);
+                st = boxState();
+                check(qAbs(num(st, "w") - 380.0) < 1.5
+                          && qAbs(num(st, "x") - (selX + 120)) < 1.5,
+                      QStringLiteral("截图：拖左边 → 框变宽、左上角跟着往左移"),
+                      QStringLiteral("x=%1 w=%2").arg(num(st, "x")).arg(num(st, "w")));
+
+                dragEdge(QStringLiteral("bottom"), 0.0, 60.0);
+                st = boxState();
+                check(qAbs(num(st, "h") - 150.0) < 1.5
+                          && qAbs(num(st, "y") - (selY + 120)) < 1.5,
+                      QStringLiteral("截图：拖下边 → 框变高、上边不动"),
+                      QStringLiteral("y=%1 h=%2").arg(num(st, "y")).arg(num(st, "h")));
+
+                /* 第四条边：上边往下拖 60 → 变矮，且上边界跟着往下走 */
+                dragEdge(QStringLiteral("top"), 0.0, 60.0);
+                st = boxState();
+                check(qAbs(num(st, "h") - 90.0) < 1.5
+                          && qAbs(num(st, "y") - (selY + 180)) < 1.5,
+                      QStringLiteral("截图：拖上边 → 框变矮、上边界跟着走（下边不动）"),
+                      QStringLiteral("y=%1 h=%2").arg(num(st, "y")).arg(num(st, "h")));
+
+                /* 左下角：整体放大 —— 字号和框一起按比例长 */
+                {
+                    const double wBefore = num(boxState(), "w");
+                    const double hBefore = num(boxState(), "h");
+                    QVariant ok;
+                    QMetaObject::invokeMethod(overlay, "testScaleDrag", Q_RETURN_ARG(QVariant, ok),
+                                              Q_ARG(QVariant, boxIndex),
+                                              Q_ARG(QVariant, -60.0), Q_ARG(QVariant, 60.0));
+                    st = boxState();
+                    check(ok.toBool() && num(st, "size") > 16.0
+                              && num(st, "w") > wBefore + 100.0
+                              && num(st, "h") > hBefore + 20.0,
+                          QStringLiteral("截图：拖左下角 → 整体放大（字号和框一起长）"),
+                          QStringLiteral("size %1 / w %2→%3 / h %4→%5")
+                              .arg(num(st, "size")).arg(wBefore).arg(num(st, "w"))
+                              .arg(hBefore).arg(num(st, "h")));
+                }
+
+                /* 左下角（现在的语义）：拖动整个框 —— tx/ty 各挪 dx/dy，宽高不变 */
+                {
+                    const QVariantMap before = boxState();
+                    QVariant ok;
+                    QMetaObject::invokeMethod(overlay, "testMoveDrag", Q_RETURN_ARG(QVariant, ok),
+                                              Q_ARG(QVariant, boxIndex),
+                                              Q_ARG(QVariant, 70.0), Q_ARG(QVariant, 40.0));
+                    st = boxState();
+                    check(ok.toBool()
+                              && qAbs(num(st, "x") - (num(before, "x") + 70.0)) < 1.5
+                              && qAbs(num(st, "y") - (num(before, "y") + 40.0)) < 1.5
+                              && qAbs(num(st, "w") - num(before, "w")) < 1.5
+                              && qAbs(num(st, "h") - num(before, "h")) < 1.5,
+                          QStringLiteral("截图：左下角手柄拖动整个框（位置走、宽高不动）"),
+                          QStringLiteral("(%1,%2)→(%3,%4) w %5→%6")
+                              .arg(num(before, "x")).arg(num(before, "y"))
+                              .arg(num(st, "x")).arg(num(st, "y"))
+                              .arg(num(before, "w")).arg(num(st, "w")));
+                }
+
+                /* 右下角：宽高分开拖 */
+                {
+                    const double wBefore = num(boxState(), "w");
+                    const double hBefore = num(boxState(), "h");
+                    QVariant ok;
+                    QMetaObject::invokeMethod(overlay, "testFreeDrag", Q_RETURN_ARG(QVariant, ok),
+                                              Q_ARG(QVariant, boxIndex),
+                                              Q_ARG(QVariant, 50.0), Q_ARG(QVariant, 30.0));
+                    st = boxState();
+                    check(ok.toBool() && qAbs(num(st, "w") - (wBefore + 50.0)) < 1.5
+                              && qAbs(num(st, "h") - (hBefore + 30.0)) < 1.5,
+                          QStringLiteral("截图：拖右下角 → 宽高分别 +50 / +30"),
+                          QStringLiteral("w %1→%2 / h %3→%4")
+                              .arg(wBefore).arg(num(st, "w"))
+                              .arg(hBefore).arg(num(st, "h")));
+                }
+
+                /* 宽度拖到比最小还窄：夹在 minBoxW，不会拖成一条线 */
+                dragEdge(QStringLiteral("right"), -5000.0, 0.0);
+                st = boxState();
+                check(num(st, "w") >= 39.0 && num(st, "w") <= 41.0,
+                      QStringLiteral("截图：宽度拖过头 → 夹在最小框宽（40）"),
+                      QStringLiteral("w=%1").arg(num(st, "w")));
+            }
+
+            const QRectF sel = overlay->property("sel").toRectF();
+            check(qAbs(sel.width() - selW) < 1.5 && qAbs(sel.height() - selH) < 1.5,
+                  QStringLiteral("截图：框出来的选区就是刚才那一块（420 × 260）"),
+                  QStringLiteral("实际 %1 × %2").arg(sel.width()).arg(sel.height()));
+
+            /*
+             * 第一条出口：存 png。存两张 —— 带标注的和不带标注的 ——
+             * 比出"文字真的画进图里了"，而不是只有预览里有。
+             */
+            const QString plainPath = dir.filePath(QStringLiteral("shot-plain.png"));
+            const QString markPath = dir.filePath(QStringLiteral("shot-marked.png"));
+            check(shot->saveResult(plainPath, sel, QVariantList()),
+                  QStringLiteral("截图：合成并保存 png（不带标注）"));
+            check(shot->saveResult(markPath, sel, texts),
+                  QStringLiteral("截图：合成并保存 png（带标注）"));
+
+            const QImage plain(plainPath);
+            const QImage marked(markPath);
+            const int wantW = qRound(selW * dpr);
+            const int wantH = qRound(selH * dpr);
+            check(!plain.isNull() && qAbs(plain.width() - wantW) <= 1
+                      && qAbs(plain.height() - wantH) <= 1,
+                  QStringLiteral("截图：存出来的图正好是选区那一块（设备像素）"),
+                  QStringLiteral("图 %1x%2 / 期望 %3x%4")
+                      .arg(plain.width()).arg(plain.height()).arg(wantW).arg(wantH));
+
+            /*
+             * 数标注色（#ff3b30）的像素：带标注的那张必须明显多出来。
+             * 只看文本落点那一小块，桌面背景里正好有一片红色的概率很低，
+             * 而且这里比的是同一个位置"有无标注"的差，稳。
+             */
+            auto reddish = [](const QImage &img) {
+                int count = 0;
+                for (int y = 0; y < img.height(); ++y) {
+                    for (int x = 0; x < img.width(); ++x) {
+                        const QColor c = img.pixelColor(x, y);
+                        if (c.red() > 170 && c.green() < 120 && c.blue() < 120)
+                            ++count;
+                    }
+                }
+                return count;
+            };
+            const int plainRed = reddish(plain);
+            const int markedRed = reddish(marked);
+            check(markedRed > plainRed + 30,
+                  QStringLiteral("截图：文字真的画进了最终图（标注色像素明显多出来）"),
+                  QStringLiteral("带标注 %1 / 不带 %2").arg(markedRed).arg(plainRed));
+
+            /*
+             * 旋转那条路也要能出图：把同一条标注转 30° 再合成一张，
+             * 尺寸不变、内容必须和没转的那张不一样（转了要是还一样，
+             * 说明 compose() 根本没理会 rot）。
+             */
+            {
+                QVariantList rotated = texts;
+                QVariantMap first = rotated.first().toMap();
+                first.insert(QStringLiteral("rot"), 30.0);
+                rotated[0] = first;
+
+                const QString rotPath = dir.filePath(QStringLiteral("shot-rotated.png"));
+                check(shot->saveResult(rotPath, sel, rotated),
+                      QStringLiteral("截图：带旋转角的标注也能合成出图"));
+                const QImage rotatedImage(rotPath);
+                check(rotatedImage.size() == marked.size()
+                          && rotatedImage != marked,
+                      QStringLiteral("截图：转 30° 之后成品图跟着变了（旋转真的生效）"),
+                      QStringLiteral("尺寸 %1x%2 / 原图 %3x%4")
+                          .arg(rotatedImage.width()).arg(rotatedImage.height())
+                          .arg(marked.width()).arg(marked.height()));
+            }
+
+            /*
+             * 箭头 / 铅笔：走界面上那套"起笔 -> 落笔"（testAddShape 调的
+             * 就是 commitShape），要钉三件事：
+             *   1) 数据里有它、起终点 / 点列对得上；
+             *   2) 两种工具各画一笔都在；
+             *   3) 合成出来的成品图**跟着变**（不是只有预览里画了）。
+             */
+            {
+                QVariant ok;
+                QMetaObject::invokeMethod(overlay, "testAddShape", Q_RETURN_ARG(QVariant, ok),
+                                          Q_ARG(QVariant, QStringLiteral("arrow")),
+                                          Q_ARG(QVariant, selX + 40), Q_ARG(QVariant, selY + 180),
+                                          Q_ARG(QVariant, selX + 200), Q_ARG(QVariant, selY + 230));
+
+                QVariant shapesVar;
+                QMetaObject::invokeMethod(overlay, "shapesData", Q_RETURN_ARG(QVariant, shapesVar));
+                const QVariantList arrows = shapesVar.toList();
+                const QVariantMap arrow = arrows.isEmpty() ? QVariantMap()
+                                                           : arrows.first().toMap();
+                check(ok.toBool() && arrows.size() == 1
+                          && arrow.value(QStringLiteral("kind")).toString() == QLatin1String("arrow")
+                          && qAbs(arrow.value(QStringLiteral("x1")).toDouble() - (selX + 40)) < 1.5
+                          && qAbs(arrow.value(QStringLiteral("y2")).toDouble() - (selY + 230)) < 1.5,
+                      QStringLiteral("截图：拖出来的箭头带着起终点（kind=arrow）"),
+                      QStringLiteral("条目 %1 / 终点 (%2,%3)")
+                          .arg(arrows.size())
+                          .arg(arrow.value(QStringLiteral("x2")).toDouble())
+                          .arg(arrow.value(QStringLiteral("y2")).toDouble()));
+
+                QMetaObject::invokeMethod(overlay, "testAddShape", Q_RETURN_ARG(QVariant, ok),
+                                          Q_ARG(QVariant, QStringLiteral("pencil")),
+                                          Q_ARG(QVariant, selX + 60), Q_ARG(QVariant, selY + 200),
+                                          Q_ARG(QVariant, selX + 240), Q_ARG(QVariant, selY + 160));
+                QMetaObject::invokeMethod(overlay, "shapesData", Q_RETURN_ARG(QVariant, shapesVar));
+                const QVariantList shapes = shapesVar.toList();
+                const QVariantMap pencil = shapes.isEmpty() ? QVariantMap()
+                                                            : shapes.last().toMap();
+                check(ok.toBool() && shapes.size() == 2
+                          && pencil.value(QStringLiteral("kind")).toString()
+                                 == QLatin1String("pencil")
+                          && pencil.value(QStringLiteral("pts")).toList().size() == 6,
+                      QStringLiteral("截图：铅笔那一笔带着点列（x,y 成对）"),
+                      QStringLiteral("条目 %1 / 点数 %2")
+                          .arg(shapes.size())
+                          .arg(pencil.value(QStringLiteral("pts")).toList().size()));
+
+                QVariant all;
+                QMetaObject::invokeMethod(overlay, "annotationsData", Q_RETURN_ARG(QVariant, all));
+                const QString shapePath = dir.filePath(QStringLiteral("shot-shapes.png"));
+                check(shot->saveResult(shapePath, sel, all.toList()),
+                      QStringLiteral("截图：箭头 + 铅笔 + 文字一起合成出图"));
+                const QImage withShapes(shapePath);
+                check(withShapes.size() == marked.size() && withShapes != marked,
+                      QStringLiteral("截图：箭头和铅笔真的画进了成品图（不是只在预览里）"));
+            }
+
+            /* 第二条出口：剪贴板 */
+            check(shot->copyResult(sel, texts), QStringLiteral("截图：复制到剪贴板"));
+            const QImage clip = QGuiApplication::clipboard()->image();
+            check(!clip.isNull() && clip.size() == marked.size(),
+                  QStringLiteral("截图：剪贴板里那张图和存出来的是同一张"),
+                  QStringLiteral("剪贴板 %1x%2 / 文件 %3x%4")
+                      .arg(clip.width()).arg(clip.height())
+                      .arg(marked.width()).arg(marked.height()));
+
+            /* 第三条出口：固定到桌面（贴图窗口） */
+            QWidget *overlayWidget = nullptr;
+            for (QWidget *w : QApplication::topLevelWidgets()) {
+                if (w->windowTitle() == QStringLiteral("SmartClip 截图"))
+                    overlayWidget = w;
+            }
+            shot->pinResult(sel, texts);
+            QWidget *pin = nullptr;
+            for (QWidget *w : QApplication::topLevelWidgets()) {
+                if (w->windowTitle() == QStringLiteral("SmartClip 贴图"))
+                    pin = w;
+            }
+            check(shot->pinnedCount() == 1 && pin != nullptr,
+                  QStringLiteral("截图：固定到桌面开出了一个贴图窗口"));
+            if (pin) {
+                check(qAbs(pin->width() - qRound(selW)) <= 1
+                          && qAbs(pin->height() - qRound(selH)) <= 1,
+                      QStringLiteral("截图：贴图窗口就是选区那么大"),
+                      QStringLiteral("窗口 %1x%2").arg(pin->width()).arg(pin->height()));
+                check(pin->windowFlags().testFlag(Qt::WindowStaysOnTopHint)
+                          && pin->windowFlags().testFlag(Qt::FramelessWindowHint),
+                      QStringLiteral("截图：贴图窗口是置顶 + 无边框（钉在桌面上）"));
+                /* 就钉在选区原来那块地方（截图时框的是哪儿，贴出来在哪儿） */
+                if (overlayWidget) {
+                    const QPoint want = overlayWidget->pos() + QPoint(qRound(selX), qRound(selY));
+                    check((pin->pos() - want).manhattanLength() <= 2,
+                          QStringLiteral("截图：贴图窗口钉在选区原来的位置上"),
+                          QStringLiteral("实际 %1,%2 / 期望 %3,%4")
+                              .arg(pin->pos().x()).arg(pin->pos().y())
+                              .arg(want.x()).arg(want.y()));
+                }
+            }
+            shot->closeAllPins();
+            check(shot->pinnedCount() == 0, QStringLiteral("截图：贴图窗口关得掉"));
+        }
+
+        shot->endCapture();
+        check(shot->overlayRoot() == nullptr && !shot->active(),
+              QStringLiteral("截图：收工之后选区窗口关掉、状态复位"));
+
+        QGuiApplication::clipboard()->setText(oldClipboard);
+    }
 
     out() << Qt::endl
           << "通过 " << gPassed << " 项，失败 " << gFailed << " 项" << Qt::endl;

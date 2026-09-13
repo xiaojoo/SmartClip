@@ -52,6 +52,8 @@ set(SMARTCLIP_SOURCES
     src/EditorController.cpp
     src/EditorViewItem.h
     src/EditorViewItem.cpp
+    src/Screenshot.h
+    src/Screenshot.cpp
     src/SelfTest.h
     src/SelfTest.cpp
 )
@@ -119,6 +121,7 @@ qt_add_qml_module(SmartClip
         qml/components/WindowControls.qml
         qml/delegates/TreeDelegate.qml
         qml/models/ClipboardModel.qml
+        qml/screenshot/CaptureOverlay.qml
         qml/utils/IconProvider.qml
         qml/utils/AppIcon.qml
         qml/utils/ThinScrollBar.qml

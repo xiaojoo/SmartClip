@@ -54,6 +54,18 @@ QtObject {
         else if (kind === "minus")         s = p('M3.6 8 L12.4 8')
         /* 定位当前标签：准星（圆圈 + 四条短线），和 PyCharm 的 Select Opened File 一个意思 */
         else if (kind === "locate")        s = co(8, 8, 4.5) + p('M8 1.6 V3.6 M8 12.4 V14.4 M1.6 8 H3.6 M12.4 8 H14.4') + ci(8, 8, 1.2)
+        /* 截图：四个角括号 = 框选（左侧图标条上那一格用它） */
+        else if (kind === "screenshot")    s = p('M2.4 5.6 V4 A1.6 1.6 0 0 1 4 2.4 H5.6') + p('M10.4 2.4 H12 A1.6 1.6 0 0 1 13.6 4 V5.6') + p('M13.6 10.4 V12 A1.6 1.6 0 0 1 12 13.6 H10.4') + p('M5.6 13.6 H4 A1.6 1.6 0 0 1 2.4 12 V10.4')
+        /*
+         * 文本框四个角的手柄图标（见 qml/screenshot/CaptureOverlay.qml）：
+         *   rotate  旋转（圆弧 + 箭头）
+         *   move    移动整框（四向箭头）
+         *   arrow   斜箭头（右下角，自由缩放；按住 Shift 是整体放大）
+         */
+        else if (kind === "rotate")        s = p('M12.8 9.4 A5.4 5.4 0 1 1 12.2 4.6') + p('M9 1.4 L12.4 4.4 L9.2 7.4')
+        else if (kind === "arrow")         s = p('M4.4 4.4 L11.6 11.6') + p('M11.6 7.2 V11.6 H7.2')
+        /* move 四向箭头：拖动整个文本框 */
+        else if (kind === "move")          s = p('M8 2.2 V13.8 M2.2 8 H13.8') + p('M6.2 4 L8 2.2 L9.8 4') + p('M6.2 12 L8 13.8 L9.8 12') + p('M4 6.2 L2.2 8 L4 9.8') + p('M12 6.2 L13.8 8 L12 9.8')
         else if (kind === "grid")          s = p('M3 3 H7 V7 H3 Z M9 3 H13 V7 H9 Z M3 9 H7 V13 H3 Z M9 9 H13 V13 H9 Z')
         else if (kind === "branch")        s = ci(5.2, 4.8, 1.7) + ci(5.2, 11.2, 1.7) + ci(11.6, 8, 1.7) + p('M5.2 6.5 L5.2 9.5') + p('M5.2 9.5 C5.2 12 11.6 10.4 11.6 8.4')
         else if (kind === "folder")        s = f('M2.4 4.4 A1.6 1.6 0 0 1 4 2.8 H6.2 L7.6 4.6 H11.8 A1.6 1.6 0 0 1 13.4 6.2 V11 A1.6 1.6 0 0 1 11.8 12.6 H4 A1.6 1.6 0 0 1 2.4 11 Z')

@@ -2,6 +2,7 @@
 #include "ClipboardStore.h"
 #include "EditorController.h"
 #include "EditorViewItem.h"
+#include "Screenshot.h"
 #include "SelfTest.h"
 #include "WindowHelper.h"
 
@@ -128,6 +129,15 @@ int main(int argc, char *argv[]) {
     clipboard.start();
 
     /*
+     * 截图（选区 / 加文字 / 固定到桌面，见 src/Screenshot.h）。
+     *
+     * **必须声明在 host 之前**：它的图片提供者（image://shot/…）挂在
+     * QQuickWidget 的引擎上，而那个引擎是 host 的子对象 —— 局部对象按
+     * 声明的反序析构，声明在前才活得比引擎久。
+     */
+    Screenshot screenshot;
+
+    /*
      * 主窗口用 QWidget 承载，而不是 QQmlApplicationEngine 直接开 QQuickWindow。
      *
      * 为什么必须这样（这是"编辑器真正嵌进去"能否成立的前提）：
@@ -168,6 +178,13 @@ int main(int argc, char *argv[]) {
     EditorViewItem::setGlobalStore(&store);
 
     /*
+     * 截图：主窗口（藏 / 恢复、对话框父窗口）+ QML 引擎（选区窗口那个
+     * QQuickWidget 共用同一个引擎，见 Screenshot::setEngine）。
+     */
+    screenshot.setHostWidget(&host);
+    screenshot.setEngine(quick->engine());
+
+    /*
      * 最大化 / 还原（见 src/WindowHelper.h）。
      * 这里构造、随进程析构，用上下文属性交给 QML。
      */
@@ -201,6 +218,7 @@ int main(int argc, char *argv[]) {
     qmlRegisterSingletonInstance("SmartClip.Globals", 1, 0, "Store", &store);
     qmlRegisterSingletonInstance("SmartClip.Globals", 1, 0, "Win", &windowHelper);
     qmlRegisterSingletonInstance("SmartClip.Globals", 1, 0, "Cmd", &editorController);
+    qmlRegisterSingletonInstance("SmartClip.Globals", 1, 0, "Shot", &screenshot);
 
     /* QTP0001 = NEW 之后 QML 模块的资源前缀是 /qt/qml/<URI> */
     quick->setSource(QUrl(QStringLiteral("qrc:/qt/qml/SmartClip/Main.qml")));
@@ -233,7 +251,7 @@ int main(int argc, char *argv[]) {
         int result = -1;
         /* 给 QML 引擎一点时间把原生子窗口（编辑区）真正建起来再跑检查 */
         QTimer::singleShot(600, &app, [&]() {
-            result = SelfTest::run(quick->rootObject(), &store);
+            result = SelfTest::run(quick->rootObject(), &store, &screenshot);
             app.quit();
         });
 

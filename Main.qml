@@ -977,6 +977,8 @@ Rectangle {
         /* ---- 文件 ---- */
         if (act === "new") { newFile(); return }
         if (act === "open") { openFile(); return }
+        /* 截图：抓屏 -> 框选 -> 加文字 / 复制 / 保存 / 固定到桌面（见 src/Screenshot.h） */
+        if (act === "shot") { Shot.beginCapture(); return }
         if (act === "save") { saveFile(); return }
         if (act === "saveAs") { saveFileAs(); return }
         if (act === "saveAll") { saveAll(); return }
@@ -1533,13 +1535,23 @@ Rectangle {
                 Column {
                     anchors.fill: parent; anchors.topMargin: 8; anchors.bottomMargin: 8; spacing: 6
                     Repeater {
-                        model: [ { k: "folder", active: true }, { k: "file", active: false },
+                        /*
+                         * 只有"文件夹"和"截图"两格接上了动作，其余三格还是装饰
+                         * （见下面 navHit 的 onClicked）。截图那一格放在最前面
+                         * 几个工具窗口图标之间，因为它也是"叫出一个工具"。
+                         */
+                        model: [ { k: "folder", active: true }, { k: "screenshot", active: false },
+                                 { k: "file", active: false },
                                  { k: "search", active: false }, { k: "play", active: false },
                                  { k: "branch", active: false } ]
                         delegate: Rectangle {
                             id: navCell
                             required property var modelData
                             width: 26; height: 26; x: 4; radius: 5
+
+                            /* 这一格点下去有没有事发生（决定光标和提示要不要给） */
+                            readonly property bool acts: modelData.k === "folder"
+                                                         || modelData.k === "screenshot"
 
                             /*
                              * 这一格算不算"当前打开的工具窗口"。
@@ -1576,18 +1588,22 @@ Rectangle {
                                 id: navHit
                                 anchors.fill: parent
                                 hoverEnabled: true
-                                cursorShape: modelData.k === "folder" ? Qt.PointingHandCursor
-                                                                      : Qt.ArrowCursor
+                                cursorShape: navCell.acts ? Qt.PointingHandCursor
+                                                          : Qt.ArrowCursor
                                 onClicked: (mouse) => {
                                     if (modelData.k === "folder")
                                         window.toggleFolderTree()
+                                    else if (modelData.k === "screenshot")
+                                        Shot.beginCapture()
                                 }
                             }
 
-                            /* 只有文件夹那格接上了动作，提示也只给它 */
+                            /* 接上动作的那两格给提示 */
                             AppToolTip {
-                                hovered: navHit.containsMouse && modelData.k === "folder"
-                                text: window.folderTreeHidden ? "显示项目树" : "收起项目树"
+                                hovered: navHit.containsMouse && navCell.acts
+                                text: modelData.k === "folder"
+                                      ? (window.folderTreeHidden ? "显示项目树" : "收起项目树")
+                                      : "截图（" + window.shortcutLabel("shot", "Ctrl+Alt+A") + "）"
                                 /* 贴着窗口左沿放：默认的"居中在格子上"会往左出界 */
                                 x: 2
                                 y: -implicitHeight - 3

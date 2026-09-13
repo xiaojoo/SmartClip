@@ -136,6 +136,7 @@ const ShortcutEntry kShortcutTable[] = {
     {"open",          "打开",       "文件", "Ctrl+O"},
     {"save",          "保存",       "文件", "Ctrl+S"},
     {"saveAs",        "另存为",     "文件", "Ctrl+Shift+S"},
+    {"shot",          "截图",       "文件", "Ctrl+Alt+A"},
     {"saveAll",       "全部保存",   "文件", "Ctrl+Alt+S"},
     {"print",         "打印",       "文件", "Ctrl+P"},
     {"closeTab",      "关闭标签",   "文件", "Ctrl+W"},

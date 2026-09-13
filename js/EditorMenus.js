@@ -95,6 +95,12 @@ function fileMenu(ov) {
     return applyOverrides([
         { label: "新建", act: "new", shortcut: "Ctrl+N", icon: "new" },
         { label: "打开…", act: "open", shortcut: "Ctrl+O", icon: "open" },
+        /*
+         * 截图（选区 / 加文字 / 固定到桌面，见 src/Screenshot.h）。
+         * 放在"文件"里是因为产物也是一份文件（png）；默认键位取
+         * Ctrl+Alt+A —— 国内截图工具的通用键位，改键在设置面板里。
+         */
+        { label: "截图…", act: "shot", shortcut: "Ctrl+Alt+A", icon: "image" },
         { separator: true },
         { label: "保存", act: "save", shortcut: "Ctrl+S", icon: "save" },
         { label: "另存为…", act: "saveAs", shortcut: "Ctrl+Shift+S", icon: "save-as" },
