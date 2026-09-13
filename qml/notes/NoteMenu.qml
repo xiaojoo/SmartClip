@@ -764,9 +764,20 @@ Window {
                                          ? root.hoverColor : "transparent")
 
                         Row {
+                            /*
+                             * 左右留白一样宽（都是 8）。
+                             *
+                             * 右边原来是 6，而且下面那个 Label 的宽度**少算了
+                             * 一道 spacing**：Row 的 spacing 是 8，三个孩子之间
+                             * 有两道（图标↔文字、文字↔尾标），原来只减了一道 ——
+                             * 整行比 Row 宽 8px，尾巴那一截（快捷键文字 / 右边那个
+                             * 「>」）就被顶出右边界，几乎贴着面板右缘画。
+                             * 量出来的样子：左边内容从 x=12 起（留白 12），右边顶到
+                             * x=204（留白 4），看着就是"右边没留白、挤在一起"。
+                             */
                             anchors.fill: parent
                             anchors.leftMargin: 8
-                            anchors.rightMargin: 6
+                            anchors.rightMargin: 8
                             spacing: 8
 
                             /* 勾选 / 图标列（固定 14px，条目才对得齐） */
@@ -782,7 +793,8 @@ Window {
                             }
 
                             Label {
-                                width: parent.width - 14 - 8 - trailing.width
+                                /* 14 = 图标列，两个 8 = 两道 spacing，剩下给尾标 */
+                                width: parent.width - 14 - 2 * 8 - trailing.width
                                 height: parent.height
                                 verticalAlignment: Text.AlignVCenter
                                 text: entryBg.entry.label
