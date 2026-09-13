@@ -402,6 +402,30 @@ void Screenshot::prewarm() {
         if (QObject *root = overlayRoot())
             QMetaObject::invokeMethod(root, "resetForCapture",
                                       Q_ARG(QVariant, QVariant::fromValue(QRectF(rect))));
+
+        /*
+         * 关键一步：**在屏幕外面把它露一次脸**（画好再藏起来）。
+         *
+         * 选区窗口的原生窗口是第一次 show() 才创建、映射的 —— 那一刻 DWM 手上
+         * 没有任何内容，只能先呈现一张空表面，和 Qt 的首帧赛跑：抢在前面就是
+         * "整个屏幕闪一下"（用户报的"第一次按快捷键偶发闪屏"；之后几次不闪，
+         * 是因为表面里存着上次收工时刷好的干净画面）。
+         *
+         * 这就是 Win32 那条老配方：窗口**先不给人看地映射一次、把内容画好，再拿去显示**。
+         * 挪到屏幕外（负数坐标，多屏环境里合法）就看不见；WA_ShowWithoutActivating
+         * 保证不抢用户窗口的焦点。
+         */
+        m_overlay->setAttribute(Qt::WA_ShowWithoutActivating, true);
+        m_overlay->setGeometry(QRect(-rect.width() - 10, 0, rect.width(), rect.height()));
+        m_overlay->show();
+        if (auto *view = m_overlay->findChild<QQuickWidget *>()) {
+            view->grabFramebuffer();
+            view->repaint();
+        }
+        m_overlay->hide();
+        m_overlay->setAttribute(Qt::WA_ShowWithoutActivating, false);
+        m_overlay->setGeometry(rect);   /* 摆回主屏，第一次抓屏直接就用它 */
+        m_overlayWarmed = true;
     }
     if (auto *view = m_overlay->findChild<QQuickWidget *>())
         view->grabFramebuffer();

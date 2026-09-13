@@ -133,6 +133,12 @@ public:
      */
     bool overlayVisible() const;
 
+    /*
+     * 启动预热时是否已经让选区窗口在幕外映射并画过一帧（见 Screenshot::prewarm）。
+     * 这是"第一次抓屏不带空窗帧"的前提，自检拿它钉住。
+     */
+    bool overlayWarmed() const { return m_overlayWarmed; }
+
     /* image://shot/<id> 的取图口（id 见下），由 Screenshot.cpp 里的提供者调 */
     QImage imageForId(const QString &id) const;
 
@@ -192,6 +198,12 @@ private:
      * 详见 Screenshot::endCapture 的说明。
      */
     bool m_modalOpen = false;
+    /*
+     * 启动预热时是不是已经让窗口在幕外"露过脸"（见 Screenshot::prewarm）。
+     * 自检用它钉住"第一次抓屏不带空窗帧"这件事的前提条件。
+     */
+    bool m_overlayWarmed = false;
+
     /* 抓屏前把主窗口藏起来了，收尾时要放回去 */
     bool m_hiddenHost = false;
     /* 主窗口是"从抓屏里排除"掉的（没藏），收尾时要把标志位摘掉 */

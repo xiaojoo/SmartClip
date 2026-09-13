@@ -2363,6 +2363,14 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
         /* 自检会往剪贴板里放图，先记着原来的文字，收尾放回去 */
         const QString oldClipboard = QGuiApplication::clipboard()->text();
 
+        /*
+         * 预热必须**真的把窗口在幕外映射并画过**（见 Screenshot::prewarm）。
+         * 否则第一次 show() 时 DWM 手上是空的，会和 Qt 的首帧赛跑 ——
+         * 抢在前面就是"第一次按快捷键偶发闪一下整屏"。
+         */
+        check(shot->overlayWarmed(),
+              QStringLiteral("截图：选区窗口启动时已在幕外画过一帧（第一次抓屏不带空窗帧）"));
+
         shot->beginCapture();
         /*
          * 抓屏是**延时**的（要先等主窗口藏起来那一帧重画完，见
