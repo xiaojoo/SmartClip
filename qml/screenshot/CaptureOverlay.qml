@@ -857,6 +857,16 @@ Rectangle {
                                                mouse.button === Qt.RightButton)
         onPositionChanged: (mouse) => root.pointerMove(mouse.x, mouse.y)
         onReleased: (mouse) => root.pointerUp()
+        /*
+         * 左键双击 = 取消这次截图（和 Esc 一个效果）。
+         *
+         * 双击只在"选区空白处"才算 —— 落在文本框上时文本编辑器会自己吃掉
+         * （那是"选中一个词"），落在工具条/角标上也不会传到这里，所以不会误伤。
+         */
+        onDoubleClicked: (mouse) => {
+            if (mouse.button === Qt.LeftButton)
+                Shot.endCapture()
+        }
     }
 
     /* 按下（x/y 是选区窗口坐标，right 是右键） */
@@ -1657,7 +1667,7 @@ Rectangle {
 
             Text {
                 Layout.alignment: Qt.AlignHCenter
-                text: "T 文字 / A 箭头 / P 铅笔 / R 方框 · 左下角拖整框 · 左上旋转 · 右下缩放（Shift 整体放大）· Ctrl+Z 撤销"
+                text: "T 文字 / A 箭头 / P 铅笔 / R 方框 · 左下角拖整框 · 左上旋转 · 右下缩放（Shift 整体放大）· Ctrl+Z 撤销 · 双击取消"
                 font.pixelSize: 10
                 color: "#6f737a"
             }
