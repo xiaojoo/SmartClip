@@ -2353,15 +2353,20 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot) {
         shot->beginCapture();
         /*
          * 抓屏是**延时**的（要先等主窗口藏起来那一帧重画完，见
-         * Screenshot::beginCapture），所以这里等一下选区窗口出来。
+         * Screenshot::beginCapture），所以这里等它真正进入截图状态。
+         *
+         * 判据用 active()、不是 overlayRoot()：选区窗口现在是预建复用的
+         * （Screenshot::prewarm），窗口对象一开始就在，拿它当"出来了吗"
+         * 会立刻返回、后面全成时序赌运气。
          */
-        for (int i = 0; i < 60 && !shot->overlayRoot(); ++i) {
+        for (int i = 0; i < 60 && !shot->active(); ++i) {
             QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
             QThread::msleep(25);
         }
 
         QObject *overlay = shot->overlayRoot();
-        check(overlay != nullptr, QStringLiteral("截图：抓屏之后选区窗口开出来了"));
+        check(overlay != nullptr && shot->overlayVisible(),
+              QStringLiteral("截图：抓屏之后选区窗口显示出来了"));
         check(shot->active(), QStringLiteral("截图：处于截图状态（active = true）"));
 
         if (overlay) {
@@ -2823,8 +2828,9 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot) {
         }
 
         shot->endCapture();
-        check(shot->overlayRoot() == nullptr && !shot->active(),
-              QStringLiteral("截图：收工之后选区窗口关掉、状态复位"));
+        check(!shot->overlayVisible() && !shot->active(),
+              QStringLiteral("截图：收工之后选区窗口收起来、状态复位"
+                             "（窗口留着复用，见 Screenshot::prewarm）"));
 
         QGuiApplication::clipboard()->setText(oldClipboard);
     }

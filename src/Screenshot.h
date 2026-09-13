@@ -56,6 +56,7 @@ class Screenshot final : public QObject {
 
 public:
     explicit Screenshot(QObject *parent = nullptr);
+    ~Screenshot() override;
 
     /*
      * 主窗口由 main.cpp 创建，这里只记一个指针：藏 / 恢复它，
@@ -71,6 +72,13 @@ public:
      * 另起一个引擎就 import 不到了。图片提供者（image://shot/…）也在这里登记。
      */
     void setEngine(QQmlEngine *engine);
+
+    /*
+     * 启动时预建选区窗口（藏着）并先渲染一帧，见 Screenshot::prewarm。
+     * 不调也能用（第一次截图时现建），只是那一下会慢几百毫秒 ——
+     * 主窗口已经藏了、选区窗口还没出来，屏幕上会闪一下桌面。
+     */
+    void prewarm();
 
     bool active() const { return m_active; }
     int serial() const { return m_serial; }
@@ -114,8 +122,16 @@ public:
 
     /* ---- 下面两个给自检用（见 src/SelfTest.cpp），界面不走 ---- */
 
-    /* 选区窗口的 QML 根对象；没开着返回 nullptr */
+    /* 选区窗口的 QML 根对象；没建起来返回 nullptr */
     QObject *overlayRoot() const;
+
+    /*
+     * 选区窗口这会儿是不是**真的**显示着。
+     *
+     * 别去读 QML 根的 visible 属性：QQuickWidget 里的根项永远是 visible，
+     * 窗口藏起来它也不变（自检里踩过）。
+     */
+    bool overlayVisible() const;
 
     /* image://shot/<id> 的取图口（id 见下），由 Screenshot.cpp 里的提供者调 */
     QImage imageForId(const QString &id) const;
@@ -126,8 +142,16 @@ signals:
 private:
     /* 真正去 grabWindow() 那一步（beginCapture 里延时到桌面重画之后调） */
     void grabAndShow();
+    /* 建选区窗口（不显示）；窗口是复用的，见 prewarm */
+    QWidget *createOverlay();
     void showOverlay();
     void restoreHost();
+
+    /*
+     * 把主窗口从屏幕捕获里排除 / 恢复（Windows 的 WDA_EXCLUDEFROMCAPTURE）。
+     * 返回系统认不认这个标志位；不认就退回"藏窗口 + 延时"那条路。
+     */
+    bool setHostCaptureExcluded(bool on);
 
     /* 选区（屏幕坐标）+ 标注 -> 一张图。三条出口共用这一份 */
     QImage compose(const QRectF &sel, const QVariantList &texts) const;
@@ -170,4 +194,6 @@ private:
     bool m_modalOpen = false;
     /* 抓屏前把主窗口藏起来了，收尾时要放回去 */
     bool m_hiddenHost = false;
+    /* 主窗口是"从抓屏里排除"掉的（没藏），收尾时要把标志位摘掉 */
+    bool m_excludedHost = false;
 };

@@ -227,6 +227,16 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
+    /*
+     * 预建并预热选区窗口（藏着）：抓屏那一刻只剩"换图 + show"。
+     *
+     * 必须放在 qmlRegisterSingletonInstance 之后 —— 选区窗口的 QML 要
+     * `import SmartClip.Globals`，单例还没登记就建它会报 "module not installed"。
+     * 不预热的话，QML 解析 / 场景图初始化 / 4K 首帧全落在"主窗口已经藏了、
+     * 选区窗口还没出来"那段空档里，屏幕上露的就是桌面，看着像闪一下。
+     */
+    screenshot.prewarm();
+
     host.resize(1460, 900);
     host.show();
 

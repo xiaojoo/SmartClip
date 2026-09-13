@@ -30,8 +30,27 @@ Rectangle {
     color: "black"
 
     /* ---- 选区 ---- */
+    /*
+     * 选区（屏幕坐标，逻辑像素）。
+     *
+     * selAuto = 选区还是"整屏"这个默认值（用户拖过一次框选就成 false）。
+     * 为什么要有这个标志：选区窗口现在是**预建复用**的（Screenshot::prewarm），
+     * 每次抓屏先复位、再 show —— 复位那一刻窗口还没被摆到屏幕尺寸上，那时读
+     * width/height 拿到的是 0，sel 就成了 (0,0,0,0)：工具条跑到左上角、
+     * 复制出来是空图（实测就是这么翻的车）。所以复位只把 selAuto 置 true，
+     * 真正的整屏矩形交给下面两个 onXxxChanged，等尺寸落定之后再填。
+     */
+    property bool selAuto: true
     property rect sel: Qt.rect(0, 0, width, height)
     readonly property bool selReady: sel.width >= 8 && sel.height >= 8
+
+    function syncAutoSel() {
+        if (root.selAuto)
+            root.sel = Qt.rect(0, 0, root.width, root.height)
+    }
+
+    onWidthChanged: root.syncAutoSel()
+    onHeightChanged: root.syncAutoSel()
 
     /* ---- 标注：当前工具 / 字号 / 线宽 / 颜色 / 选中和正在打字的那一条 ---- */
     /*
@@ -620,8 +639,40 @@ Rectangle {
         }
     }
 
-    /* ---- 自检入口（见 src/SelfTest.cpp），和界面上那几下是同一批函数 ---- */
-    function testSelect(x, y, w, h) { root.sel = Qt.rect(x, y, w, h) }
+    /*
+     * 每次抓屏前把上一次的痕迹清干净。
+     *
+     * 选区窗口现在是**复用**的（预建一次一直留着，见 Screenshot::prewarm），
+     * 所以这里得把标注、选区、工具、各种拖动中间状态都复位 ——
+     * 少复位一样，上一次的箭头就会跟到这一次的截图里。
+     */
+    function resetForCapture() {
+        root.commitEditing()
+        textModel.clear()
+        root.shapes = []
+        root.history = []
+        root.selAuto = true
+        root.syncAutoSel()
+        root.selected = -1
+        root.editing = -1
+        root.tool = ""
+        root.hinted = true
+        root.dragging = false
+        root.boxDrag = false
+        root.boxIndex = -1
+        root.shapeDrag = false
+        root.drawKind = ""
+        root.drawPts = []
+        root.menuSize = false
+        root.menuColor = false
+        root.pickingColor = false
+        shapeCanvas.requestPaint()
+    }
+
+    /* ---- 自检入口（见 src/SelfTest.cpp），和界面上那几下是同一批函数 ---- */    function testSelect(x, y, w, h) {
+        root.selAuto = false
+        root.sel = Qt.rect(x, y, w, h)
+    }
     function testTextTool(on) { root.tool = on ? "text" : "" }
     /* 自检：选某个工具 -> 按下 -> 拖 -> 松开（走界面上同一套 pointer*） */
     function testDrawWith(tool, x1, y1, x2, y2) {
@@ -732,7 +783,7 @@ Rectangle {
         id: shotImage
 
         anchors.fill: parent
-        source: "image://shot/full" + Shot.serial
+        source: Shot.serial > 0 ? "image://shot/full" + Shot.serial : ""
         fillMode: Image.Stretch
         /*
          * 不进 QQuickPixmapCache：URL 里那个序号已经能绕开缓存了，
@@ -842,6 +893,7 @@ Rectangle {
         root.commitEditing()
         root.closeMenus()
         root.selected = -1
+        root.selAuto = false
         root.hinted = false
         root.dragging = true
         root.pressX = x
@@ -901,8 +953,10 @@ Rectangle {
                 return
             root.dragging = false
             /* 点一下（几乎没拖）= 整屏，主流截图工具都是这个手感 */
-            if (!root.selReady)
+            if (!root.selReady) {
                 root.sel = Qt.rect(0, 0, root.width, root.height)
+                root.selAuto = true
+            }
     }
 
     /* 选区边框（不吃鼠标：没有 MouseArea，事件照样穿到下面去） */

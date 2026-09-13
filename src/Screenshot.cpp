@@ -29,6 +29,10 @@
 #include <QWidget>
 #include <cmath>
 
+#if defined(Q_OS_WIN)
+#  include <windows.h>
+#endif
+
 namespace {
 
 /*
@@ -207,6 +211,12 @@ private:
 
 Screenshot::Screenshot(QObject *parent) : QObject(parent) {}
 
+Screenshot::~Screenshot() {
+    /* 选区窗口是复用的一直留着（见 prewarm），退场时自己收 */
+    delete m_overlay;
+    m_overlay = nullptr;
+}
+
 void Screenshot::setHostWidget(QWidget *host) { m_host = host; }
 
 void Screenshot::setEngine(QQmlEngine *engine) {
@@ -243,16 +253,24 @@ void Screenshot::beginCapture() {
         return;
 
     /*
-     * 主窗口正好压在这块屏上时先把它藏起来。
+     * 主窗口正好压在这块屏上时，要让第一张图里**没有 SmartClip 自己**。
      *
-     * 从菜单 / 左栏图标触发截图时，窗口本来就盖在屏上，不藏的话第一张
-     * 图里必有 SmartClip 自己（用户要截的是别人的界面）。藏起来之后
-     * 收尾（取消 / 复制 / 保存 / 贴图）再放回来。
+     * 两种办法，优先用第一种：
      *
-     * 只在**就是这块屏**时藏：窗口在另一块屏上时不用动它，
-     * 用户多半就是在截那块屏上的别的程序。
+     *  1) WDA_EXCLUDEFROMCAPTURE：让 Windows 把主窗口从屏幕捕获里排除掉
+     *     （Win10 2004+）。窗口照常显示给用户看，只是抓屏抓不到它 ——
+     *     所以**不用藏、不用等**，抓到选区窗口出现几乎是即时的。
+     *     原来那套"藏起来 + 等 150ms 让桌面重画"就是"打开时屏幕闪一下"
+     *     的来源：那 150ms（加上抓屏、首帧）里屏幕上露的是桌面。
+     *  2) 老办法（兜底）：藏窗口 + 延时。系统不支持上面那个标志位时才用，
+     *     见 setHostCaptureExcluded() 的返回值。
+     *
+     * 只在**就是这块屏**时动手：窗口在另一块屏上时不用管，用户多半就是在
+     * 截那块屏上的别的程序。
      */
-    m_hiddenHost = m_host && m_host->isVisible() && m_host->screen() == screen;
+    const bool onThisScreen = m_host && m_host->isVisible() && m_host->screen() == screen;
+    m_excludedHost = onThisScreen && setHostCaptureExcluded(true);
+    m_hiddenHost = onThisScreen && !m_excludedHost;
     if (m_hiddenHost)
         m_host->hide();
 
@@ -260,13 +278,12 @@ void Screenshot::beginCapture() {
     m_pending = true;
 
     /*
-     * 藏窗口到桌面真的重画完，中间隔着一次合成。
-     *
-     * 不延时直接抓的话，抓到的还是"窗口还在上面"的那一帧（实测：菜单刚关
-     * 掉、窗口刚 hide 掉时最容易撞上）。150ms 是肉眼看不出来的停顿，
-     * 换一张干净的画面很值。
+     * 排除法几乎不用等（合成器下一帧就生效），藏窗口那条老路才要等桌面重画完
+     * —— 不延时直接抓的话，抓到的还是"窗口还在上面"的那一帧（实测：菜单刚关掉、
+     * 窗口刚 hide 掉时最容易撞上）。
      */
-    QTimer::singleShot(m_hiddenHost ? 150 : 0, this, &Screenshot::grabAndShow);
+    QTimer::singleShot(m_hiddenHost ? 150 : (m_excludedHost ? 30 : 0),
+                       this, &Screenshot::grabAndShow);
 }
 
 void Screenshot::grabAndShow() {
@@ -297,18 +314,18 @@ void Screenshot::grabAndShow() {
     showOverlay();
 }
 
-void Screenshot::showOverlay() {
-    /*
-     * 选区窗口：铺满被截的那块屏，无边框 + 置顶 + 拿焦点（Esc / 输入都要）。
-     *
-     * 内容用 QQuickWidget 装 —— 和主窗口一样，挂的是**同一个引擎**
-     * （见 setEngine 的说明），所以 QML 里直接用 Shot 这个单例。
-     */
+/*
+ * 建选区窗口（不显示）。
+ *
+ * 内容用 QQuickWidget 装 —— 和主窗口一样，挂的是**同一个引擎**
+ * （见 setEngine 的说明），所以 QML 里直接用 Shot 这个单例。
+ *
+ * 窗口是**复用**的（见 prewarm）：建好之后一直留着，抓屏时只换图 + show。
+ */
+QWidget *Screenshot::createOverlay() {
     auto *overlay = new QWidget(nullptr, Qt::Window | Qt::FramelessWindowHint
                                              | Qt::WindowStaysOnTopHint);
-    overlay->setAttribute(Qt::WA_DeleteOnClose);
     overlay->setWindowTitle(QStringLiteral("SmartClip 截图"));
-    overlay->setGeometry(m_screenRect);
 
     auto *view = new QQuickWidget(m_engine, overlay);
     view->setResizeMode(QQuickWidget::SizeRootObjectToView);
@@ -324,15 +341,10 @@ void Screenshot::showOverlay() {
     if (view->status() == QQuickWidget::Error) {
         for (const QQmlError &error : view->errors())
             qWarning("%s", qPrintable(error.toString()));
-        overlay->close();
-        m_active = false;
-        m_shot = QImage();
-        restoreHost();
-        emit stateChanged();
-        return;
+        delete overlay;
+        return nullptr;
     }
 
-    m_overlay = overlay;
     /*
      * 以 this 作为上下文接：Screenshot 先没掉时这条连接自动断，
      * 免得进程退出时窗口被拆还回头调已经析构的对象。
@@ -346,11 +358,53 @@ void Screenshot::showOverlay() {
             emit stateChanged();
         }
     });
+    return overlay;
+}
 
-    overlay->show();
-    overlay->raise();
-    overlay->activateWindow();
-    view->setFocus();
+void Screenshot::prewarm() {
+    /*
+     * 启动时就把选区窗口建好（藏着），并且先渲染一帧。
+     *
+     * 为什么：抓屏到选区窗口出现之间，主窗口已经藏了 —— 这段时间屏幕上露的
+     * 是桌面。原来这段时间里要现场做的事有：QML 解析、QQuickWidget 的场景图
+     * 初始化、4K 底图上传、首帧渲染，加起来几百毫秒，肉眼就是"屏幕闪一下"。
+     * 挪到启动时做掉之后，抓屏那一刻只剩"换图 + show"，那一下基本看不见。
+     *
+     * grabFramebuffer() 是故意的：它强制走一次完整渲染，把着色器编译 /
+     * 纹理那些一次性开销也提前付掉。
+     */
+    if (m_overlay || !m_engine)
+        return;
+    m_overlay = createOverlay();
+    if (!m_overlay) {
+        qWarning("截图：选区窗口预建失败（QML 没加载起来）");
+        return;
+    }
+    if (auto *view = m_overlay->findChild<QQuickWidget *>())
+        view->grabFramebuffer();
+}
+
+void Screenshot::showOverlay() {
+    if (!m_overlay)
+        m_overlay = createOverlay();
+    if (!m_overlay) {
+        m_active = false;
+        m_shot = QImage();
+        restoreHost();
+        emit stateChanged();
+        return;
+    }
+
+    /* 复用同一个窗口：先摆到这块屏上，再把上一次的标注清干净 */
+    m_overlay->setGeometry(m_screenRect);
+    if (QObject *root = overlayRoot())
+        QMetaObject::invokeMethod(root, "resetForCapture");
+
+    m_overlay->show();
+    m_overlay->raise();
+    m_overlay->activateWindow();
+    if (auto *view = m_overlay->findChild<QQuickWidget *>())
+        view->setFocus();
 }
 
 void Screenshot::endCapture() {
@@ -366,24 +420,57 @@ void Screenshot::endCapture() {
     if (m_modalOpen)
         return;
 
-    if (m_overlay) {
-        QWidget *overlay = m_overlay;
-        /* 先断开引用：close() 之后它随时会被删，别的地方不要再伸手 */
-        m_overlay = nullptr;
-        overlay->close();
-    }
+    /*
+     * 顺序要紧：**先把主窗口放回来，再收起选区窗口**。
+     *
+     * 反过来的话，选区窗口一没、主窗口还没画出来，中间那一两帧露的是桌面 ——
+     * 用户看到的就是"退出一闪"。主窗口在置顶的选区窗口底下，先放回来是看不见的，
+     * 等选区窗口一收，它已经画好了，接得上。
+     */
+    restoreHost();
+    if (m_overlay)
+        m_overlay->hide();      /* 只是藏起来，留着下次复用（见 prewarm） */
+
     m_active = false;
     m_shot = QImage();
-    restoreHost();
     emit stateChanged();
 }
 
 void Screenshot::restoreHost() {
+    /* 先把"抓屏排除"摘掉：这是加在主窗口上的开关，不能留着 */
+    if (m_excludedHost) {
+        m_excludedHost = false;
+        setHostCaptureExcluded(false);
+    }
     if (!m_hiddenHost)
         return;
     m_hiddenHost = false;
     if (m_host)
         m_host->show();
+}
+
+/*
+ * 把主窗口从"屏幕捕获"里排除 / 恢复（Windows 10 2004+ 的
+ * SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)）。
+ *
+ * 返回值 = 系统认不认这个标志位；不认（老系统 / 非 Windows）就返回 false，
+ * 调用方退回"藏窗口 + 延时"那条老路。
+ */
+bool Screenshot::setHostCaptureExcluded(bool on) {
+#if defined(Q_OS_WIN)
+#  ifndef WDA_EXCLUDEFROMCAPTURE
+#    define WDA_EXCLUDEFROMCAPTURE 0x00000011
+#  endif
+    if (!m_host)
+        return false;
+    const HWND hwnd = reinterpret_cast<HWND>(m_host->winId());
+    if (!hwnd)
+        return false;
+    return SetWindowDisplayAffinity(hwnd, on ? WDA_EXCLUDEFROMCAPTURE : WDA_NONE) != FALSE;
+#else
+    Q_UNUSED(on);
+    return false;
+#endif
 }
 
 QImage Screenshot::compose(const QRectF &sel, const QVariantList &texts) const {
@@ -640,6 +727,10 @@ QObject *Screenshot::overlayRoot() const {
         return nullptr;
     auto *view = m_overlay->findChild<QQuickWidget *>();
     return view ? view->rootObject() : nullptr;
+}
+
+bool Screenshot::overlayVisible() const {
+    return m_overlay && m_overlay->isVisible();
 }
 
 QImage Screenshot::imageForId(const QString &id) const {
