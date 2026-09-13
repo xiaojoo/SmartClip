@@ -4,6 +4,7 @@ class QObject;
 class ClipboardStore;
 class Screenshot;
 class TrayIcon;
+class EditorController;
 
 /*
  * 自检模式：`SmartClip.exe --self-test`
@@ -27,6 +28,6 @@ bool enabled(int argc, char **argv);
 
 /* qmlRoot 是 Main.qml 的根对象；run() 通过它的 dispatch() 发命令 */
 int run(QObject *qmlRoot, ClipboardStore *store, Screenshot *screenshot = nullptr,
-        TrayIcon *tray = nullptr);
+        TrayIcon *tray = nullptr, EditorController *cmd = nullptr);
 
 }  // namespace SelfTest

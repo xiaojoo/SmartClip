@@ -29,6 +29,7 @@ class QQuickWindow;
  */
 class QScreen;
 class QWidget;
+class QMessageBox;
 
 class WindowHelper final : public QObject {
     Q_OBJECT
@@ -51,6 +52,7 @@ class WindowHelper final : public QObject {
 
 public:
     explicit WindowHelper(QObject *parent = nullptr);
+    ~WindowHelper() override;
 
     /*
      * 主窗口由 main.cpp 以 QWidget 形式创建（见那里的说明），
@@ -84,6 +86,16 @@ public slots:
     /* 最小化 / 关闭主窗口（QML 侧不再有 Window 对象，统一走这里） */
     void minimizeWindow();
     void closeWindow();
+
+    /*
+     * 关闭键（✕）问一句：**完全退出** 还是 **收进托盘**。
+     *
+     * 关键是**非模态**：不用 exec() 开嵌套事件循环 —— 那种模态框会把整个程序
+     * 挡住，用户看着就是"卡死"（上一版就是这么翻的车）。这里用 show()，
+     * 主界面、托盘、截图热键全都照常响应，框本身自己管自己的命
+     * （WA_DeleteOnClose）。再按一次 ✕ 不会叠出第二个框，只会把它提到前面。
+     */
+    void askQuit();
 
     /* 窗口圆角半径（0 = 直角，最大化时会自动置 0） */
     void setCornerRadius(int r);
@@ -120,6 +132,9 @@ private:
     void applyRoundedMask();
 
     QWidget *m_widget = nullptr;
+
+    /* 正在问"完全退出 / 收进托盘"的那个框（非模态，可能没有） */
+    QMessageBox *m_quitBox = nullptr;
 
     /* QWidget 拿屏幕的方式和 QWindow 不同，这里统一包一层（可能返回 nullptr） */
     QScreen *screenOf() const;

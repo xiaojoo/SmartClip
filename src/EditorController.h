@@ -7,6 +7,7 @@
 #include <QVariantList>
 
 class QAction;
+class QAbstractNativeEventFilter;
 class QWidget;
 
 /*
@@ -62,6 +63,7 @@ class EditorController final : public QObject {
 
 public:
     explicit EditorController(QObject *parent = nullptr);
+    ~EditorController() override;
 
     void setSelfTestMode(bool on) { m_selfTestMode = on; }
     bool selfTestMode() const { return m_selfTestMode; }
@@ -139,6 +141,22 @@ public:
 
     QVariantList shortcutItems() const;
 
+    /*
+     * 触发某个命令（发 commandRequested）。
+     *
+     * 给"全局截图热键"那条路用：WM_HOTKEY 是窗口消息，回不到 QML 那边，
+     * 只能由 C++ 转一下。信号是 protected 的，外面 emit 不了，所以留这个口子。
+     */
+    void activateCommand(const QString &name);
+
+    /*
+     * 截图那个全局热键注册上了没。
+     *
+     * RegisterHotKey 会被别人占用的组合键顶掉（返回失败），那不是错误 ——
+     * 程序内那条 QAction 还在。这个口子给自检看结果，也有个地方能查。
+     */
+    bool globalHotkeyActive() const { return m_hotkeyRegistered; }
+
 signals:
     /* 快捷键被按下；name 见 EditorController.cpp 里的注册表 */
     void commandRequested(const QString &name);
@@ -152,10 +170,22 @@ private:
     /* 把 QSettings 里存过的组合键盖回 QAction */
     void restoreShortcuts();
 
+    /*
+     * 把截图键注册成**系统级**热键（Windows 的 RegisterHotKey）。
+     *
+     * 改键 / 重置之后要重来一次，所以挂在 restoreShortcuts() 末尾 —— 所有
+     * 改键路径最后都汇到那里，一处改动够了。
+     */
+    void applyGlobalHotkey();
+
     QAction *actionFor(const QString &name) const;
 
     QWidget *m_widget = nullptr;
     QHash<QString, QAction *> m_actions;
+
+    /* 系统级热键的回调（见 .cpp 里的 ShotHotkeyFilter），随本对象生灭 */
+    QAbstractNativeEventFilter *m_hotkeyFilter = nullptr;
+    bool m_hotkeyRegistered = false;
     /* name -> 出厂默认组合键（PortableText），"恢复默认"用 */
     QHash<QString, QString> m_defaults;
     /* name -> 当前生效组合键（PortableText），改键后即时更新 */

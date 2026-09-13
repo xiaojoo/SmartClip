@@ -46,6 +46,20 @@ TrayIcon::TrayIcon(QWidget *host, Screenshot *shot, EditorController *cmd, QObje
     QAction *showAct = m_menu.addAction(QStringLiteral("显示主窗口"));
     connect(showAct, &QAction::triggered, this, &TrayIcon::showHost);
 
+    /*
+     * 退出相关两条，都是明确入口，不弹模态框。
+     *
+     * 原来这里是"退出…" + 一个"完全退出 / 收进托盘"的选择框，实测那个框会在
+     * 用截图快捷键的场景里挡住程序（模态，看着像卡死），用户要求去掉。
+     * 改成菜单里两个条目，选哪个就是哪个。
+     */
+    QAction *trayHideAct = m_menu.addAction(QStringLiteral("收进托盘"));
+    connect(trayHideAct, &QAction::triggered, this, [this]() {
+        /* 藏起来不等于退出：托盘图标还在，托盘右键能截图，全局截图热键也还响 */
+        if (m_host)
+            m_host->hide();
+    });
+
     QAction *quitAct = m_menu.addAction(QStringLiteral("退出 SmartClip"));
     connect(quitAct, &QAction::triggered, qApp, &QApplication::quit);
 

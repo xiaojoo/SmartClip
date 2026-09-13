@@ -160,6 +160,7 @@ target_link_libraries(SmartClip PRIVATE
     Qt6::Core Qt6::Gui Qt6::Qml Qt6::Quick Qt6::QuickControls2 Qt6::QuickWidgets Qt6::Sql
     Qt6::Widgets Qt6::PrintSupport
     qscintilla
+    dwmapi
 )
 
 include(GNUInstallDirs)

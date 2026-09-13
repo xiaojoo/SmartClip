@@ -95,7 +95,11 @@ RowLayout {
                 else if (btn.kind === "win-max" || btn.kind === "win-restore")
                     Win.toggleMaximize()
                 else
-                    Win.closeWindow()
+                    /*
+                     * 关闭键先问一句：完全退出，还是收进托盘（见 WindowHelper::askQuit）。
+                     * 那个框是**非模态**的 —— 程序照常响应，不会像上一版那样看着卡住。
+                     */
+                    Win.askQuit()
             }
         }
     }

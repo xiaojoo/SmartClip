@@ -1,5 +1,8 @@
 #include "EditorController.h"
 
+#include "DialogStyle.h"
+
+#include <QAbstractNativeEventFilter>
 #include <QAction>
 #include <QCoreApplication>
 #include <QDesktopServices>
@@ -15,77 +18,137 @@
 #include <QUrl>
 #include <QWidget>
 
+#if defined(Q_OS_WIN)
+#  include <windows.h>
+#endif
+
 namespace {
 
+#if defined(Q_OS_WIN)
+
+/* 系统级热键的 id：WM_HOTKEY 靠它分辨是哪一个（本程序只注册这一个） */
+constexpr int kShotHotkeyId = 0x5C01;
+
 /*
- * 消息框的灰黑皮肤。
+ * Qt 的组合键 -> Windows 的 (修饰键, 虚拟键)。
  *
- * 为什么在 C++ 里给 QMessageBox 挂样式表，而不是等系统的深色主题：
- * 这些框是 QtWidgets 画的，取色走的是应用调色板；主界面之所以是深色，是因为
- * QML 自己刷的色，跟调色板没关系。所以裸的 QMessageBox 永远是浅灰底，在深色
- * 窗口里像个贴错的补丁（"快捷键"框和"关于"框都是这种）。
- *
- * 颜色取主界面同一套（见 Main.qml 的卡片/边框色），前景色显式写出来 ——
- * 只改背景的话，Fusion 仍会拿浅色的 WindowText 去画正文，深底黑字看不见。
- *
- * 注意只挂在 QMessageBox 自身上，别挂 qApp：QFileDialog 是原生对话框，
- * 全局样式表会影响它的布局。
+ * 只认常用的三类：字母、数字、F1-F24。认不出来的（小键盘、媒体键……）就
+ * 不注册全局的 —— 程序内那条 QAction 照样能用，只是"后台也能按"这个增强没了。
  */
-const char *const kDialogStyle = R"qss(
-QMessageBox {
-    background-color: #2b2d30;
+bool winHotkey(const QKeySequence &seq, UINT *mods, UINT *vk) {
+    if (seq.count() != 1)
+        return false;
+    const QKeyCombination combo = seq[0];
+    const Qt::KeyboardModifiers km = combo.keyboardModifiers();
+    UINT m = 0;
+    if (km & Qt::ControlModifier)
+        m |= MOD_CONTROL;
+    if (km & Qt::AltModifier)
+        m |= MOD_ALT;
+    if (km & Qt::ShiftModifier)
+        m |= MOD_SHIFT;
+    if (km & Qt::MetaModifier)
+        m |= MOD_WIN;
+    /* 一个修饰键都不带的键不注册全局：那样系统里按一下 A 就开截图了 */
+    if (m == 0)
+        return false;
+
+    const int k = combo.key();
+    UINT v = 0;
+    if (k >= Qt::Key_A && k <= Qt::Key_Z)
+        v = UINT('A' + (k - Qt::Key_A));
+    else if (k >= Qt::Key_0 && k <= Qt::Key_9)
+        v = UINT('0' + (k - Qt::Key_0));
+    else if (k >= Qt::Key_F1 && k <= Qt::Key_F24)
+        v = UINT(VK_F1 + (k - Qt::Key_F1));
+    else
+        return false;
+
+    *mods = m;
+    *vk = v;
+    return true;
 }
-QMessageBox QLabel {
-    color: #e6e8ea;
-    background: transparent;
-}
-QMessageBox QPushButton {
-    color: #e6e8ea;
-    background-color: #3a3e42;
-    border: 1px solid #4b4d4f;
-    border-radius: 3px;
-    padding: 4px 14px;
-    min-width: 64px;
-}
-QMessageBox QPushButton:hover {
-    background-color: #45494e;
-}
-QMessageBox QPushButton:pressed {
-    background-color: #313438;
-}
-QMessageBox QPushButton:default {
-    border: 1px solid #c8503c;
-}
-QInputDialog {
-    background-color: #2b2d30;
-}
-QInputDialog QLabel {
-    color: #e6e8ea;
-    background: transparent;
-}
-QInputDialog QSpinBox {
-    color: #e6e8ea;
-    background-color: #1e2023;
-    border: 1px solid #4b4d4f;
-    padding: 3px 6px;
-}
-QInputDialog QPushButton {
-    color: #e6e8ea;
-    background-color: #3a3e42;
-    border: 1px solid #4b4d4f;
-    border-radius: 3px;
-    padding: 4px 14px;
-    min-width: 64px;
-}
-QInputDialog QPushButton:hover {
-    background-color: #45494e;
-}
-QInputDialog QPushButton:pressed {
-    background-color: #313438;
-}
-)qss";
+
+/*
+ * 系统级热键的回调。
+ *
+ * 为什么不用 QAction 自带的快捷键：那个的上下文是 WindowShortcut，只有主窗口
+ * 是活动窗口时才响 —— 程序收进托盘 / 被别的窗口压着时按 Ctrl+Alt+A 没反应，
+ * 用户报的"最小化之后截图快捷键不能用"就是这个。RegisterHotKey 是系统级的，
+ * 前台是谁都收得到，消息走 WM_HOTKEY。
+ */
+class ShotHotkeyFilter final : public QAbstractNativeEventFilter {
+public:
+    explicit ShotHotkeyFilter(EditorController *owner) : m_owner(owner) {}
+
+    bool nativeEventFilter(const QByteArray &type, void *message, qintptr *) override {
+        if (type != QByteArrayLiteral("windows_generic_MSG"))
+            return false;
+        auto *msg = static_cast<MSG *>(message);
+        if (msg->message != WM_HOTKEY || msg->wParam != kShotHotkeyId)
+            return false;
+        m_owner->activateCommand(QStringLiteral("shot"));
+        return true;
+    }
+
+private:
+    EditorController *m_owner = nullptr;
+};
+
+#endif  // Q_OS_WIN
+
 
 }  // namespace
+
+void EditorController::activateCommand(const QString &name) {
+    emit commandRequested(name);
+}
+
+void EditorController::applyGlobalHotkey() {
+#if defined(Q_OS_WIN)
+    if (!m_widget)
+        return;
+    if (!m_hotkeyFilter) {
+        m_hotkeyFilter = new ShotHotkeyFilter(this);
+        qApp->installNativeEventFilter(m_hotkeyFilter);
+    }
+
+    const HWND hwnd = reinterpret_cast<HWND>(m_widget->winId());
+    if (m_hotkeyRegistered) {
+        UnregisterHotKey(hwnd, kShotHotkeyId);
+        m_hotkeyRegistered = false;
+    }
+
+    UINT mods = 0;
+    UINT vk = 0;
+    /* 空串 = 用户主动解绑了这个键，那就别注册全局的 */
+    const QString key = shortcutFor(QStringLiteral("shot"));
+    if (key.isEmpty() || !winHotkey(QKeySequence(key, QKeySequence::PortableText), &mods, &vk))
+        return;
+
+    /*
+     * 注册失败不是错误（组合键可能被别的程序占了）：程序内那条 QAction 还在。
+     * 结果记下来给自检看（globalHotkeyActive）。
+     */
+    m_hotkeyRegistered = RegisterHotKey(hwnd, kShotHotkeyId, mods | MOD_NOREPEAT, vk) != FALSE;
+#endif
+}
+
+EditorController::~EditorController() {
+    /*
+     * 回调是挂在 qApp 上的（见 applyGlobalHotkey），本对象先没掉的话它就悬空了
+     * —— 系统消息还会往一个已经析构的对象上打。摘干净。
+     */
+#if defined(Q_OS_WIN)
+    if (m_widget && m_hotkeyRegistered)
+        UnregisterHotKey(reinterpret_cast<HWND>(m_widget->winId()), kShotHotkeyId);
+#endif
+    if (m_hotkeyFilter) {
+        qApp->removeNativeEventFilter(m_hotkeyFilter);
+        delete m_hotkeyFilter;
+        m_hotkeyFilter = nullptr;
+    }
+}
 
 EditorController::EditorController(QObject *parent) : QObject(parent) {
     /*
@@ -208,7 +271,11 @@ void EditorController::restoreShortcuts() {
         m_current[it.key()] = sequence;
         it.value()->setShortcut(QKeySequence(sequence, QKeySequence::PortableText));
     }
+
+    /* 截图键还要额外注册成系统级的：改键 / 重置最后都汇到这条漏斗上 */
+    applyGlobalHotkey();
 }
+
 
 QAction *EditorController::actionFor(const QString &name) const {
     return m_actions.value(name, nullptr);
@@ -370,7 +437,10 @@ QString EditorController::chooseFolderDialog(const QString &title, const QString
 QString EditorController::askText(const QString &title, const QString &label,
                                   const QString &text) {
     QInputDialog dialog(m_widget);
-    dialog.setStyleSheet(QString::fromLatin1(kDialogStyle));  /* 灰黑底，见文件头的说明 */
+    dialog.setStyleSheet(QString::fromLatin1(dialogStyle()));  /* 灰黑底，见文件头的说明 */
+    dialog.ensurePolished();
+    dialog.adjustSize();
+    applyDarkTitleBar(&dialog);
     dialog.setWindowTitle(title.isEmpty() ? tr("SmartClip") : title);
     dialog.setLabelText(label);
     dialog.setInputMode(QInputDialog::TextInput);
@@ -398,7 +468,10 @@ void EditorController::revealInExplorer(const QString &path) {
 
 int EditorController::confirmSave(const QString &name) {
     QMessageBox box(m_widget);
-    box.setStyleSheet(QString::fromLatin1(kDialogStyle));  /* 灰黑底，见文件头的说明 */
+    box.setStyleSheet(QString::fromLatin1(dialogStyle()));  /* 灰黑底，见文件头的说明 */
+    box.ensurePolished();
+    box.adjustSize();
+    applyDarkTitleBar(&box);
     box.setWindowTitle(tr("SmartClip"));
     box.setIcon(QMessageBox::Question);
     box.setText(tr("“%1”有未保存的修改。").arg(name.isEmpty() ? tr("当前文件") : name));
@@ -420,7 +493,10 @@ int EditorController::confirmSave(const QString &name) {
 
 void EditorController::alert(const QString &title, const QString &text) {
     QMessageBox box(m_widget);
-    box.setStyleSheet(QString::fromLatin1(kDialogStyle));  /* 灰黑底，见文件头的说明 */
+    box.setStyleSheet(QString::fromLatin1(dialogStyle()));  /* 灰黑底，见文件头的说明 */
+    box.ensurePolished();
+    box.adjustSize();
+    applyDarkTitleBar(&box);
     box.setWindowTitle(title.isEmpty() ? tr("SmartClip") : title);
     box.setIcon(QMessageBox::Warning);
     box.setText(text);
@@ -430,7 +506,10 @@ void EditorController::alert(const QString &title, const QString &text) {
 
 bool EditorController::confirm(const QString &title, const QString &text) {
     QMessageBox box(m_widget);
-    box.setStyleSheet(QString::fromLatin1(kDialogStyle));  /* 灰黑底，见文件头的说明 */
+    box.setStyleSheet(QString::fromLatin1(dialogStyle()));  /* 灰黑底，见文件头的说明 */
+    box.ensurePolished();
+    box.adjustSize();
+    applyDarkTitleBar(&box);
     box.setWindowTitle(title.isEmpty() ? tr("SmartClip") : title);
     box.setIcon(QMessageBox::Question);
     box.setText(text);
@@ -444,7 +523,10 @@ bool EditorController::confirm(const QString &title, const QString &text) {
 
 int EditorController::askLineNumber(int maxLine, int currentLine) {
     QInputDialog dialog(m_widget);
-    dialog.setStyleSheet(QString::fromLatin1(kDialogStyle));  /* 灰黑底，见文件头的说明 */
+    dialog.setStyleSheet(QString::fromLatin1(dialogStyle()));  /* 灰黑底，见文件头的说明 */
+    dialog.ensurePolished();
+    dialog.adjustSize();
+    applyDarkTitleBar(&dialog);
     dialog.setWindowTitle(tr("转到行"));
     dialog.setLabelText(tr("行号（1 - %1）：").arg(qMax(1, maxLine)));
     dialog.setInputMode(QInputDialog::IntInput);
@@ -458,7 +540,10 @@ int EditorController::askLineNumber(int maxLine, int currentLine) {
 
 int EditorController::askRulerColumn(int current) {
     QInputDialog dialog(m_widget);
-    dialog.setStyleSheet(QString::fromLatin1(kDialogStyle));  /* 灰黑底，见文件头的说明 */
+    dialog.setStyleSheet(QString::fromLatin1(dialogStyle()));  /* 灰黑底，见文件头的说明 */
+    dialog.ensurePolished();
+    dialog.adjustSize();
+    applyDarkTitleBar(&dialog);
     dialog.setWindowTitle(tr("字数参考线"));
     dialog.setLabelText(tr("在第几个字后面画竖线（1 - 500）："));
     dialog.setInputMode(QInputDialog::IntInput);

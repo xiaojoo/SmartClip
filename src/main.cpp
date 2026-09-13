@@ -276,7 +276,7 @@ int main(int argc, char *argv[]) {
         int result = -1;
         /* 给 QML 引擎一点时间把原生子窗口（编辑区）真正建起来再跑检查 */
         QTimer::singleShot(600, &app, [&]() {
-            result = SelfTest::run(quick->rootObject(), &store, &screenshot, &tray);
+            result = SelfTest::run(quick->rootObject(), &store, &screenshot, &tray, &editorController);
             app.quit();
         });
 

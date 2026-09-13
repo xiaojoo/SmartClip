@@ -3,6 +3,13 @@
 #include "ClipboardStore.h"
 #include "EditorViewItem.h"
 #include "Screenshot.h"
+#include <QMessageBox>
+#include <QQmlEngine>
+#include <QWidget>
+
+#include "WindowHelper.h"
+
+#include "EditorController.h"
 #include "TrayIcon.h"
 
 #include <QApplication>
@@ -94,7 +101,7 @@ bool SelfTest::enabled(int argc, char **argv) {
     return false;
 }
 
-int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, TrayIcon *tray) {
+int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, TrayIcon *tray, EditorController *cmd) {
     EditorViewItem *view = EditorViewItem::instance();
 
     /*
@@ -2859,6 +2866,27 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
               QStringLiteral("菜单条目 %1 条").arg(acts.size()));
 
         /*
+         * 退出相关的两条得在。原来这里是"退出…"+ 一个"完全退出 / 收进托盘"的选择框，
+         * 用户实测那个框会在用截图快捷键的场景里挡住程序（模态，看着像卡死），
+         * 要求去掉；现在改成菜单里两个明确条目，这条把菜单结构钉住。
+         */
+        {
+            bool hide = false;
+            bool quit = false;
+            for (QAction *a : acts) {
+                if (!a)
+                    continue;
+                if (a->text().contains(QStringLiteral("收进托盘")))
+                    hide = true;
+                if (a->text().contains(QStringLiteral("退出")))
+                    quit = true;
+            }
+            check(hide && quit,
+                  QStringLiteral("托盘：菜单里有「收进托盘」和「退出 SmartClip」两条"
+                                 "（不再弹模态选择框）"));
+        }
+
+        /*
          * 图标资源。原来用的是 QIcon::fromTheme("edit-paste")，Windows 上没有
          * 图标主题、返回空图标，托盘上是一块空白；现在指向随包的 SVG，
          * 这条把资源路径钉住（前缀被改过就会红）。
@@ -2902,6 +2930,77 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
             check(shot->active(),
                   QStringLiteral("托盘：点菜单里的「截图…」真的开出了选区窗口"));
             shot->endCapture();
+        }
+    }
+
+    /*
+     * 全局截图热键。
+     *
+     * 用户报的是"最小化之后截图快捷键不能用"—— 程序内那条 QAction 的上下文是
+     * WindowShortcut，窗口没激活就不响。修法是额外注册一个系统级热键
+     * （RegisterHotKey，见 EditorController::applyGlobalHotkey），这里验两件事：
+     * 注册上了没有，以及"收到热键 -> 发命令 -> 开出截图"这条链走不走得通。
+     */
+    if (cmd && shot) {
+        check(cmd->globalHotkeyActive(),
+              QStringLiteral("截图键注册成了系统级热键（窗口没激活也能按）"),
+              QStringLiteral("注册失败通常是组合键被别的程序占了"));
+
+        /* 系统那边来的就是 WM_HOTKEY，回调里做的正是这一句 */
+        cmd->activateCommand(QStringLiteral("shot"));
+        for (int i = 0; i < 60 && !shot->active(); ++i) {
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+            QThread::msleep(25);
+        }
+        check(shot->active(),
+              QStringLiteral("全局热键那条路：命令一发，选区窗口就开出来了"));
+        shot->endCapture();
+    }
+
+    /*
+     * 关闭键那个问句必须是**非模态**的。
+     *
+     * 上一版用的是 exec()（嵌套事件循环）：框一出来整个程序就不响应了，用户
+     * 看着就是"卡死"。所以这里量两件事：框确实出来了、而且**没有**模态窗口
+     * 挡着 —— 后者要是红了，说明又用回 exec() 了。
+     */
+    {
+        auto *engine = qmlEngine(qmlRoot);
+        auto *win = engine ? engine->singletonInstance<WindowHelper *>(
+                                 QStringLiteral("SmartClip.Globals"), QStringLiteral("Win"))
+                           : nullptr;
+        if (win) {
+            win->askQuit();
+
+            auto visibleBoxes = []() {
+                QList<QMessageBox *> list;
+                const auto tops = QApplication::topLevelWidgets();
+                for (QWidget *w : tops) {
+                    if (auto *b = qobject_cast<QMessageBox *>(w)) {
+                        if (b->isVisible())
+                            list << b;
+                    }
+                }
+                return list;
+            };
+
+            const QList<QMessageBox *> boxes = visibleBoxes();
+            check(!QApplication::activeModalWidget(),
+                  QStringLiteral("窗口：关闭键的问句是非模态的（不会把程序挡住）"),
+                  QStringLiteral("模态窗口 = %1")
+                      .arg(QApplication::activeModalWidget()
+                               ? QApplication::activeModalWidget()->metaObject()->className()
+                               : QStringLiteral("无")));
+            check(boxes.size() == 1,
+                  QStringLiteral("窗口：点关闭键确实弹出了那个问句"),
+                  QStringLiteral("可见的消息框 %1 个").arg(boxes.size()));
+
+            /* 顺手把框收掉，别留给后面的检查；关掉之后该自己回收 */
+            for (QMessageBox *b : boxes)
+                b->close();
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 100);
+            check(visibleBoxes().isEmpty(),
+                  QStringLiteral("窗口：选择框关掉后自己消失，不留残留"));
         }
     }
 

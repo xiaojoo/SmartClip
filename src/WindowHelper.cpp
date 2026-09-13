@@ -1,5 +1,12 @@
 #include "WindowHelper.h"
 
+#include "DialogStyle.h"
+
+#include <QCoreApplication>
+#include <QMessageBox>
+#include <QPushButton>
+#include <QTimer>
+
 #include <QEvent>
 #include <QGuiApplication>
 #include <QPainterPath>
@@ -7,9 +14,6 @@
 #include <QScreen>
 #include <QWidget>
 #include <QWindow>
-#include <QPainterPath>
-#include <QRegion>
-#include <QScreen>
 
 /*
  * 设计取舍见 WindowHelper.h 顶部。这里只强调一处实现上的关键点：
@@ -22,6 +26,103 @@
 WindowHelper::WindowHelper(QObject *parent)
     : QObject(parent)
 {
+}
+
+WindowHelper::~WindowHelper()
+{
+    /*
+     * 拆掉挂在窗口上的事件过滤器。
+     *
+     * Qt 只在**被监听方**销毁时清理过滤器；过滤器自己先没掉的话，那个窗口里
+     * 存着的就是个悬空指针 —— 之后任何一次移动 / 缩放 / 关闭事件都会打进一块
+     * 已经释放的内存（未定义行为）。主窗口在 main 里是栈对象、比本对象活得久，
+     * 所以这条路径一定会走到。
+     */
+    if (m_widget)
+        m_widget->removeEventFilter(this);
+}
+
+void WindowHelper::closeWindow()
+{
+    if (m_widget)
+        m_widget->close();
+}
+
+void WindowHelper::askQuit()
+{
+    /* 已经问着了：再按一次 ✕ 把它提到前面就行，别叠一堆框 */
+    if (m_quitBox) {
+        m_quitBox->raise();
+        m_quitBox->activateWindow();
+        return;
+    }
+
+    auto *box = new QMessageBox(m_widget);
+    box->setAttribute(Qt::WA_DeleteOnClose);
+    box->setWindowTitle(QStringLiteral("退出 SmartClip"));
+    box->setIcon(QMessageBox::Question);
+    box->setText(QStringLiteral("完全退出，还是收进托盘？"));
+    box->setInformativeText(QStringLiteral(
+        "收进托盘：程序继续运行，托盘图标右键能截图，截图快捷键也还能用。\n"
+        "完全退出：所有功能停止（截图、剪贴板都不再用）。"));
+
+    QPushButton *quitBtn = box->addButton(QStringLiteral("完全退出"), QMessageBox::DestructiveRole);
+    QPushButton *trayBtn = box->addButton(QStringLiteral("收进托盘"), QMessageBox::AcceptRole);
+    box->addButton(QStringLiteral("取消"), QMessageBox::RejectRole);
+    box->setDefaultButton(trayBtn);
+
+    /* 和别处的消息框同一套皮肤，见 DialogStyle.h */
+    box->setStyleSheet(QString::fromLatin1(dialogStyle()));
+
+    /*
+     * 皮肤和布局**先落实，再建原生窗口、再 show()**。
+     *
+     * 不这么做的话：QMessageBox 先以默认小尺寸（100x30）把原生窗口建出来，
+     * show() 之后 QSS 才 polish 完、它才按内容重排改大一次 —— 已经露脸的框
+     * 又被重画/变大，看着就是"闪一下、像重新出现了一次"（用户报的；因为跟
+     * 事件顺序有关，所以只是"有时候"）。这两行把重排提前到还没露脸的时候，
+     * 第一帧就是最终样子。
+     *
+     * 实测证据：修之前 stderr 里一直挂着
+     *   Unable to set geometry 100x30 ... Resulting geometry: 316x157
+     *   on QMessageBoxClassWindow
+     * 这条警告，修完就没了。
+     */
+    box->ensurePolished();
+    box->adjustSize();
+
+    applyDarkTitleBar(box);
+
+
+    /*
+     * 要的是**彻底不挡**：QMessageBox 即使用 show()，本身也带着 WindowModal
+     * （会把主窗口卡住，看着还是"卡"），所以显式清成 NonModal。
+     * 主窗口、托盘、截图热键全都照常响应；按 ✕ 再按一次会把框提到前面，
+     * 不会被压到后面找不着。
+     */
+    box->setWindowModality(Qt::NonModal);
+
+    /*
+     * 按钮各自接动作。非模态框没有 exec() 的返回值可取，用不了"执行完再看
+     * clickedButton()"那套；先把框关掉（WA_DeleteOnClose 会连对象一起收），
+     * 再干活。
+     */
+    connect(quitBtn, &QPushButton::clicked, box, &QWidget::close);
+    connect(quitBtn, &QPushButton::clicked, qApp, &QCoreApplication::quit);
+    connect(trayBtn, &QPushButton::clicked, box, &QWidget::close);
+    connect(trayBtn, &QPushButton::clicked, this, [this]() {
+        /* 藏起来不等于退出：托盘图标还在，托盘右键能截图，全局截图热键也还响 */
+        if (m_widget)
+            m_widget->hide();
+    });
+    /* "取消"和 Esc 走 QMessageBox 自己的 RejectRole：关掉框，什么都不做 */
+
+    connect(box, &QObject::destroyed, this, [this]() { m_quitBox = nullptr; });
+    m_quitBox = box;
+
+    box->show();
+    box->raise();
+    box->activateWindow();
 }
 
 void WindowHelper::setCornerRadius(int r)
@@ -136,11 +237,6 @@ void WindowHelper::minimizeWindow()
         m_widget->showMinimized();
 }
 
-void WindowHelper::closeWindow()
-{
-    if (m_widget)
-        m_widget->close();
-}
 
 void WindowHelper::toggleMaximize()
 {
