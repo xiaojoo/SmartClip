@@ -3,6 +3,7 @@
 #include "ClipboardStore.h"
 
 #include <QAction>
+#include <QApplication>
 #include <QClipboard>
 #include <QDebug>
 #include <QDir>
@@ -25,6 +26,7 @@
 #include <QQuickWindow>
 #include <QScrollBar>
 #include <QStringConverter>
+#include <QStyle>
 #include <QTimer>
 #include <QWidget>
 #include <QWindow>
@@ -326,6 +328,18 @@ void EditorViewItem::ensureWrapped() {
     m_sci->installEventFilter(this);
     if (m_sci->viewport())
         m_sci->viewport()->installEventFilter(this);
+
+    /*
+     * 两条滚动条也要盯着（见 eventFilter 里那段）。
+     *
+     * Qt 自带的滚动条右键菜单是浅色底 + 英文条目（"Scroll here / Left edge /
+     * Page left / …"），和这个界面里其它菜单完全不是一个样子，所以在这里
+     * 把它换掉。滚动条是 QAbstractScrollArea 自己创建的，只能挂事件过滤器。
+     */
+    if (auto *hb = m_sci->horizontalScrollBar())
+        hb->installEventFilter(this);
+    if (auto *vb = m_sci->verticalScrollBar())
+        vb->installEventFilter(this);
 
     /*
      * 底下那条"补线"控件：横向滚动条出现时，用它把两条竖线补到控件底边
@@ -1814,6 +1828,31 @@ void EditorViewItem::geometryChange(const QRectF &newGeometry,
 bool EditorViewItem::eventFilter(QObject *watched, QEvent *event) {
     if (event->type() == QEvent::ContextMenu && m_sci && isVisible() && isEnabled()) {
         auto *ce = static_cast<QContextMenuEvent *>(event);
+
+        /*
+         * 滚动条上的右键：换成 QML 那套菜单（和编辑区里的右键同一个组件）。
+         *
+         * 这里必须**吃掉**事件（返回 true）：Qt 的 QScrollBar::contextMenuEvent()
+         * 就是从这个事件里弹它自己那个菜单的，放行过去就两套菜单一起出来了。
+         *
+         * "滚动到这里"要的那个值也在这里算好：右键点在滚动条上的哪个比例，
+         * 就滚到哪个位置 —— 和 Qt 自带菜单的口径一致（QStyle::sliderValueFromPosition）。
+         */
+        if (auto *bar = qobject_cast<QScrollBar *>(watched)) {
+            const QPoint inBar = bar->mapFromGlobal(ce->globalPos());
+            const bool horizontal = bar->orientation() == Qt::Horizontal;
+            const int span = horizontal ? bar->width() : bar->height();
+            const int pos = horizontal ? inBar.x() : inBar.y();
+            m_scrollMenuValue = QStyle::sliderValueFromPosition(bar->minimum(), bar->maximum(),
+                                                               pos, span);
+            m_scrollMenuHandled = true;
+
+            const QPointF inSci = m_sci->mapFromGlobal(ce->globalPos());
+            const QPointF scene = mapToItem(nullptr, inSci);
+            emit scrollBarContextMenuRequested(horizontal, scene.x(), scene.y());
+            return true;
+        }
+
         const QPointF inItem = m_sci->mapFromGlobal(ce->globalPos());
         const QPointF scene = mapToItem(nullptr, inItem);
         emit contextMenuRequested(scene.x(), scene.y());
@@ -3604,6 +3643,8 @@ QVariantMap EditorViewItem::horizontalScrollState() const {
 
     state[QStringLiteral("visible")] = hb ? hb->isVisible() : false;
     state[QStringLiteral("maximum")] = hb ? hb->maximum() : -1;
+    /* 当前值：自检量"滚动条右键那几条动作真的滚动了"用 */
+    state[QStringLiteral("value")] = hb ? hb->value() : -1;
     state[QStringLiteral("pageStep")] = hb ? hb->pageStep() : -1;
     state[QStringLiteral("pageWidthComputed")] = int(qMax(1L, viewWidth - fixed));
     state[QStringLiteral("viewportWidth")] = int(viewWidth);
@@ -3612,6 +3653,60 @@ QVariantMap EditorViewItem::horizontalScrollState() const {
     state[QStringLiteral("contentWidth")] = int(m_lastContentWidth);
     state[QStringLiteral("wrap")] = m_wrap;
     return state;
+}
+
+void EditorViewItem::scrollBarAction(const QString &axis, const QString &what) {
+    if (!m_sci)
+        return;
+
+    /*
+     * 全部落到 QScrollBar::triggerAction() 上 —— 这正是 Qt 自带那个滚动条菜单
+     * 内部用的东西（见 QScrollBar::contextMenuEvent），所以语义一模一样：
+     * 值一变，QsciScintillaBase 就把 SCI_SETFIRSTVISIBLELINE / SCI_SETXOFFSET
+     * 发给 Scintilla（见 third/qscintilla/src/qsciscintillabase.cpp 的
+     * connectVerticalScrollBar / connectHorizontalScrollBar）。
+     */
+    QScrollBar *bar = (axis == QLatin1String("v")) ? m_sci->verticalScrollBar()
+                                                  : m_sci->horizontalScrollBar();
+    if (!bar || bar->minimum() == bar->maximum())
+        return;
+
+    if (what == QLatin1String("here")) {
+        bar->setValue(qBound(bar->minimum(), m_scrollMenuValue, bar->maximum()));
+    } else if (what == QLatin1String("edgeStart")) {
+        bar->triggerAction(QAbstractSlider::SliderToMinimum);
+    } else if (what == QLatin1String("edgeEnd")) {
+        bar->triggerAction(QAbstractSlider::SliderToMaximum);
+    } else if (what == QLatin1String("pageBack")) {
+        bar->triggerAction(QAbstractSlider::SliderPageStepSub);
+    } else if (what == QLatin1String("pageForward")) {
+        bar->triggerAction(QAbstractSlider::SliderPageStepAdd);
+    } else if (what == QLatin1String("lineBack")) {
+        bar->triggerAction(QAbstractSlider::SliderSingleStepSub);
+    } else if (what == QLatin1String("lineForward")) {
+        bar->triggerAction(QAbstractSlider::SliderSingleStepAdd);
+    }
+}
+
+bool EditorViewItem::triggerScrollBarContextMenu(bool horizontal, int pos) {
+    if (!m_sci)
+        return false;
+
+    QScrollBar *bar = horizontal ? m_sci->horizontalScrollBar() : m_sci->verticalScrollBar();
+    if (!bar)
+        return false;
+
+    if (pos < 0)
+        pos = (horizontal ? bar->width() : bar->height()) / 2;
+
+    const QPoint inBar = horizontal ? QPoint(pos, bar->height() / 2)
+                                    : QPoint(bar->width() / 2, pos);
+    const QPoint global = bar->mapToGlobal(inBar);
+
+    m_scrollMenuHandled = false;
+    QContextMenuEvent event(QContextMenuEvent::Mouse, inBar, global);
+    QApplication::sendEvent(bar, &event);
+    return m_scrollMenuHandled;
 }
 
 void EditorViewItem::releaseEditorFocus() {

@@ -532,6 +532,51 @@ function folderContextMenu(row) {
     return items
 }
 
+/*
+ * 编辑器**滚动条**的右键菜单。
+ *
+ * 原来这里是 Qt 自带的那个（浅色底 + 英文条目 "Scroll here / Left edge /
+ * Page left / …"），跟界面里其它菜单完全不是一个样子 —— 现在换成和编辑区
+ * 右键同一套 QML 菜单（见 EditorViewItem::scrollBarContextMenuRequested）。
+ *
+ * horizontal 决定这一条是横向还是纵向：条目名不一样（左/右 vs 上/下），
+ * 动作名也不一样（scroll:h:* / scroll:v:*），由 Main.qml 的 dispatch 拆开
+ * 交给 EditorViewItem::scrollBarAction()。
+ *
+ * 语义和 Qt 原来那七条一一对应，不是自己重定义的：
+ *   滚动到这里 / 左(顶)边缘 / 右(底)边缘 / 翻一页 / 滚一行。
+ */
+function scrollBarMenu(horizontal) {
+    var axis = horizontal ? "h" : "v"
+    function act(what) { return "scroll:" + axis + ":" + what }
+    if (horizontal) {
+        return [
+            { label: "滚动到这里", act: act("here") },
+            { separator: true },
+            { label: "左边缘", act: act("edgeStart") },
+            { label: "右边缘", act: act("edgeEnd") },
+            { separator: true },
+            { label: "向左一页", act: act("pageBack"), icon: "chevron-left" },
+            { label: "向右一页", act: act("pageForward"), icon: "chevron-right" },
+            { separator: true },
+            { label: "向左滚动", act: act("lineBack"), icon: "chevron-left" },
+            { label: "向右滚动", act: act("lineForward"), icon: "chevron-right" }
+        ]
+    }
+    return [
+        { label: "滚动到这里", act: act("here") },
+        { separator: true },
+        { label: "顶边", act: act("edgeStart") },
+        { label: "底边", act: act("edgeEnd") },
+        { separator: true },
+        { label: "向上一页", act: act("pageBack"), icon: "chevron-up" },
+        { label: "向下一页", act: act("pageForward"), icon: "chevron-down" },
+        { separator: true },
+        { label: "向上滚动", act: act("lineBack"), icon: "chevron-up" },
+        { label: "向下滚动", act: act("lineForward"), icon: "chevron-down" }
+    ]
+}
+
 /* 菜单栏 tab */
 function tabLabels() {
     return ["文件", "编辑", "搜索", "视图", "语言", "编码", "换行", "设置", "帮助"]

@@ -525,11 +525,36 @@ public:
      * —— viewport 扣掉行号/折叠那几条边距和左右留白之后的宽度，不是 viewport 宽。
      * 拿后者当界，短内容也会一直挂着一条横条、还能向右滚几十像素。
      *
-     * 返回 visible / maximum / pageStep（Scintilla 的一页宽）/ pageWidthComputed
+     * 返回 visible / maximum / value / pageStep（Scintilla 的一页宽）/ pageWidthComputed
      * （自己按公式算的一页宽，用来核口径）/ viewportWidth / scrollWidth /
      * contentWidth（最近一次量到的最长行宽）/ wrap。
      */
     Q_INVOKABLE QVariantMap horizontalScrollState() const;
+
+    /*
+     * 滚动条的右键动作（"滚动到这里 / 左边缘 / 翻页 / 滚一行"那七条）。
+     *
+     * axis 传 "h" / "v"，what 传下面这几个之一：
+     *   here        滚到刚才右键点住的那个位置
+     *   edgeStart   顶边 / 左边缘
+     *   edgeEnd     底边 / 右边缘
+     *   pageBack    向上一页 / 向左一页
+     *   pageForward 向下一页 / 向右一页
+     *   lineBack    向上滚一行 / 向左滚一格
+     *   lineForward 向下滚一行 / 向右滚一格
+     *
+     * 落地就是 QScrollBar::triggerAction()，和 Qt 自带那个菜单内部走的是同一套
+     * （见 .cpp 里的说明：为什么要自己弹菜单）。
+     */
+    Q_INVOKABLE void scrollBarAction(const QString &axis, const QString &what);
+
+    /*
+     * 自检用：给滚动条发一个右键事件。
+     *
+     * 返回"这个事件是不是被我们吃掉了"—— 吃掉才意味着 Qt 那个浅色英文的
+     * 原生菜单不会弹出来（界面上换成 QML 那套深色菜单，见 Main.qml）。
+     */
+    Q_INVOKABLE bool triggerScrollBarContextMenu(bool horizontal, int pos = -1);
 
 signals:
     void paddingChanged();
@@ -564,6 +589,15 @@ signals:
      * 由 Main.qml 拿它去弹 QML 那套下拉菜单（见 .cpp 的 eventFilter 说明）。
      */
     void contextMenuRequested(qreal x, qreal y);
+
+    /*
+     * 滚动条上按下了右键。
+     *
+     * horizontal = 哪一条（横向 / 纵向）。坐标同样是场景坐标，Main.qml 拿它
+     * 弹 QML 那套下拉菜单 —— 原来这里是 Qt 自带的菜单，浅色底、英文条目
+     * （"Scroll here / Left edge / …"），和界面里其它菜单完全不是一个样子。
+     */
+    void scrollBarContextMenuRequested(bool horizontal, qreal x, qreal y);
 
 protected:
     void geometryChange(const QRectF &newGeometry, const QRectF &oldGeometry) override;
@@ -773,6 +807,16 @@ private:
 
     int m_lastLoadMs = -1;
     int m_lastLoadChars = 0;
+
+    /*
+     * 滚动条右键菜单的两个小状态（见 .cpp 的 scrollBarAction）。
+     *
+     * m_scrollMenuValue 是"右键点住的那个位置"换算出来的滚动值 —— 菜单里
+     * "滚动到这里"就是它（和 Qt 自带菜单一个口径：按点击位置在滚动条上的比例）。
+     * m_scrollMenuHandled 给自检看"这个右键事件有没有被我们吃掉"。
+     */
+    int m_scrollMenuValue = 0;
+    bool m_scrollMenuHandled = false;
     bool m_hasContent = false;
 
     QString m_lastError;

@@ -774,6 +774,31 @@ Rectangle {
     }
 
     /*
+     * 滚动条上的右键菜单。
+     *
+     * 和编辑区右键同一个组件（DropdownMenu），只是条目换成"滚动到这里 /
+     * 边缘 / 翻页 / 滚一行"那七条 —— 原来这里是 Qt 自带的浅色英文菜单，
+     * 和界面完全不搭（见 EditorViewItem::scrollBarContextMenuRequested）。
+     */
+    function openScrollBarContextMenu(horizontal, x, y) {
+        ddMenu.openAtPoint(null, x, y, Menus.scrollBarMenu(horizontal))
+    }
+
+    /*
+     * 滚动条右键菜单里各条的动作名（自检核对用，见 src/SelfTest.cpp）。
+     * 和弹出的那份同一个构造。
+     */
+    function scrollMenuActs(horizontal) {
+        var items = Menus.scrollBarMenu(horizontal === undefined ? true : horizontal)
+        var out = []
+        for (var i = 0; i < items.length; ++i) {
+            if (items[i] && items[i].act !== undefined)
+                out.push(String(items[i].act))
+        }
+        return out
+    }
+
+    /*
      * 自检用：模拟"鼠标停到子菜单里第 index 条上"，返回停完之后子菜单还开着没。
      *
      * 这一步界面上就是鼠标往右挪进子菜单，C++ 侧悬停不出来；
@@ -900,6 +925,18 @@ Rectangle {
         if (act.indexOf("eol:") === 0) { view.eolMode = act.substring(4); return }
         if (act.indexOf("menu:") === 0) { topBar.openGroup(act.substring(5)); return }
         if (act.indexOf("folder:") === 0) { activateFolder(act.substring(7)); return }
+
+        /*
+         * 滚动条右键那七条：scroll:<h|v>:<动作>（见 js/EditorMenus.js 的
+         * scrollBarMenu）。动作直接落到 QScrollBar 那一套上，见
+         * EditorViewItem::scrollBarAction。
+         */
+        if (act.indexOf("scroll:") === 0) {
+            var scrollParts = act.split(":")
+            if (scrollParts.length === 3)
+                view.scrollBarAction(scrollParts[1], scrollParts[2])
+            return
+        }
 
         /*
          * 带路径的文件动作（左树右键菜单用，见 js/EditorMenus.js 的
@@ -1343,6 +1380,11 @@ Rectangle {
         /* 编辑区里按下右键：弹 QML 那套"编辑"菜单（见 openEditorContextMenu） */
         function onContextMenuRequested(x, y) {
             window.openEditorContextMenu(x, y)
+        }
+
+        /* 滚动条上按下右键：同一个组件，条目换成滚动那七条 */
+        function onScrollBarContextMenuRequested(horizontal, x, y) {
+            window.openScrollBarContextMenu(horizontal, x, y)
         }
     }
 

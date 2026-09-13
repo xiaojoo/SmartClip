@@ -1483,6 +1483,97 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store) {
               && unwrapped.value(QStringLiteral("visible")).toBool(),
               QStringLiteral("关掉自动换行：长行又把横条要回来"), detail(unwrapped));
 
+        /*
+         * ---- 滚动条的右键菜单：换成应用自己那套深色菜单 ----
+         *
+         * Qt 自带的 QScrollBar 右键菜单是浅色底 + 英文条目（"Scroll here /
+         * Left edge / Page left / …"），跟界面里其它菜单完全不是一个样子。
+         * 现在这条右键在 EditorViewItem::eventFilter 里被**吃掉**，改发信号让
+         * Main.qml 弹同一套 DropdownMenu（条目见 js/EditorMenus.js 的 scrollBarMenu）。
+         *
+         * 钉三件事：
+         *   1) 菜单里就是那七条，横向纵向各一组（scroll:h:* / scroll:v:*）；
+         *   2) 事件真的被吃掉、弹出来的是我们那套菜单（原生那个没机会出现）；
+         *   3) 点下去真的会滚 —— 拿横条的 value 量"右边缘 / 左边缘"。
+         */
+        {
+            auto scrollActs = [qmlRoot](bool horizontal) {
+                QVariant result;
+                QMetaObject::invokeMethod(qmlRoot, "scrollMenuActs",
+                                          Q_RETURN_ARG(QVariant, result),
+                                          Q_ARG(QVariant, QVariant(horizontal)));
+                return result.toList();
+            };
+
+            QStringList hActs, vActs;
+            for (const QVariant &a : scrollActs(true))
+                hActs << a.toString();
+            for (const QVariant &a : scrollActs(false))
+                vActs << a.toString();
+            const QStringList expectedH = { QStringLiteral("scroll:h:here"),
+                                            QStringLiteral("scroll:h:edgeStart"),
+                                            QStringLiteral("scroll:h:edgeEnd"),
+                                            QStringLiteral("scroll:h:pageBack"),
+                                            QStringLiteral("scroll:h:pageForward"),
+                                            QStringLiteral("scroll:h:lineBack"),
+                                            QStringLiteral("scroll:h:lineForward") };
+            check(hActs == expectedH,
+                  QStringLiteral("横向滚动条右键 = 七条（和 Qt 原来那套语义一一对应）"),
+                  hActs.join(QLatin1Char('/')));
+            check(vActs.size() == 7
+                      && vActs.contains(QStringLiteral("scroll:v:pageForward"))
+                      && vActs.contains(QStringLiteral("scroll:v:edgeEnd")),
+                  QStringLiteral("纵向那一组是 v 轴的动作"), vActs.join(QLatin1Char('/')));
+
+            /* 事件被吃掉 + 弹的是我们那套菜单 */
+            QMetaObject::invokeMethod(qmlRoot, "closeMenu");
+            /*
+             * 返回值用**精确类型**接：QMetaObject::invokeMethod 对不上返回类型
+             * 就直接失败、方法根本不会被调用（QVariant 接 bool 就是这样，
+             * 踩过一次：表现为"探针一行都没打、handled 一直是 false"）。
+             */
+            bool handled = false;
+            QMetaObject::invokeMethod(view, "triggerScrollBarContextMenu",
+                                      Q_RETURN_ARG(bool, handled),
+                                      Q_ARG(bool, true), Q_ARG(int, -1));
+            settle();
+            check(handled,
+                  QStringLiteral("滚动条的右键事件被我们吃掉（Qt 那个浅色英文菜单不会弹）"));
+            {
+                const QVariantMap menu = uiState();
+                check(menu.value(QStringLiteral("menuOpened")).toBool(),
+                      QStringLiteral("滚动条右键弹出的是应用自己的菜单"));
+                check(menu.value(QStringLiteral("menuHasIcons")).toBool(),
+                      QStringLiteral("滚动条菜单也带图标（和编辑菜单一套观感）"));
+            }
+            QMetaObject::invokeMethod(qmlRoot, "closeMenu");
+            settle();
+
+            /* 点下去真的会滚 */
+            const QVariantMap atStart = hState();
+            check(atStart.value(QStringLiteral("value")).toInt() == 0,
+                  QStringLiteral("动作之前横条在最左边"),
+                  QStringLiteral("value %1").arg(atStart.value(QStringLiteral("value")).toInt()));
+
+            dispatch(QStringLiteral("scroll:h:edgeEnd"));
+            for (int i = 0; i < 3; ++i)
+                QCoreApplication::processEvents();
+            const QVariantMap atEnd = hState();
+            check(atEnd.value(QStringLiteral("maximum")).toInt() > 0
+                      && atEnd.value(QStringLiteral("value")).toInt()
+                             == atEnd.value(QStringLiteral("maximum")).toInt(),
+                  QStringLiteral("菜单里\"右边缘\"把横条滚到底"),
+                  QStringLiteral("value %1 / maximum %2")
+                      .arg(atEnd.value(QStringLiteral("value")).toInt())
+                      .arg(atEnd.value(QStringLiteral("maximum")).toInt()));
+
+            dispatch(QStringLiteral("scroll:h:edgeStart"));
+            for (int i = 0; i < 3; ++i)
+                QCoreApplication::processEvents();
+            check(hState().value(QStringLiteral("value")).toInt() == 0,
+                  QStringLiteral("菜单里\"左边缘\"滚回最左边"));
+        }
+
         /* ---- 再回到短内容：横条要收回去 ---- */
         view->closeDocument(view->currentIndex());
         check(view->filePath() == QFileInfo(shortPath).absoluteFilePath(),
