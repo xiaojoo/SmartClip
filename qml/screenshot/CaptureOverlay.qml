@@ -136,6 +136,21 @@ Rectangle {
     /* 拖一条文字时，至少留这么多像素在选区里（见拖动区的 min/max） */
     readonly property real keepVisible: 24
 
+    /*
+     * 选区那圈虚线框（和工具条、提示条）现在能不能画。
+     *
+     * 为什么要有这个：抓屏到选区窗口真的稳定显示，中间隔着几十毫秒（抓屏 +
+     * 4K 底图上传）。这期间窗口可能已经 show() 出来了，而框选默认就是**整屏**
+     * —— 于是整块屏幕会先亮起一圈"全屏选区"的边框，等窗口稳定后才有内容。
+     * 用户取消截图时看到的"全屏出现了一下边框"就是这一圈（用户报的"取消截图后
+     * 全屏出现了一下边框，取消不需要"）。
+     *
+     * 所以复位时先把它关掉，等窗口真的稳住了（C++ 那边 show() 之后发
+     * settleOverlay）再打开。取消那一下子这圈框从头到尾没画过，一帧都不闪；
+     * 正常截图只是晚个一两帧出现边框，用户正在框选时根本看不出来。
+     */
+    property bool overlayReady: false
+
     /* 文本框的最小宽 / 高（拖折行宽时用，避免拖成一条线） */
     readonly property real minBoxW: 40
     readonly property real minBoxH: 20
@@ -672,6 +687,7 @@ Rectangle {
             root.sel = rect
         else
             root.syncAutoSel()
+
         root.selected = -1
         root.editing = -1
         root.tool = ""
@@ -685,7 +701,21 @@ Rectangle {
         root.menuSize = false
         root.menuColor = false
         root.pickingColor = false
+        /*
+         * 先别画那圈选区边框（见 overlayReady 的说明）：等窗口稳定显示之后
+         * C++ 会调 settleOverlay()。取消落在"窗口刚出来"那几十毫秒里时，
+         * 这圈框一帧都不会出现。
+         */
+        root.overlayReady = false
         shapeCanvas.requestPaint()
+    }
+
+    /*
+     * 选区窗口已经稳定显示（C++ 在 show() 之后调，见 Screenshot::showOverlay）。
+     * 到这一步才把选区边框放出来。
+     */
+    function settleOverlay() {
+        root.overlayReady = true
     }
 
     /* ---- 自检入口（见 src/SelfTest.cpp），和界面上那几下是同一批函数 ---- */    function testSelect(x, y, w, h) {
@@ -796,6 +826,65 @@ Rectangle {
         root.freeResize(index, { w: box.width, h: box.height, x: sx, y: sy },
                         { x: sx + dx, y: sy + dy })
         return true
+    }
+
+    /*
+     * 自检读浮动工具条的位置（见 src/SelfTest.cpp 的"工具条贴着鼠标"那两条）。
+     *
+     * 为什么要在 QML 这边开个口子：工具条是**可视项**，不是 QObject 的 child，
+     * C++ 那边 findChild 找不到它（visual item 的父子关系走 QQuickItem，不走
+     * QObject 那棵树）。所以由根对象把这个状态报出去 —— 和 uiState / treeState
+     * 那几个是同一个套路。
+     */
+    function barState() {
+        return { x: bar.x, y: bar.y, width: bar.width, height: bar.height,
+                 atScreensRight: bar.atScreensRight,
+                 ready: root.overlayReady, borderVisible: selBorder.visible }
+    }
+
+    /*
+     * 自检：走一遍**真实的 Esc 取消**（和上面那个 Shortcut 的 onActivated
+     * 一模一样的代码），然后按毫秒盯着选区窗口到底露过面没有。
+     *
+     * 为什么要这么测：抓屏是延时的（见 Screenshot::beginCapture），用户按完
+     * 快捷键马上按 Esc 就落在那个窗口期里 —— "取消之后窗口还是冒出来了"是
+     * 用户报的问题，而它只体现在**窗口可见性**上，光调函数看状态是看不出来的。
+     * 所以这里把"哪一毫秒可见"数出来，返回：
+     *
+     *   { frames, lastMs, beforeCancel }
+     *     frames        取消之后窗口可见的采样次数（0 = 一帧都没露）
+     *     lastMs        最后一次可见距取消过去了多少毫秒
+     *     beforeCancel  取消之前窗口就可见了吗（prewarm 之后该是 false）
+     */
+    function captureCancelDuringPending(cancelAtMs) {
+        const out = { frames: 0, lastMs: -1, beforeCancel: false }
+        const timer = Qt.createQmlObject('import QtQuick; Timer {}', root, "cancelProbe")
+        let elapsed = 0
+        let cancelled = false
+        let beforeCancelSeen = false
+        timer.interval = 3
+        timer.repeat = true
+        timer.triggered.connect(function() {
+            elapsed += 3
+            if (!cancelled) {
+                if (Shot.active)
+                    beforeCancelSeen = true
+                if (elapsed >= cancelAtMs) {
+                    cancelled = true
+                    if (root.selected >= 0)      /* 和 Shortcut 里那一段一字不差 */
+                        root.selected = -1
+                    else
+                        Shot.cancelCapture()
+                }
+            } else if (Shot.active) {
+                out.frames += 1
+                out.lastMs = elapsed
+            }
+            if (elapsed >= 1000)
+                timer.stop()
+        })
+        timer.start()
+        return out
     }
 
     Image {
@@ -990,6 +1079,8 @@ Rectangle {
 
     /* 选区边框（不吃鼠标：没有 MouseArea，事件照样穿到下面去） */
     Rectangle {
+        id: selBorder
+
         x: root.sel.x
         y: root.sel.y
         width: root.sel.width
@@ -997,7 +1088,7 @@ Rectangle {
         color: "transparent"
         border.color: root.accent
         border.width: 1
-        visible: root.selReady
+        visible: root.selReady && root.overlayReady
     }
 
     /*
@@ -1469,12 +1560,17 @@ Rectangle {
     /*
      * 浮动工具条：贴着选区下沿，下面放不下就翻到上面，再夹回窗口里。
      * 它自己不做位移 —— 选区一动它跟着动，用户不用去追它。
+     *
+     * 还没框选时（selAuto，选区是整屏）sel.x + sel.width 就是屏幕右沿，所以它先
+     * 出现在**右上角** —— 用户要的就是这个位置（试过改成"贴鼠标"，被要求改回来）。
      */
     Rectangle {
         id: bar
 
         readonly property real wantY: root.sel.y + root.sel.height + 10
         readonly property bool flip: wantY + height > root.height
+        /* 工具条这会儿是不是按"整屏选区"摆在右上角（自检要看这个状态） */
+        readonly property bool atScreensRight: root.selAuto
 
         x: Math.max(8, Math.min(root.width - width - 8,
                                 root.sel.x + root.sel.width - width))
@@ -1485,6 +1581,7 @@ Rectangle {
         color: "#2b2d30"
         border.color: "#4b4d4f"
         border.width: 1
+        visible: root.overlayReady
 
         component BarButton: Rectangle {
             id: button
@@ -1815,7 +1912,7 @@ Rectangle {
         radius: 4
         color: "#2b2d30"
         border.color: "#4b4d4f"
-        visible: root.hinted
+        visible: root.hinted && root.overlayReady
 
         Text {
             id: hintText

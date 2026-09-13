@@ -65,6 +65,19 @@ public:
     void setHostWidget(QWidget *host);
 
     /*
+     * 抓屏延时期间（按下快捷键 -> 选区窗口真的出来）在应用级接住 Esc。
+     *
+     * 为什么非要在这里接（真机插桩量出来的）：这段时间里主窗口**还是活动
+     * 窗口**（排除法下它没被藏），用户按的 Esc 会正常投递到主窗口 —— 可主窗口
+     * 上根本没有 Esc 的处理（Esc 那条 Shortcut 在选区窗口的 QML 里，而选区
+     * 窗口这会儿还藏着），这一下就被丢掉了。等选区窗口出来再按才轮得到它。
+     * 用户看到的"取消截图时全屏框闪一下才关闭"就是这么来的。
+     *
+     * 所以把 Esc 在应用级接一层：只有"已经排上队要抓、窗口还没出来"那段
+     * 时间才动手，其余时候（窗口开着）仍旧归选区窗口的 QML 管。
+     */
+    bool eventFilter(QObject *watched, QEvent *event) override;
+    /*
      * QML 引擎（QQuickWidget 那一个）。
      *
      * 截图界面要装进第二个 QQuickWidget，而且得**共用同一个引擎** ——
@@ -192,6 +205,7 @@ private:
     QWidget *m_overlay = nullptr;
     /* 待抓的那块屏（beginCapture 和 grabAndShow 之间传一下） */
     QScreen *m_screen = nullptr;
+
 
     /* 冻结的整屏图（设备像素），以及它对应的屏幕几何 / 缩放比 */
     QImage m_shot;

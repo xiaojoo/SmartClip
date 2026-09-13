@@ -25,6 +25,7 @@
 #include <QElapsedTimer>
 #include <QImage>
 #include <QPalette>
+#include <QPoint>
 #include <QCoreApplication>
 #include <QDir>
 #include <QFile>
@@ -2663,6 +2664,72 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
         check(shot->overlayWarmed(),
               QStringLiteral("截图：选区窗口启动时已在幕外画过一帧（第一次抓屏不带空窗帧）"));
 
+        /*
+         * ============ 复现：启动后**第一次**抓屏，马上按 Esc 取消 ============
+         *
+         * 用户报的就是这一下：程序起来之后第一次按截图快捷键，屏幕上先亮起
+         * 一整块全屏选区（要再按一次 Esc 才关得掉）。关键是"第一次" —— 所以
+         * 这段必须放在**任何别的抓屏之前**：上面那些预热检查没有动过窗口，
+         * 此刻的选区窗口正是启动预热留下的那份状态（见 Screenshot::prewarm），
+         * 和用户冷启动后第一次按键时一模一样。
+         *
+         * 走 QML 里和 Esc Shortcut **一字不差**的代码（captureCancelDuringPending），
+         * 同时从 C++ 这边每 3ms 采一次窗口可见性 —— "闪一下"这种一闪而过的
+         * 残留只有这么采样才抓得住。取消时刻试 0/5/15/25ms（都在延时里）和
+         * 60ms（延时之后，窗口本来就该开着，取消就该关掉它）。
+         */
+        {
+            const int cancelAt[] = { 0, 5, 15, 25, 60 };
+            for (int at : cancelAt) {
+                QObject *root = shot->overlayRoot();
+                if (!root)
+                    break;
+                QVariant probe;
+                QMetaObject::invokeMethod(root, "captureCancelDuringPending",
+                                          Q_RETURN_ARG(QVariant, probe),
+                                          Q_ARG(QVariant, QVariant(at)));
+                const QVariantMap probeMap = probe.toMap();
+
+                int visibleFrames = 0;
+                long long lastVisibleMs = -1;
+                QElapsedTimer watch;
+                watch.start();
+                while (watch.elapsed() < 1200) {
+                    QCoreApplication::processEvents(QEventLoop::AllEvents, 3);
+                    QThread::msleep(3);
+                    if (shot->overlayVisible()) {
+                        ++visibleFrames;
+                        lastVisibleMs = watch.elapsed();
+                    }
+                }
+                const int qmlFrames = probeMap.value(QStringLiteral("frames")).toInt();
+
+                /*
+                 * 延时里取消（at < 30）：窗口一帧都不该露。
+                 * 延时之后取消（at >= 30）：窗口先开出来了，取消必须把它关掉。
+                 */
+                if (at < 30) {
+                    check(visibleFrames == 0 && qmlFrames == 0,
+                          QStringLiteral("截图：第一次抓屏、%1ms 时按 Esc 取消 -> 窗口一帧都没露")
+                              .arg(at),
+                          QStringLiteral("C++ 数到 %1 帧 / QML 数到 %2 帧")
+                              .arg(visibleFrames).arg(qmlFrames));
+                } else {
+                    check(!shot->overlayVisible(),
+                          QStringLiteral("截图：第一次抓屏、%1ms 时按 Esc（窗口已开）-> 收工后是关着的")
+                              .arg(at),
+                          QStringLiteral("最后可见于 %1ms").arg(lastVisibleMs));
+                }
+
+                /* 复位，别把上一次的窗口状态带进下一次 */
+                shot->cancelCapture();
+                for (int i = 0; i < 20; ++i) {
+                    QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+                    QThread::msleep(5);
+                }
+            }
+        }
+
         shot->beginCapture();
         /*
          * 抓屏是**延时**的（要先等主窗口藏起来那一帧重画完，见
@@ -2725,6 +2792,8 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
             {
                 QMetaObject::invokeMethod(overlay, "resetForCapture",
                                           Q_ARG(QVariant, QVariant::fromValue(QRectF(11, 22, 333, 155))));
+                /* 等布局落定再读（setGeometry 之后 QQuickWidget 的布局是延迟生效的） */
+                settle();
                 const QRectF got = overlay->property("sel").toRectF();
                 check(qAbs(got.x() - 11) < 1.5 && qAbs(got.y() - 22) < 1.5
                           && qAbs(got.width() - 333) < 1.5 && qAbs(got.height() - 155) < 1.5,
@@ -2735,6 +2804,95 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
 
             /* 框一块 + 在框里落一条文字（走界面上那同一批函数） */
             const double selX = 120.0, selY = 90.0, selW = 420.0, selH = 260.0;
+
+            /*
+             * 浮动工具条的位置：还没框选（选区是整屏）时在**右上角**，框选之后
+             * 贴着选区下沿。
+             *
+             * 这两条都量，是因为"右上角"这个位置被来回改过：曾经为了消灭"一进
+             * 截图先闪在右上角"改成过"贴鼠标"，用户明确要求改回右上角，所以这里
+             * 把**两边**都钉住，以后谁再动它都会红。
+             *
+             * 期望值按产品里同一套夹取算：工具条比选区宽时右边顶出屏幕，x 会被
+             * 夹回窗口里（bar 的 x = max(8, min(ctrlW - bw - 8, 选区右下 - bw))）。
+             */
+            {
+                QMetaObject::invokeMethod(
+                    overlay, "resetForCapture",
+                    Q_ARG(QVariant, QVariant::fromValue(QRectF(0, 0, 1500, 900))));
+                settle();
+
+                /* 工具条是可视项（QQuickItem），C++ 的 findChild 够不着 —— 让根对象报 */
+                QVariant barStateVar;
+                QMetaObject::invokeMethod(overlay, "barState",
+                                          Q_RETURN_ARG(QVariant, barStateVar));
+                const QVariantMap bs = barStateVar.toMap();
+                const double bw = bs.value(QStringLiteral("width")).toDouble();
+                const double bh = bs.value(QStringLiteral("height")).toDouble();
+                check(!bs.isEmpty() && bh > 20 && bs.contains(QStringLiteral("atScreensRight")),
+                      QStringLiteral("截图：读得到浮动工具条的状态（barState）"),
+                      QStringLiteral("工具条 %1,%2（%3×%4）")
+                          .arg(bs.value(QStringLiteral("x")).toDouble())
+                          .arg(bs.value(QStringLiteral("y")).toDouble())
+                          .arg(bw).arg(bh));
+                check(bs.value(QStringLiteral("atScreensRight")).toBool(),
+                      QStringLiteral("截图：还没框选时工具条按整屏选区定位（右上角）"));
+
+                /*
+                 * 复位之后**不许**马上画选区边框（见 CaptureOverlay.qml 的
+                 * overlayReady）。
+                 *
+                 * 用户报的："取消截图后全屏出现了一下绿色边框"。抓屏 + 4K 底图上传
+                 * 要几十毫秒，这期间窗口可能已经 show() 出来了，而框选默认是整屏
+                 * —— 那圈"全屏选区"的边框就会先亮一下。所以复位时先关掉，等窗口
+                 * 稳住了由 settleOverlay() 打开。
+                 */
+                check(!bs.value(QStringLiteral("ready")).toBool()
+                          && !bs.value(QStringLiteral("borderVisible")).toBool(),
+                      QStringLiteral("截图：刚复位时先把选区边框压住（取消时不会闪一下全屏边框）"));
+
+                QMetaObject::invokeMethod(overlay, "settleOverlay");
+                settle();
+                QMetaObject::invokeMethod(overlay, "barState",
+                                          Q_RETURN_ARG(QVariant, barStateVar));
+                const QVariantMap bsReady = barStateVar.toMap();
+                check(bsReady.value(QStringLiteral("ready")).toBool()
+                          && bsReady.value(QStringLiteral("borderVisible")).toBool(),
+                      QStringLiteral("截图：窗口稳住之后（settleOverlay）选区边框才出来"));
+
+                const double ctrlW = overlay->property("width").toDouble();
+                const double wantRightX = qMax(8.0, qMin(ctrlW - bw - 8.0, 1500.0 - bw));
+                check(qAbs(bs.value(QStringLiteral("x")).toDouble() - wantRightX) < 8,
+                      QStringLiteral("截图：一进截图工具条在右沿（剪掉夹取那部分）"),
+                      QStringLiteral("工具条 x=%1 / 期望 %2（控件宽 %3，条宽 %4）")
+                          .arg(bs.value(QStringLiteral("x")).toDouble())
+                          .arg(wantRightX).arg(ctrlW).arg(bw));
+
+                /* 框选之后贴到选区下沿 */
+                QMetaObject::invokeMethod(overlay, "testSelect", Q_ARG(QVariant, selX),
+                                          Q_ARG(QVariant, selY), Q_ARG(QVariant, selW),
+                                          Q_ARG(QVariant, selH));
+                settle();
+                QMetaObject::invokeMethod(overlay, "barState",
+                                          Q_RETURN_ARG(QVariant, barStateVar));
+                const QVariantMap bs2 = barStateVar.toMap();
+                const double wantX = qMax(8.0, qMin(ctrlW - bw - 8.0, selX + selW - bw));
+                check(qAbs(bs2.value(QStringLiteral("x")).toDouble() - wantX) < 8
+                          && qAbs(bs2.value(QStringLiteral("y")).toDouble()
+                                  - (selY + selH + 10)) < 8,
+                      QStringLiteral("截图：框选之后工具条贴着选区下沿"),
+                      QStringLiteral("工具条 %1,%2 / 期望 %3,%4")
+                          .arg(bs2.value(QStringLiteral("x")).toDouble())
+                          .arg(bs2.value(QStringLiteral("y")).toDouble())
+                          .arg(wantX).arg(selY + selH + 10));
+
+                /* 复位回整屏、清掉这次试出来的选区，别带进后面的检查 */
+                QMetaObject::invokeMethod(
+                    overlay, "resetForCapture",
+                    Q_ARG(QVariant, QVariant::fromValue(QRectF(0, 0, 1500, 900))));
+                settle();
+            }
+
             QMetaObject::invokeMethod(overlay, "testSelect", Q_ARG(QVariant, selX),
                                       Q_ARG(QVariant, selY), Q_ARG(QVariant, selW),
                                       Q_ARG(QVariant, selH));

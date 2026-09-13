@@ -5,9 +5,11 @@
 #include <QApplication>
 #include <QClipboard>
 #include <QColorDialog>
+#include <QCoreApplication>
 #include <QCursor>
 #include <QDateTime>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QGuiApplication>
@@ -23,6 +25,7 @@
 #include <QQuickWidget>
 #include <QScreen>
 #include <QStandardPaths>
+#include <QThread>
 #include <QTimer>
 #include <QUrl>
 #include <QVBoxLayout>
@@ -225,7 +228,48 @@ Screenshot::~Screenshot() {
     m_overlay = nullptr;
 }
 
-void Screenshot::setHostWidget(QWidget *host) { m_host = host; }
+void Screenshot::setHostWidget(QWidget *host) {
+    m_host = host;
+    /*
+     * Esc 的应用级兜底（见 eventFilter 的说明）：必须挂在 qApp 上，
+     * 因为那段时间的按键是投给主窗口的，而主窗口没有 Esc 的处理。
+     */
+    if (qApp)
+        qApp->installEventFilter(this);
+}
+
+bool Screenshot::eventFilter(QObject *watched, QEvent *event) {
+    /*
+     * 只在"截图已经排上队 / 正在抓，但选区窗口**还没露脸**"这段里管 Esc。
+     *
+     * 判据用 overlayVisible() 而不是 m_pending：m_pending 在 grabAndShow() 一进来
+     * 就被清了（那时候抓屏已经开始、渲染还没做），而用户按 Esc 恰恰就落在
+     * "抓屏 + 渲染"这几十毫秒里 —— 拿 m_pending 当判据这段全漏（自己踩过）。
+     * 窗口没出来 = 用户看到的就是"什么都没有"，这会儿的 Esc 只能是在取消。
+     *
+     * 为什么要在这一层接（真机插桩量出来的）：这段时间主窗口**还是活动窗口**
+     * （排除法下它没被藏），用户按的 Esc 会正常投递到主窗口 —— 可主窗口上根本
+     * 没有 Esc 的处理（那条 Shortcut 在选区窗口的 QML 里，而窗口这会儿还藏着），
+     * 这一下就被丢掉了。等窗口出来再按才轮得到它，用户看到的就是"全屏框闪了
+     * 一下才关闭"。
+     *
+     * 别的时候一律放行：
+     *   * 窗口开着时由选区窗口 QML 里那条 Esc Shortcut 管（它还要先"取消
+     *     选中"再"撤销整个截图"，那套分级语义在这一层复制一遍只会分家）；
+     *   * 没在截图时更不能碰 —— Esc 是编辑器/对话框自己的键。
+     */
+    Q_UNUSED(watched);
+    if (event->type() == QEvent::KeyPress) {
+        auto *key = static_cast<QKeyEvent *>(event);
+        if (key->key() == Qt::Key_Escape) {
+            if (m_pending || (m_active && !overlayVisible())) {
+                cancelCapture();
+                return true;   /* 吃掉，别让它再下去触发系统提示音 */
+            }
+        }
+    }
+    return QObject::eventFilter(watched, event);
+}
 
 void Screenshot::setEngine(QQmlEngine *engine) {
     m_engine = engine;
@@ -464,22 +508,101 @@ void Screenshot::showOverlay() {
                                   Q_ARG(QVariant, QVariant::fromValue(QRectF(m_screenRect))));
 
     /*
-     * show() 之前**强制同步渲染一帧**。
+     * show() 之前要先**强制同步渲染一帧**，这一步不能省。
      *
      * QQuickWidget 的帧是在渲染线程上异步出的：窗口重新显示时，第一帧会先呈现
      * **上一次渲染好的那张** —— 也就是上一轮抓屏时用户框的那块选区，于是"上次的
      * 截图框轮廓"又闪一下（实测：第二次抓屏时旧框左边线会亮 3 帧、约 14ms）。
-     * grabFramebuffer() 同步走一次完整渲染，把这帧换成新的；之后 show() 呈现的
+     * grabFramebuffer() 走一次完整渲染，把这帧换成新的；之后 show() 呈现的
      * 就是干净的全屏选区。
+     *
+     * 但这次同步渲染有代价，而且代价正好落在"取消"这条路上（真机插桩量出来的，
+     * Ctrl+Alt+A 之后 20ms 按 Esc）：
+     *
+     *    0  beginCapture
+     *   31  grabAndShow
+     *   96  showOverlay 进来
+     *   97  开始 grabFramebuffer（4K 底图的解码 + 上传，把事件循环按住几十毫秒）
+     *  145  grabFramebuffer 返回 —— 用户那一下 Esc 的 KeyPress 直到这一刻才被投递进来
+     *  148  show()（窗口可见）
+     *  196  cancelCapture <- 那一下 Esc 到这儿才被处理
+     *
+     * 于是窗口先在屏幕上待了约 55ms（3 帧多，肉眼就是一"闪"）才关掉 —— 用户报的
+     * "取消截图时全屏框闪现了一次才关闭"。
+     *
+     * 所以渲染完之后、show() 之前，必须把这段时间里攒下的输入**排空**再做决定：
+     * 那一下 Esc 就混在里面，它走 eventFilter -> cancelCapture -> endCapture，
+     * 把 m_active 落回 false —— 下面发现已经收工了就**直接返回、不 show()**，
+     * 窗口一帧都不露。
+     *
+     * 为什么不是"调一次 processEvents 就往下走"：插桩显示那会儿键**还没到**
+     * （上面 145ms 那一行）。所以这里**看队列**而不是**等固定时间** —— 队列空
+     * 就立刻走人（正常截图这条路上队列本来就是空的，几微秒就过，不会平白加上
+     * 一截延迟）；队列里有东西就抽出来，抽完再多抽一小会儿（键事件可能分几条
+     * 陆续到）。
      */
     if (auto *view = m_overlay->findChild<QQuickWidget *>())
         view->grabFramebuffer();
+
+    {
+        constexpr int kGraceMs = 20;   /* 见好就收：抽到键之后再等这么久就够 */
+        QElapsedTimer grace;
+        bool sawKey = false;
+#if defined(Q_OS_WIN)
+        auto queueBusy = []() {
+            MSG msg;
+            return PeekMessageW(&msg, nullptr, 0, 0, PM_NOREMOVE | PM_QS_INPUT) != FALSE;
+        };
+#else
+        auto queueBusy = []() { return false; };
+#endif
+        while (m_active) {
+            const bool busy = queueBusy();
+            if (busy) {
+                QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
+                if (!sawKey) {
+                    sawKey = true;
+                    grace.start();
+                }
+                continue;
+            }
+            if (sawKey && grace.elapsed() < kGraceMs) {
+                QThread::msleep(1);      /* 让刚抽出来的事件走完 */
+                QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
+                continue;
+            }
+            break;                       /* 队列空了（也没抽到过键）-> 立刻放行 */
+        }
+    }
+
+    /* 上面那一下要是把它取消了（用户按 Esc 取消），窗口就别露了 */
+    if (!m_active) {
+        return;
+    }
 
     m_overlay->show();
     m_overlay->raise();
     m_overlay->activateWindow();
     if (auto *view = m_overlay->findChild<QQuickWidget *>())
         view->setFocus();
+
+    /*
+     * 窗口真的稳住了再让界面把选区边框画出来（见 CaptureOverlay.qml 的 overlayReady）。
+     *
+     * 为什么不能 show() 之后立刻就画：抓屏 + 4K 底图上传要几十毫秒，这期间窗口可能
+     * 已经 show() 出来了，而框选默认是**整屏** —— 屏幕会先亮起一圈"全屏选区"的边框。
+     * 用户在窗口刚出来那几十毫秒里按 Esc 取消，看到的就是"全屏闪了一下边框才关掉"。
+     *
+     * 延迟这一小段再放边框：取消落在这段里的话（用户按完快捷键马上 Esc），这圈框
+     * 从头到尾没画过，一帧都不闪；正常截图只是晚一两帧出现边框，用户在框选时
+     * 看不出差别。
+     */
+    QTimer::singleShot(60, this, [this]() {
+        if (m_active && overlayVisible()) {
+            if (QObject *root = overlayRoot())
+                QMetaObject::invokeMethod(root, "settleOverlay");
+        }
+    });
 }
 
 bool Screenshot::cancelPendingCapture() {
