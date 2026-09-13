@@ -47,14 +47,14 @@ void WindowHelper::closeWindow()
 void WindowHelper::askQuit()
 {
     /*
-     * 只发信号，界面（Main.qml 里的 QuitAsk）负责把那块卡片弹出来。
+     * 只发信号，界面（Main.qml 里的 quitAsk 那块 AskCard）负责把卡片弹出来。
      *
      * 为什么不在这里弹：底下的界面要**原封不动** —— 不压暗、不遮住、不挡鼠标。
      * 这里试过三种做法都不行：加遮罩（哪怕全透明，它铺满整窗就把鼠标吃了，
      * 编辑区点不动）、新建顶层对话框（系统先映射空窗口、内容下一帧才画，
      * 那一帧就是"闪一下"）。最后走的是这个项目里本来就一直在用、从来没闪过
      * 的那类窗口：Popup.Window（和下拉菜单、设置面板同一套）。详见
-     * qml/components/QuitAsk.qml 开头的说明。
+     * qml/components/AskCard.qml 开头的说明。
      */
     emit quitRequested();
 }

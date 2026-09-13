@@ -115,7 +115,7 @@ qt_add_qml_module(SmartClip
         qml/components/DropdownMenu.qml
         qml/components/EditorArea.qml
         qml/components/FindBar.qml
-        qml/components/QuitAsk.qml
+        qml/components/AskCard.qml
         qml/components/FolderTree.qml
         qml/components/SettingsPanel.qml
         qml/components/StatusBar.qml

@@ -14,7 +14,7 @@
  * 的坑见 js/EditorMenus.js 开头那段）。
  *
  * 文字要**一起**压成近黑：只翻背景的话，深色那套浅色文字落到白底上就看不见了
- * —— QMessageBox 那处踩过同样的坑，见 src/EditorController.cpp 的 kDialogStyle。
+ * —— src/DialogStyle.h 里那几个输入框踩过同样的坑。
  *
  * 调色板和样式表都设：样式表保证底色一定是白的（不受当前 widget 风格影响），
  * 调色板补样式表管不到的那几笔（典型的是右边那列快捷键文字）。

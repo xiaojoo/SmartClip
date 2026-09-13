@@ -8,49 +8,26 @@
 #endif
 
 /*
- * QtWidgets 那些消息框 / 输入框的灰黑皮肤。
+ * QtWidgets 那些输入框的灰黑皮肤。
  *
- * 为什么在 C++ 里给 QMessageBox 挂样式表，而不是等系统的深色主题：
+ * 现在还留在 QtWidgets 这边的只剩"要用户敲字"的 QInputDialog（重命名 / 转到行 /
+ * 参考线列，见 EditorController 的 askText 等）。提示 / 确认 / 未保存改动三处
+ * 早先是 QMessageBox，现在都换成 QML 那侧的卡片了（qml/components/AskCard.qml），
+ * 所以下面不再有 QMessageBox 的规则。
+ *
+ * 为什么在 C++ 里挂样式表，而不是等系统的深色主题：
  * 这些框是 QtWidgets 画的，取色走的是应用调色板；主界面之所以是深色，是因为
- * QML 自己刷的色，跟调色板没关系。所以裸的 QMessageBox 永远是浅灰底，在深色
- * 窗口里像个贴错的补丁（"快捷键"框和"关于"框都是这种）。
+ * QML 自己刷的色，跟调色板没关系。所以裸的输入框永远是浅灰底，在深色窗口里
+ * 像个贴错的补丁。
  *
  * 颜色取主界面同一套（见 Main.qml 的卡片/边框色），前景色显式写出来 ——
  * 只改背景的话，Fusion 仍会拿浅色的 WindowText 去画正文，深底黑字看不见。
  *
  * 注意只挂在具体的框上（setStyleSheet），别挂 qApp：QFileDialog 是原生对话框，
  * 全局样式表会影响它的布局。
- *
- * 原来是 EditorController.cpp 里的文件局部常量；"退出"那个框是 WindowHelper
- * 弹的，也要同一套皮肤，所以挪出来共用一份（别抄第二份，见 js/EditorMenus.js
- * 开头那段讲的"两份迟早不一致"）。
  */
 inline const char *dialogStyle() {
     return R"qss(
-QMessageBox {
-    background-color: #2b2d30;
-}
-QMessageBox QLabel {
-    color: #e6e8ea;
-    background: transparent;
-}
-QMessageBox QPushButton {
-    color: #e6e8ea;
-    background-color: #3a3e42;
-    border: 1px solid #4b4d4f;
-    border-radius: 3px;
-    padding: 4px 14px;
-    min-width: 64px;
-}
-QMessageBox QPushButton:hover {
-    background-color: #45494e;
-}
-QMessageBox QPushButton:pressed {
-    background-color: #313438;
-}
-QMessageBox QPushButton:default {
-    border: 1px solid #c8503c;
-}
 QInputDialog {
     background-color: #2b2d30;
 }

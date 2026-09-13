@@ -34,8 +34,9 @@ namespace {
 /*
  * 模态弹框出现时，把"错投的字符消息"吃掉，别让系统响那一声。
  *
- * 背景：这些 QtWidgets 弹框（QMessageBox / QInputDialog）弹出时，用户往往正在
- * 主窗口里敲键盘（菜单助记键、上一秒的按键、输入法送出的字符…）。主窗口这时
+ * 背景：这些 QtWidgets 弹框（QInputDialog、截图失败时那个 QMessageBox）弹出时，
+ * 用户往往正在主窗口里敲键盘（菜单助记键、上一秒的按键、输入法送出的字符…）。
+ * 主窗口这时
  * 已经被模态框挡住，Qt 收到 WM_CHAR 之后走 qt_try_modal() 直接拒收，消息落回
  * DefWindowProc —— Windows 对"没人处理的字符消息"的标准反应就是响一声
  * （QWindowsIntegration::beep() → MessageBeep(MB_OK)，系统"默认提示音"）。
@@ -94,9 +95,12 @@ int main(int argc, char *argv[]) {
      * 就是系统默认的浅色底 —— 鼠标停在按钮上弹出一块白，跟界面完全不搭
      * （用户报的就是"收起替换"上面那个"显示 / 隐藏替换行"）。
      *
-     * 下面这几组角色管的是 QtWidgets 那几样东西：QMessageBox（Cmd.alert）、
-     * QInputDialog（转到行 / 自定义参考线列）这类对话框。不设的话它们也是
-     * 系统浅色，深色界面里点一下弹出一块白。
+     * 下面这几组角色管的是 QtWidgets 那几样东西：QInputDialog（重命名 /
+     * 转到行 / 自定义参考线列）这类对话框，还有截图失败时的 QMessageBox。
+     * 不设的话它们是系统浅色，深色界面里点一下弹出一块白。
+     *
+     * 注意：提示 / 确认 / 未保存改动那三处**不再**依赖这里 —— 它们已经换成
+     * QML 那套卡片（qml/components/AskCard.qml），颜色由那个组件自己写死。
      *
      * 注意：编辑区那个右键菜单**不再**依赖这里 —— 它已经换成 QML 那套菜单
      * （见 src/EditorViewItem.cpp 的 eventFilter 和 Main.qml 的

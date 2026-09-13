@@ -22,9 +22,14 @@ class QWidget;
  *     所以快捷键在这里注册，触发后统一发 commandRequested(name)，由 QML
  *     的分发器执行（QML 那边才知道查找栏这类界面要不要跟着动）。
  *
- *  2) 文件对话框 / 消息框。QFileDialog、QMessageBox 都是 QtWidgets 的东西，
- *     而主窗口本来就是 QWidget，用它们比在 QML 里搭一套对话框可靠得多
- *     （原生对话框、中文按钮、模态关系都是现成的）。
+ *  2) 文件对话框 / 输入框。QFileDialog、QInputDialog 都是 QtWidgets 的东西，
+ *     而主窗口本来就是 QWidget，用它们比在 QML 里搭一套可靠得多
+ *     （原生对话框、中文按钮都是现成的）。
+ *
+ *     提示 / 确认框反过来：它们已经换成 QML 那套卡片（qml/components/AskCard.qml），
+ *     这里只把话转成信号（见 alert）。原因是 QtWidgets 那个 QMessageBox 是
+ *     **模态 + 系统自绘**的：弹出时整个程序都点不动，长相也和界面不是一套 ——
+ *     用户报的就是"关闭键那个框和别处不一样"。
  *
  * 注意这里**不注册** Ctrl+Z / Ctrl+X / Ctrl+C / Ctrl+V / Ctrl+A：
  * Scintilla 自己有一套很完整的键盘处理（撤销分组、行选择、多光标粘贴…），
@@ -102,13 +107,18 @@ public:
     Q_INVOKABLE void revealInExplorer(const QString &path);
 
     /*
-     * "有未保存改动"时的三选一。
-     * 返回 0 = 保存，1 = 不保存，2 = 取消。
+     * 弹一块"提示"卡片。
+     *
+     * 这里只发信号，界面（Main.qml 的 notify）负责把卡片弹出来 —— 和
+     * WindowHelper::askQuit 同一个套路，理由见头文件上面第 2 条。
+     * 注意它是**异步**的（不再像 QMessageBox 那样卡在这儿等用户点掉），
+     * 调用方别指望"下一行执行时用户已经看过了"。
+     *
+     * 顺便记一笔："有未保存改动"时的三选一（保存 / 不保存 / 取消）也搬走了 ——
+     * 那块卡片和流程（关闭标签队列 requestCloseTabs / answerSaveAsk）都在
+     * QML 那侧（qml/components/AskCard.qml、Main.qml），这边不再有对应接口。
      */
-    Q_INVOKABLE int confirmSave(const QString &name);
-
     Q_INVOKABLE void alert(const QString &title, const QString &text);
-    Q_INVOKABLE bool confirm(const QString &title, const QString &text);
 
     /* 转到行：让用户填一个行号；取消返回 -1 */
     Q_INVOKABLE int askLineNumber(int maxLine, int currentLine);
@@ -160,6 +170,9 @@ public:
 signals:
     /* 快捷键被按下；name 见 EditorController.cpp 里的注册表 */
     void commandRequested(const QString &name);
+
+    /* 有句话要提示用户（见 alert）；界面据此弹一块 AskCard */
+    void alertRequested(const QString &title, const QString &text);
 
     /* 快捷键清单有变化（改键 / 恢复默认），设置面板和菜单据此重读 */
     void shortcutsChanged();

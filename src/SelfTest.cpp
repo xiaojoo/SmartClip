@@ -3006,7 +3006,7 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
      * 这条检查的来历：用户在"闪一下"上折腾了三轮 —— 先是被模态框挡住（像卡死），
      * 后来铺透明遮罩（看不见，但铺满整窗，鼠标全被吃掉，编辑区点不动），
      * 最后要求"底下什么也别做"。现在的实现是 QML 侧一块 Popup.Window 卡片
-     * （见 qml/components/QuitAsk.qml），结构上钉三点：没有模态、没有遮罩
+     * （见 qml/components/AskCard.qml），结构上钉三点：没有模态、没有遮罩
      * （就是没有铺满整窗的窗口）、卡片本身比主窗口小得多。
      */
     {
@@ -3057,6 +3057,123 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
             }
             check(!stillThere, QStringLiteral("窗口：问句收得掉（不留残窗）"));
         }
+    }
+
+    /*
+     * 「有未保存的改动」那张卡片：和退出问句同一个组件（AskCard.qml），
+     * 三个按钮 保存 / 不保存 / 取消。
+     *
+     * 这条检查钉的是"问完之前不许关"。卡片是异步的（非模态原生小窗，
+     * 见 AskCard.qml 开头），原来 Cmd.confirmSave() 那种"同步返回一个数字"
+     * 的写法换成了 Main.qml 里的关闭队列（requestCloseTabs / answerSaveAsk）
+     * —— 这里最容易出的错就是没等回答就把标签关了，那等于替用户选了"不保存"，
+     * 未保存的改动会无声无息地没掉。
+     */
+    {
+        const QString askPath = dir.filePath(QStringLiteral("ask-save.txt"));
+        QFile askFile(askPath);
+        askFile.open(QIODevice::WriteOnly);
+        askFile.write("hello\n");
+        askFile.close();
+
+        check(view->openFile(askPath) >= 0, QStringLiteral("未保存问句用例：打开一个文件"));
+        const int before = view->documents().size();
+        /*
+         * 真改一笔（复制一行）。
+         *
+         * 不能用 view->setModified(true)：那个 setter 是**只能清标记**的
+         * （Scintilla 没有反向的 SCI_SETMODIFY，见 EditorViewItem::setModified），
+         * 传 true 是空操作 —— 第一版就栽在这，于是"没改动"那条路把标签直接关了，
+         * 卡片压根没弹。
+         */
+        view->duplicateLine();
+        check(view->modified(), QStringLiteral("未保存问句用例：改一笔 -> 已修改"));
+        dispatch(QStringLiteral("closeTab"));
+        for (int i = 0; i < 40; ++i) {
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 30);
+            QThread::msleep(15);
+        }
+
+        check(uiState().value(QStringLiteral("saveAskOpened")).toBool(),
+              QStringLiteral("未保存问句：有改动，卡片弹出来了"));
+        check(view->documents().size() == before,
+              QStringLiteral("未保存问句：还没回答，标签不许关"),
+              QStringLiteral("还剩 %1 个").arg(view->documents().size()));
+
+        /*
+         * 按"不保存"（下标 1）：这一刻才真的关掉。
+         *
+         * 点的是卡片上的按钮那条路（Main.qml 的 clickSaveAsk -> AskCard.answer
+         * -> answered -> answerSaveAsk），不是直接调 answerSaveAsk —— 后者
+         * 卡片还开着，"答完就收"就验不到了。
+         */
+        QMetaObject::invokeMethod(qmlRoot, "clickSaveAsk", Q_ARG(QVariant, QVariant(1)));
+        for (int i = 0; i < 40; ++i) {
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 30);
+            QThread::msleep(15);
+        }
+        check(view->documents().size() == before - 1,
+              QStringLiteral("未保存问句：答了「不保存」才关掉"),
+              QStringLiteral("还剩 %1 个").arg(view->documents().size()));
+        check(!uiState().value(QStringLiteral("saveAskOpened")).toBool(),
+              QStringLiteral("未保存问句：答完卡片收掉了"));
+
+        QFile::remove(askPath);
+    }
+
+    /*
+     * 滚动条：两条轨道都得是正文底色，不许露出白带。
+     *
+     * 这条的来历：轨道原来写的是 background: transparent —— 那是"这一层不画"，
+     * 露出来的是底下那一层。滑块的深灰一直是对的（说明样式表确实生效了），
+     * 轨道却在有的机器上是一条 12px 的 #f2f2f2 白带（用户报的"这个滚动条白色
+     * 背景去掉"）。现在轨道色写死成正文底色，这里抓两条滚动条**自己渲染出来的
+     * 图**数一遍近白像素 —— 属性值看着都对、画出来不对，只能这么钉。
+     */
+    {
+        const QString oldClipboard = QGuiApplication::clipboard()->text();
+        const bool oldWrap = view->wrapEnabled();   /* 收尾要放回去 */
+
+        check(view->newDocument() >= 0, QStringLiteral("滚动条用例：新建长文档"));
+        view->setWrapEnabled(false);        /* 不换行，长行才会顶出横向滚动条 */
+        QString big;
+        for (int i = 1; i <= 200; ++i)
+            big += QStringLiteral("line %1 : ").arg(i)
+                   + QString(220, QLatin1Char('x')) + QLatin1Char('\n');
+        QGuiApplication::clipboard()->setText(big);
+        view->paste();
+        settle();
+
+        const QVariantList bars = view->scrollBarPixelStats();
+        const int vWhite = bars.value(0).toInt();
+        const int hWhite = bars.value(1).toInt();
+        const bool vShown = bars.value(2).toBool();
+        const bool hShown = bars.value(3).toBool();
+        const uint vTrack = bars.value(4).toUInt();
+        const uint hTrack = bars.value(5).toUInt();
+        /* 底色 #1e1f22 按 QColor 的 RGB 顺序（和 packed() 的 BGR 不一样） */
+        const uint paperRgb = 0x1E1F22u;
+
+        out() << "        （竖条 白点 " << vWhite << " / 轨道 #"
+              << QString::number(vTrack, 16) << " ；横条 白点 " << hWhite
+              << " / 轨道 #" << QString::number(hTrack, 16) << "）" << Qt::endl;
+
+        check(vShown && hShown,
+              QStringLiteral("滚动条用例：长内容 + 长行时两条滚动条都在"),
+              QStringLiteral("竖 %1 / 横 %2").arg(vShown).arg(hShown));
+        check(vWhite == 0 && hWhite == 0,
+              QStringLiteral("滚动条轨道里没有白底（露白带就是这条红）"),
+              QStringLiteral("竖条 %1 个白点 / 横条 %2 个").arg(vWhite).arg(hWhite));
+        check(vTrack == paperRgb && hTrack == paperRgb,
+              QStringLiteral("滚动条轨道色就是正文底色"),
+              QStringLiteral("竖 #%1 / 横 #%2（要 #1e1f22）")
+                  .arg(vTrack, 6, 16, QLatin1Char('0'))
+                  .arg(hTrack, 6, 16, QLatin1Char('0')));
+
+        QGuiApplication::clipboard()->setText(oldClipboard);
+        view->closeDocument(view->currentIndex());
+        view->setWrapEnabled(oldWrap);
+        settle();
     }
 
     out() << Qt::endl

@@ -401,15 +401,26 @@ Rectangle {
             selectedPath = newPath
     }
 
-    /* 删一份 md：开着的标签先关（有未保存改动会先问），再删文件 */
+    /*
+     * 删一份 md：开着的标签先关（有未保存改动会先问），再删文件。
+     *
+     * 问句和关标签都是异步的（卡片答完才走信号回来，见 AskCard.qml），
+     * 所以"删"这一步得当成回调传进去 —— 用户按取消就整条链停下，
+     * 磁盘上那份一动不动。
+     */
     function deleteTreeFile(path) {
-        if (!Cmd.confirm("删除文件", "确定删除这一份吗？\n\n" + path))
-            return
+        askConfirm("删除文件", "确定删除这一份吗？\n\n" + path, function () {
+            var index = view.indexOfPath(path)
+            if (index < 0) {
+                removeTreeFile(path)        /* 没开着，直接删 */
+                return
+            }
+            requestCloseTabs([index], function () { removeTreeFile(path) })
+        })
+    }
 
-        var index = view.indexOfPath(path)
-        if (index >= 0 && !closeTab(index))
-            return
-
+    /* 真删磁盘上那一份（"标签先关"那一步在 deleteTreeFile 里） */
+    function removeTreeFile(path) {
         if (!Store.deleteFile(path)) {
             Cmd.alert("删除失败", "文件可能已经不在了：\n" + path)
             return
@@ -436,9 +447,8 @@ Rectangle {
     }
 
     function removeImportedFolder(path) {
-        if (!Cmd.confirm("移除导入目录", "把它从左树上移开？（磁盘上的文件不动）\n\n" + path))
-            return
-        Store.removeImportedFolder(path)
+        askConfirm("移除导入目录", "把它从左树上移开？（磁盘上的文件不动）\n\n" + path,
+                   function () { Store.removeImportedFolder(path) })
     }
 
     /* 换剪贴板文件的保存位置（设置面板和"更多"菜单都有入口） */
@@ -524,7 +534,15 @@ Rectangle {
         return true
     }
 
-    /* 关闭一个标签（有未保存改动会先问）。返回是否真的关掉了。 */
+    /*
+     * 关一个标签。
+     *
+     * 没改动的当场就关（和以前一样同步返回真假）；有未保存改动时先弹
+     * 「保存 / 不保存 / 取消」那块卡片（见 qml/components/AskCard.qml）——
+     * 卡片是原生小窗、答完走信号回来，所以这条路上**返回值只能当"这一刻
+     * 关了没"看**（返回 false 不代表用户取消了）。要"关掉之后接着做点什么"
+     * （比如删文件），走 requestCloseTabs(下标, 回调)。
+     */
     function closeTab(index) {
         var docs = view.documents
         if (index === undefined || index === null || index < 0)
@@ -533,29 +551,129 @@ Rectangle {
             return false
 
         if (docs[index].modified) {
-            var answer = Cmd.confirmSave(docs[index].title)
-            if (answer === 2)
-                return false
-            if (answer === 0) {
-                view.activateDocument(index)
-                if (!saveFile())
-                    return false
-            }
+            requestCloseTabs([index], null)
+            return false
         }
 
+        finishCloseTab(index)
+        return true
+    }
+
+    /*
+     * 关一串标签：一个一个来，有未保存改动的那个停下来等用户回答，
+     * 答完再接着关下一个；中途按"取消"整串停下 —— 这就是以前那个
+     * for 循环 + return 的语义，只是现在要跨帧等回答。
+     *
+     * 队列里存的是**当时那一份的身份**（下标 + 标题 + 路径），不是光存下标：
+     * 卡片是非模态的，等回答这段时间用户还能去关别的标签，下标会跟着挪
+     * （见 locateQueued）。
+     */
+    property var closeQueue: []         /* 等着关的那些标签，从后往前 */
+    property var closeQueueThen: null   /* 整串关完之后接着做的事 */
+    property var pendingClose: null     /* 正在等回答的那一条；null = 没在等 */
+
+    function requestCloseTabs(indices, then) {
+        if (then)
+            closeQueueThen = then
+        var docs = view.documents
+        for (var i = 0; i < indices.length; ++i) {
+            var d = docs[indices[i]]
+            if (d)
+                closeQueue.push({ index: indices[i], title: d.title, path: d.filePath })
+        }
+        pumpCloseQueue()
+    }
+
+    function pumpCloseQueue() {
+        if (pendingClose)
+            return                      /* 正等着用户回答，答完自己会接着走 */
+
+        while (closeQueue.length > 0) {
+            var entry = closeQueue.shift()
+            var index = locateQueued(entry)
+            if (index < 0)
+                continue                /* 等回答期间被别处关掉了，跳过 */
+
+            if (view.documents[index].modified) {
+                pendingClose = entry
+                saveAsk.ask("“" + entry.title + "”有未保存的修改。",
+                            "要保存这些修改吗？",
+                            [ { label: "保存", primary: true },
+                              { label: "不保存" },
+                              { label: "取消" } ])
+                return
+            }
+            finishCloseTab(index)
+        }
+
+        var then = closeQueueThen
+        closeQueueThen = null
+        if (then)
+            then()
+    }
+
+    /*
+     * 把队列里那一条重新对到现在的下标上。
+     *
+     * 对不上（同名的文件被换过、或者未命名标签挪了位）就返回 -1 ——
+     * 宁可漏关一个，也不能关错文件。
+     */
+    function locateQueued(entry) {
+        var docs = view.documents
+        var i = entry.index
+        if (i >= 0 && i < docs.length
+                && docs[i].title === entry.title
+                && docs[i].filePath === entry.path)
+            return i
+        if (entry.path !== "")
+            return view.indexOfPath(entry.path)
+        return -1
+    }
+
+    /*
+     * 「保存 / 不保存 / 取消」答完了。
+     *   0 = 保存（存不下就整串停下）  1 = 不保存  2 或 -1 = 取消（整串停下）
+     */
+    function answerSaveAsk(choice) {
+        var entry = pendingClose
+        pendingClose = null
+
+        if (!entry || choice === 2 || choice === -1) {
+            /* 用户取消：整串都别关了（和以前那个 return false 一样） */
+            closeQueue = []
+            closeQueueThen = null
+            return
+        }
+        var index = locateQueued(entry)
+        if (index < 0) {
+            /* 问的那一份已经不在了：宁可什么都不关，也不能关错文件 */
+            closeQueue = []
+            closeQueueThen = null
+            return
+        }
+        if (choice === 0) {
+            view.activateDocument(index)
+            if (!saveFile()) {          /* 存不下：和以前一样，什么都不做 */
+                closeQueue = []
+                closeQueueThen = null
+                return
+            }
+        }
+        finishCloseTab(index)
+        pumpCloseQueue()
+    }
+
+    /* 真把标签关掉（问句已经答完，或者本来就不需要问） */
+    function finishCloseTab(index) {
         view.closeDocument(index)
         if (view.documents.length === 0)
             editor.previewItem = null
-        return true
     }
 
     /* 从后往前关，前面的下标才不会跟着挪 */
     function closeTabs(indices) {
         indices.sort(function (a, b) { return b - a })
-        for (var i = 0; i < indices.length; ++i) {
-            if (!closeTab(indices[i]))
-                return
-        }
+        requestCloseTabs(indices, null)
     }
 
     /*
@@ -1194,6 +1312,16 @@ Rectangle {
             tipDelay: tipProbe.appearDelay,
 
             /*
+             * 问答卡片开着的是哪一块（见 AskCard.qml）。
+             * 自检据此确认"该弹的时候弹了、答完就收"—— 卡片是独立原生窗口，
+             * 光看顶层窗口列表分不出是哪一块。
+             */
+            quitAskOpened: quitAsk.opened,
+            saveAskOpened: saveAsk.opened,
+            confirmAskOpened: confirmAsk.opened,
+            noticeAskOpened: noticeAsk.opened,
+
+            /*
              * 分隔线热区的纵向范围（自检里量它有没有越界）。
              *
              * splitterTop / splitterBottom 必须和中间行（midRow）的上下边界
@@ -1427,25 +1555,99 @@ Rectangle {
     }
 
     /*
-     * 关闭键的问句卡片（完全退出 / 收进托盘）。
+     * 四块问答卡片：关闭窗口 / 未保存改动 / 确认 / 提示。
      *
-     * 和上面两个一样是 Popup.Window：一个只占自己一小块的原生小窗，底下的界面
-     * 原封不动（不压暗、不遮住、不挡鼠标）。为什么不做成 C++ 的对话框，见
-     * qml/components/QuitAsk.qml 开头。
+     * 都是同一个组件（qml/components/AskCard.qml），也是和上面两个一样的
+     * Popup.Window：一个只占自己一小块的原生小窗，底下的界面原封不动
+     * （不压暗、不遮住、不挡鼠标）。为什么不做成 C++ 的 QMessageBox，见
+     * AskCard.qml 开头。
      */
-    QuitAsk {
+    AskCard {
         id: quitAsk
+        parent: window
+        onAnswered: (choice) => {
+            if (choice === 0) Win.hideToTray()
+            else if (choice === 1) Win.closeWindow()
+        }
+    }
+
+    /* 未保存改动：保存 / 不保存 / 取消（答完接着走关标签那条队列） */
+    AskCard {
+        id: saveAsk
+        parent: window
+        onAnswered: (choice) => window.answerSaveAsk(choice)
+    }
+
+    /* 删除 / 移除这类确认：确定 / 取消 */
+    AskCard {
+        id: confirmAsk
+        parent: window
+        onAnswered: (choice) => window.answerConfirm(choice)
+    }
+
+    /* 出错提示：只有一个「知道了」 */
+    AskCard {
+        id: noticeAsk
         parent: window
     }
 
-    Connections {
-        target: Win
-        function onQuitRequested() { quitAsk.openCentered() }
+    /* 关闭键那个问句：完全退出，还是收进托盘 */
+    function openQuitAsk() {
+        quitAsk.ask("完全退出，还是收进托盘？",
+                    "收进托盘：程序继续运行，托盘图标右键能截图，截图快捷键也还能用。\n"
+                    + "完全退出：所有功能停止（截图、剪贴板都不再用）。",
+                    [ { label: "收进托盘", primary: true },
+                      { label: "完全退出" },
+                      { label: "取消" } ])
     }
 
-    /* 自检用：直接开/收那块卡片（弹窗是原生窗口，外面不好直接操作） */
-    function openQuitAsk() { quitAsk.openCentered() }
+    /* 自检用：直接收掉那块卡片（弹窗是原生窗口，外面不好直接操作） */
     function closeQuitAsk() { quitAsk.close() }
+
+    /*
+     * 自检用：当作用户点了「未保存」卡片上的第 index 个按钮。
+     *
+     * 走 card.answer() 而不是直接调 answerSaveAsk()：前者才是真的那条路
+     * （收卡片 -> 发 answered -> 流程接着走），后者只模拟了后半截。
+     */
+    function clickSaveAsk(index) { saveAsk.answer(index) }
+
+    Connections {
+        target: Win
+        function onQuitRequested() { window.openQuitAsk() }
+    }
+
+    /* C++ 那侧要弹"出错提示"（Cmd.alert，见 src/EditorController.h） */
+    Connections {
+        target: Cmd
+        function onAlertRequested(title, text) { window.notify(title, text) }
+    }
+
+    /* 提示卡片：只有一行说明 + 一个「知道了」 */
+    function notify(title, text) {
+        noticeAsk.ask(title, text, [ { label: "知道了", primary: true } ])
+    }
+
+    /*
+     * 确认卡片：点了「确定」才跑 onYes。
+     *
+     * 以前 Cmd.confirm() 是同步返回真假的，卡片换成了异步的原生小窗，
+     * 所以"确定之后做什么"得当成回调传进来。
+     */
+    property var confirmThen: null
+
+    function askConfirm(title, text, onYes) {
+        confirmThen = onYes
+        confirmAsk.ask(title, text, [ { label: "确定", primary: true },
+                                      { label: "取消" } ])
+    }
+
+    function answerConfirm(choice) {
+        var then = confirmThen
+        confirmThen = null
+        if (choice === 0 && then)
+            then()
+    }
 
     /*
      * 整个界面套一层圆角容器。

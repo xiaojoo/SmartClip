@@ -1064,10 +1064,18 @@ void EditorViewItem::styleChrome() {
      * 最早把所有规则拼成一整行、选择器之间只隔一个空格，Qt 的 CSS 解析器
      * 会整段判为无效 —— 滚动条保持系统默认样式（实测右边一条 12px 宽的
      * #f3f3f3 浅色竖带）。加了换行才会生效。
+     *
+     * 轨道（groove）的颜色也要**写死**，不能写 transparent。
+     *
+     * transparent 是"这一层不画"，露出来的是底下那一层 —— 而滚动条是
+     * QAbstractScrollArea 的子控件，它那块底由谁画、画成什么色是平台/样式
+     * 说了算。滑块一直是深色的（样式表确实生效了），轨道却在有的机器上露出
+     * 一条 12px 的 #f2f2f2 白带（用户报的"这个滚动条白色背景去掉"就是它）。
+     * 所以 %3 直接把底色刷上去，不再指望别人。
      */
     const QString bar = QStringLiteral(
         "QScrollBar:vertical {\n"
-        "    background: transparent;\n"
+        "    background: %3;\n"
         "    width: 12px;\n"
         "    margin: 0px;\n"
         "    border: none;\n"
@@ -1091,10 +1099,10 @@ void EditorViewItem::styleChrome() {
         "    border: none;\n"
         "}\n"
         "QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {\n"
-        "    background: transparent;\n"
+        "    background: %3;\n"
         "}\n"
         "QScrollBar:horizontal {\n"
-        "    background: transparent;\n"
+        "    background: %3;\n"
         "    height: 12px;\n"
         "    margin: 0px;\n"
         "    border: none;\n"
@@ -1114,10 +1122,11 @@ void EditorViewItem::styleChrome() {
         "    border: none;\n"
         "}\n"
         "QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {\n"
-        "    background: transparent;\n"
+        "    background: %3;\n"
         "}\n")
-        .arg(QStringLiteral("#4b4d4f"),      // 滑块
-             QStringLiteral("#5f6266"));     // 悬停
+        .arg(QStringLiteral("#4b4d4f"),          // 滑块
+             QStringLiteral("#5f6266"),          // 悬停
+             m_paperColor.name());               // 轨道（= 正文底色）
 
     /*
      * 整块控件的 Window 色也要设成底色。
@@ -1720,6 +1729,20 @@ void EditorViewItem::updateBottomLines() {
     overlay->raise();
     overlay->show();
     overlay->update();
+
+    /*
+     * 等一拍再抬一次。
+     *
+     * 横条"由隐变显"的时候，QAbstractScrollArea 自己会重排一次（layoutChildren），
+     * 顺手把两条滚动条抬到最上层 —— 正好压在补线控件头上。以前滚动条的轨道是
+     * transparent（这一层不画），抬上去也看不出底下的线被盖住，所以没露馅；
+     * 现在轨道刷了实打实的底色（见 styleChrome 里那条说明），就会盖住。
+     * 布局是这一轮事件之后才落定的，所以下一拍再抬一次才稳。
+     */
+    QTimer::singleShot(0, this, [this]() {
+        if (auto *o = static_cast<BottomLines *>(m_bottomLines.data()))
+            o->raise();
+    });
 }
 
 void EditorViewItem::applyGeometry() {
@@ -1826,6 +1849,24 @@ void EditorViewItem::geometryChange(const QRectF &newGeometry,
  * 坐标，和 Popup 的 x/y 同一套（DropdownMenu.openAtPoint 要的就是它）。
  */
 bool EditorViewItem::eventFilter(QObject *watched, QEvent *event) {
+    /*
+     * 滚动条自己冒出来 / 改尺寸之后，把底下那块补线控件重新抬到它上面。
+     *
+     * 原因见 updateBottomLines 末尾：QAbstractScrollArea 重排时会把滚动条
+     * 抬到最上层，横条出现的这一下正好盖住补线控件画的那两条线。
+     */
+    if (qobject_cast<QScrollBar *>(watched)) {
+        switch (event->type()) {
+        case QEvent::Show:
+        case QEvent::Hide:
+        case QEvent::Resize:
+            QTimer::singleShot(0, this, [this]() { updateBottomLines(); });
+            break;
+        default:
+            break;
+        }
+    }
+
     if (event->type() == QEvent::ContextMenu && m_sci && isVisible() && isEnabled()) {
         auto *ce = static_cast<QContextMenuEvent *>(event);
 
@@ -3623,6 +3664,46 @@ int EditorViewItem::whiteBackgroundPixels() const {
         }
     }
     return count;
+}
+
+/* 自检用：两条滚动条自己那块画面的像素统计（见头文件里的说明） */
+QVariantList EditorViewItem::scrollBarPixelStats() const {
+    QVariantList out{0, 0, false, false, 0, 0};
+    if (!m_sci)
+        return out;
+
+    /* 量一条：返回近白像素数（不可见 / 抓不到图给 -1），顺手把轨道色带出来 */
+    auto scan = [](QScrollBar *bar, QColor *track) -> int {
+        if (!bar || !bar->isVisible())
+            return -1;
+        const QImage img = bar->grab().toImage();
+        if (img.isNull() || img.width() <= 0 || img.height() <= 0)
+            return -1;
+        if (track)
+            *track = img.pixelColor(0, 0);
+        int white = 0;
+        for (int y = 0; y < img.height(); ++y) {
+            for (int x = 0; x < img.width(); ++x) {
+                const QColor c = img.pixelColor(x, y);
+                if (c.red() >= 250 && c.green() >= 250 && c.blue() >= 250)
+                    ++white;
+            }
+        }
+        return white;
+    };
+
+    QColor vTrack;
+    QColor hTrack;
+    QScrollBar *vb = m_sci->verticalScrollBar();
+    QScrollBar *hb = m_sci->horizontalScrollBar();
+
+    out[0] = scan(vb, &vTrack);
+    out[1] = scan(hb, &hTrack);
+    out[2] = vb && vb->isVisible();
+    out[3] = hb && hb->isVisible();
+    out[4] = vTrack.isValid() ? int(vTrack.rgb() & 0x00ffffff) : 0;
+    out[5] = hTrack.isValid() ? int(hTrack.rgb() & 0x00ffffff) : 0;
+    return out;
 }
 
 /* 自检用：横向滚动条的状态（见头文件里的说明） */

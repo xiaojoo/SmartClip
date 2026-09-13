@@ -12,8 +12,6 @@
 #include <QFileInfo>
 #include <QInputDialog>
 #include <QKeySequence>
-#include <QMessageBox>
-#include <QPushButton>
 #include <QSettings>
 #include <QUrl>
 #include <QWidget>
@@ -466,59 +464,17 @@ void EditorController::revealInExplorer(const QString &path) {
     QDesktopServices::openUrl(QUrl::fromLocalFile(dir));
 }
 
-int EditorController::confirmSave(const QString &name) {
-    QMessageBox box(m_widget);
-    box.setStyleSheet(QString::fromLatin1(dialogStyle()));  /* 灰黑底，见文件头的说明 */
-    box.ensurePolished();
-    box.adjustSize();
-    applyDarkTitleBar(&box);
-    box.setWindowTitle(tr("SmartClip"));
-    box.setIcon(QMessageBox::Question);
-    box.setText(tr("“%1”有未保存的修改。").arg(name.isEmpty() ? tr("当前文件") : name));
-    box.setInformativeText(tr("要保存这些修改吗？"));
-
-    QPushButton *saveButton = box.addButton(tr("保存"), QMessageBox::AcceptRole);
-    box.addButton(tr("不保存"), QMessageBox::DestructiveRole);
-    QPushButton *cancelButton = box.addButton(tr("取消"), QMessageBox::RejectRole);
-    box.setDefaultButton(saveButton);
-    box.setEscapeButton(cancelButton);
-    box.exec();
-
-    if (box.clickedButton() == saveButton)
-        return 0;
-    if (box.clickedButton() == cancelButton)
-        return 2;
-    return 1;
-}
-
+/*
+ * 提示 / 确认 / 未保存改动三处的 QMessageBox 都退场了。
+ *
+ * 它们原来在这里 exec()：模态、系统自绘，弹出时整个程序点不动，长相也和
+ * 界面对不上（用户报的是"关闭键那个框和别处不一样"）。现在这三处都是 QML 那侧
+ * 的 AskCard —— 一块只占自己一小块的原生小窗，底下的界面原封不动。C++ 只负责
+ * 把话转成信号（下面这个），或者由 QML 自己在流程里弹（关闭标签那个队列）。
+ * 为什么不能在这里同步等回答，见 qml/components/AskCard.qml 开头。
+ */
 void EditorController::alert(const QString &title, const QString &text) {
-    QMessageBox box(m_widget);
-    box.setStyleSheet(QString::fromLatin1(dialogStyle()));  /* 灰黑底，见文件头的说明 */
-    box.ensurePolished();
-    box.adjustSize();
-    applyDarkTitleBar(&box);
-    box.setWindowTitle(title.isEmpty() ? tr("SmartClip") : title);
-    box.setIcon(QMessageBox::Warning);
-    box.setText(text);
-    box.addButton(tr("知道了"), QMessageBox::AcceptRole);
-    box.exec();
-}
-
-bool EditorController::confirm(const QString &title, const QString &text) {
-    QMessageBox box(m_widget);
-    box.setStyleSheet(QString::fromLatin1(dialogStyle()));  /* 灰黑底，见文件头的说明 */
-    box.ensurePolished();
-    box.adjustSize();
-    applyDarkTitleBar(&box);
-    box.setWindowTitle(title.isEmpty() ? tr("SmartClip") : title);
-    box.setIcon(QMessageBox::Question);
-    box.setText(text);
-    QPushButton *yes = box.addButton(tr("确定"), QMessageBox::AcceptRole);
-    QPushButton *no = box.addButton(tr("取消"), QMessageBox::RejectRole);
-    box.setDefaultButton(yes);
-    box.setEscapeButton(no);
-    box.exec();
-    return box.clickedButton() == yes;
+    emit alertRequested(title, text);
 }
 
 int EditorController::askLineNumber(int maxLine, int currentLine) {
