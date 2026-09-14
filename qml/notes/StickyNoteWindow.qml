@@ -471,16 +471,19 @@ Rectangle {
 
                     /*
                      * 键盘：Esc 先收菜单（菜单不接焦点，键盘事件都落在编辑区
-                     * 这儿），然后是"粘贴走纯文本"（便签不引外来样式）。
+                     * 这儿）。别的键一概不拦 —— 尤其是粘贴。
+                     *
+                     * 这里原来拦了一条"粘贴走纯文本"：`editor.insert(Clipboard.text)`。
+                     * 那条路两个毛病叠在一起 —— Clipboard 那个 QML 单例在便签
+                     * 这个引擎里解析不到（ReferenceError），而 TextEdit.insert()
+                     * 要 (位置, 文本) 两个参数，少给一个就报
+                     * "Insufficient arguments"。其实根本不用拦：编辑区的
+                     * textFormat 是 PlainText，TextEdit 自己处理 Ctrl+V 时落进来的
+                     * 就是纯文本（便签不吃外来样式）。
                      */
                     Keys.onPressed: (event) => {
                         if (event.key === Qt.Key_Escape && noteMenu.opened) {
                             noteMenu.closeMenu()
-                            event.accepted = true
-                            return
-                        }
-                        if (event.matches(StandardKey.Paste)) {
-                            editor.insert(noteWindow.clipboardText())
                             event.accepted = true
                         }
                     }
