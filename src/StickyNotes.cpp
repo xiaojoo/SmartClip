@@ -4,6 +4,7 @@
 #include "StickyNoteStore.h"
 
 #include <QColorDialog>
+#include <QClipboard>
 #include <QCursor>
 #include <QDialog>
 #include <QGuiApplication>
@@ -256,6 +257,12 @@ void StickyNoteWindow::setOpacityPercent(int percent) {
 
 void StickyNoteWindow::toggleStaysOnTop() {
     setStaysOnTop(!m_staysOnTop);
+}
+
+QString StickyNoteWindow::clipboardText() const {
+    /* 便签正文粘贴用（见头文件里的说明：QML 那边拿不到 Clipboard 单例） */
+    return QGuiApplication::clipboard() ? QGuiApplication::clipboard()->text()
+                                       : QString();
 }
 
 void StickyNoteWindow::placeAt(const QRect &rect) {

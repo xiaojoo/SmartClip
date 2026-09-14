@@ -245,7 +245,11 @@ Rectangle {
 
     ColumnLayout {
         anchors.fill: parent
-        anchors.margins: root.noteMargin
+        /*
+         * 边距不给整块了：头部（标题那条）和底部链接栏各自留 noteMargin，
+         * 正文那块要**铺满**便签左右 —— "整块都是输入区"（原来整块退 10px，
+         * 正文那块再往里缩 6px，看着就是便签里又套了一个输入框）。
+         */
         spacing: 8
 
         /* ------------------------------------------------------------------
@@ -255,6 +259,7 @@ Rectangle {
             id: header
             Layout.fillWidth: true
             Layout.preferredHeight: 22
+            Layout.margins: root.noteMargin
 
             /* 整条都是拖动把手（按住就搬窗口） */
             MouseArea {
@@ -381,32 +386,36 @@ Rectangle {
          * 正文
          * ---------------------------------------------------------------- */
         Item {
+            id: body
             Layout.fillWidth: true
             Layout.fillHeight: true
             /* 正文只占"卡片栏之外"的那部分高度，见 linksStrip 的 preferredHeight */
             Layout.minimumHeight: 40
+            /* 左右铺满便签（不再退纸边）：这一整块都是输入区 */
+            Layout.leftMargin: 0
+            Layout.rightMargin: 0
 
             Rectangle {
                 anchors.fill: parent
-                radius: 5
                 /*
                  * 正文底：便签纸本身稍微亮一点点，让它看着像"写在纸上的一块
-                 * 区域"，而不是浮在纸上的字。色的分量都在根上算好了
-                 * （见 washColor / washBorderColor），这里只做赋值。
+                 * 区域"。色的分量都在根上算好了（见 washColor），这里只做赋值。
+                 *
+                 * 不描边、不圆角：这一块现在铺满便签左右，描边会压在便签自己的
+                 * 边框上变成双线，圆角则在中间凭空多出两个角。
                  */
                 color: root.washColor
-                border.width: 1
-                border.color: root.washBorderColor
             }
 
             Flickable {
                 id: editorFlick
+                /* 铺满整块：能点、能写、能拖选的范围就是这一整块 */
                 anchors.fill: parent
-                anchors.margins: 6
                 clip: true
                 /* 让 TextEdit 自己长高，滚动交给这一层（便签正文通常不长） */
                 contentWidth: width
-                contentHeight: Math.max(height, editor.contentHeight + 2)
+                contentHeight: Math.max(height, editor.contentHeight
+                                                + editor.topPadding + editor.bottomPadding)
                 boundsBehavior: Flickable.StopAtBounds
                 ScrollBar.vertical: NoteScrollBar { }
 
@@ -418,6 +427,14 @@ Rectangle {
                      */
                     objectName: "noteEditor"
                     width: editorFlick.width
+                    /*
+                     * 高度至少铺满可视区。
+                     *
+                     * TextEdit 默认只有"内容那么高"（空便签就一行）—— 那样点便签
+                     * 下半截落在 Flickable 上，不聚焦，输入光标出不来。这里让它
+                     * 撑满整块，内容多了再跟着长，点击落在哪儿都能进编辑区。
+                     */
+                    height: Math.max(editorFlick.height, contentHeight)
                     /*
                      * 便签里写的是"字"，不是代码：等宽字体会让中文和英文行距
                      * 都变怪，用系统的界面字体。字号 13 是试出来的 ——
@@ -432,6 +449,16 @@ Rectangle {
                     persistentSelection: true
                     textFormat: TextEdit.PlainText
                     text: noteData.text
+                    /*
+                     * 留白挪到编辑区自己身上（原来是外面那层 Flickable 退 6px）：
+                     * 这样"能点能写"的范围是整块，只是字不贴着边 ——
+                     * 左边和头部的标题对齐（都是 noteMargin），右边多留一点
+                     * 给滚动条（它出现时压在这条留白上）。
+                     */
+                    leftPadding: root.noteMargin
+                    rightPadding: root.noteMargin + 6
+                    topPadding: 6
+                    bottomPadding: 8
 
                     /*
                      * 用户敲字 -> 回写数据（C++ 侧顺手重抽链接、排一次落盘）。
@@ -453,7 +480,7 @@ Rectangle {
                             return
                         }
                         if (event.matches(StandardKey.Paste)) {
-                            editor.insert(Clipboard.text)
+                            editor.insert(noteWindow.clipboardText())
                             event.accepted = true
                         }
                     }
@@ -461,13 +488,18 @@ Rectangle {
                     Text {
                         /* 空的时候那句提示；有字了就没了 */
                         visible: root.emptyText
-                        text: "随手写点什么…\n\n" +
-                              "（正文里的网址会自动变成下面的缩略图卡片）"
+                        text: "随手写点什么…"
                         font.pixelSize: 12
                         color: root.softInkColor
                         wrapMode: Text.WordWrap
-                        width: editor.width
-                        topPadding: 2
+                        /*
+                         * 跟着编辑区自己的留白走：x/y 是相对编辑区左上角算的
+                         * （不含 padding），所以这里手动让开，不然提示会贴在
+                         * 字该在的位置的左上角外面。
+                         */
+                        x: editor.leftPadding
+                        y: editor.topPadding
+                        width: editor.width - editor.leftPadding - editor.rightPadding
                     }
                 }
             }
@@ -484,6 +516,8 @@ Rectangle {
                                  ? (root.linksExpanded
                                     ? Math.min(linksFlow.height + 4, 150) : 1)
                                  : 0
+            /* 链接栏还是原来的纸边（只有正文那块铺满，见上面 ColumnLayout 的说明） */
+            Layout.margins: root.noteMargin
             visible: root.hasLinks
             radius: 5
             color: root.stripColor
@@ -718,16 +752,40 @@ Rectangle {
         border.color: "#4b4d4f"
         implicitWidth: tipLabel.implicitWidth + 12
         implicitHeight: tipLabel.implicitHeight + 8
-        /* 贴着鼠标那一格的下沿（别盖住图标自己） */
-        x: Math.max(2, Math.min(parent.width - width - 2, 0))
+        /*
+         * 提示不能比便签还宽：正文里那种长 URL（链接卡片上悬停也弹这个）会跟
+         * 便签一样宽甚至更宽，那就没地方摆了。收窄之后文字自己 elide。
+         */
+        width: Math.min(implicitWidth, Math.max(48, root.width - 8))
+        /*
+         * 位置：贴着锚点那一格（「⋯」按钮 / 链接卡片）的**下沿**，横向默认从
+         * 自己左边往右铺。
+         *
+         * 右边装不下就得往左让：提示是画在便签窗口里的，探出窗口的部分会被直接
+         * 裁掉。便签贴屏幕右沿时「⋯」本来就贴着窗口右边，原来的写法固定 x = 2、
+         * 一路往右铺，用户看到的就是"提示只剩左边几个字"。
+         *
+         * 用 mapToItem 换算到便签根上量：x 是相对锚点算的，而"有没有出便签"
+         * 得跟便签自己的宽度比。
+         */
+        x: {
+            const want = 2
+            const anchorInRoot = noteTip.parent.mapToItem(root, 0, 0).x
+            const over = anchorInRoot + want + noteTip.width - (root.width - 4)
+            const shifted = over > 0 ? want - over : want
+            /* 让过头了也别从左边探出去 */
+            return Math.max(shifted, 4 - anchorInRoot)
+        }
         y: parent.height + 4
 
         Label {
             id: tipLabel
             anchors.centerIn: parent
+            width: Math.min(implicitWidth, noteTip.width - 12)
             text: noteTip.text
             font.pixelSize: 10
             color: "#d6d7da"
+            elide: Text.ElideRight
         }
     }
 
@@ -735,7 +793,22 @@ Rectangle {
     component NoteScrollBar: ScrollBar {
         id: noteBar
         policy: ScrollBar.AsNeeded
+        /*
+         * 只有内容真的比可视区高的时候才让它出现。
+         *
+         * 为什么不靠 policy 就完事：Fusion 这套样式下 AsNeeded 不生效 ——
+         * 便签正文是空的时候 size 明明是 1（全在可视区里），滚动条照样画出来
+         * （用 qml.exe 单独量过：size=1 / visible=true）。所以这里自己判。
+         *
+         * 藏的时候**只改 opacity/enabled、不动 width**：宽度一变，那个"挂靠"
+         * 在 Flickable 上的定位就停在老值上（实测空便签先开、再贴进字之后，
+         * 滚动条会飘到左边去）。宽度固定 6，位置一次摆对就一直是对的；
+         * 不需要时不透明、也不接鼠标（不然右边会多一条 6px 的透明死区）。
+         */
+        readonly property bool needed: size < 1.0
         width: 6
+        opacity: needed ? 1.0 : 0.0
+        enabled: needed
         padding: 0
 
         contentItem: Rectangle {

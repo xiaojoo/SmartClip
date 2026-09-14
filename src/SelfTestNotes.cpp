@@ -359,6 +359,21 @@ int SelfTest::runNotes(ClipboardStore *store, TrayIcon *tray, EditorController *
         StickyNote *menuNote = probe;
         QObject *root = notes->windowRootForId(menuNote->id());
 
+        /*
+         * 先把真实光标挪开再去 hook 打开菜单。
+         *
+         * 菜单"鼠标挪开就收"是看门狗按光标位置判的（见 NoteMenu 的 watchHover）：
+         * hook 打开时如果真实光标**正好压在这块菜单上**，看门狗会把"进来过"
+         * 记成真，之后光标一离开（后面的用例都会挪它）菜单就被收掉 ——
+         * 于是"鼠标经过那条缝"那条会偶发飘红。这里的量全是按 hook 给的点算的，
+         * 真实光标在屏幕哪个角落都无所谓。
+         */
+        if (QScreen *menuScreen = QGuiApplication::primaryScreen()) {
+            const QRect a = menuScreen->availableGeometry();
+            QCursor::setPos(a.x() + 20, a.bottom() - 20);
+            settle();
+        }
+
         QVariant opened;
         QMetaObject::invokeMethod(root, "openNoteMenu", Q_RETURN_ARG(QVariant, opened),
                                   Q_ARG(QVariant, QVariant(1500)),

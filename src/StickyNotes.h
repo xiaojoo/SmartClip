@@ -166,6 +166,17 @@ public:
     Q_INVOKABLE void setOpacityPercent(int percent);
 
     /*
+     * 剪贴板里的纯文本（便签正文 Ctrl+V 粘贴用）。
+     *
+     * 为什么不直接在 QML 里用 `Clipboard.text`：便签这份 QML 跑在
+     * QQuickWidget 的引擎里，那个 `Clipboard` 单例在这儿根本解析不到 ——
+     * 一按 Ctrl+V 就刷 "ReferenceError: Clipboard is not defined"
+     * （粘贴本身走了 TextEdit 的默认处理，所以看着还能贴上，日志里一堆红）。
+     * 走 C++ 拿最稳，也顺便是"纯文本粘贴"（便签不吃外来样式）。
+     */
+    Q_INVOKABLE QString clipboardText() const;
+
+    /*
      * 自检用：当作用户在编辑区里敲了字。
      *
      * 只调 note.setText() 是不够的 —— 那条路绕过了 QML 的 TextEdit，测不到
