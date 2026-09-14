@@ -92,7 +92,14 @@ TrayIcon::TrayIcon(QWidget *host, Screenshot *shot, EditorController *cmd, Stick
     });
 
     QAction *quitAct = m_menu.addAction(QStringLiteral("退出 SmartClip"));
-    connect(quitAct, &QAction::triggered, qApp, &QApplication::quit);
+    /*
+     * 用 `exit(0)` 而不是 `qApp->quit()`：后者只是给 app 发一个 QEvent::Quit，
+     * 而 QApplication::event() 收到它会先 closeAllWindows()，**只要还剩一个露着
+     * 的顶层窗口就把事件吃掉** —— 桌面上摆着便签时，"退出 SmartClip"每点一次
+     * 只收起一块便签、程序不退（详见 WindowHelper::quitApp 那段）。
+     * exit(0) 直接结束事件循环，不碰窗口；便签清单在 main.cpp 收尾时落盘。
+     */
+    connect(quitAct, &QAction::triggered, qApp, []() { QCoreApplication::exit(0); });
 
     /* 白底（用户指定）；和贴图窗口那个右键菜单共用一份样式，见 LightMenu.h */
     applyLightMenuStyle(&m_menu);

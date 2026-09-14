@@ -1219,7 +1219,8 @@ Rectangle {
         if (act === "print") { view.printDocument(); return }
         /* 刷新 = 重扫磁盘（文件可能在别的程序里被改过 / 删过），再重建左树 */
         if (act === "refresh") { Store.rescan(); refresh(); return }
-        if (act === "quit") { Win.closeWindow(); return }
+        /* 退出 = 真退出进程（理由见上面 quitAsk 那段：有便签时关窗口退不掉） */
+        if (act === "quit") { Win.quitApp(); return }
         if (act === "clearsearch") { searchText = ""; topBar.clearSearch(); return }
 
         /* ---- 编辑 ---- */
@@ -1698,7 +1699,10 @@ Rectangle {
         parent: window
         onAnswered: (choice) => {
             if (choice === 0) Win.hideToTray()
-            else if (choice === 1) Win.closeWindow()
+            /* 「完全退出」= 真退出（见 WindowHelper::quitApp）：桌面上摆着便签时，
+               关主窗口是退不掉进程的 —— 便签都是各自的顶层窗口，Qt"最后一个窗口
+               关掉就退出"那条规则不成立，看着就是"只收进了托盘" */
+            else if (choice === 1) Win.quitApp()
         }
     }
 

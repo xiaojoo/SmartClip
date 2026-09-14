@@ -44,6 +44,32 @@ void WindowHelper::closeWindow()
         m_widget->close();
 }
 
+/*
+ * 真退出（见 WindowHelper.h 里那段说明）。
+ *
+ * 用的是 `QCoreApplication::exit(0)`，**不是 `quit()`** —— 这两个在这套界面上不等价，
+ * 而 `quit()` 在"桌面上摆着便签"时是**完全无效**的：
+ *
+ *   * `quit()` 只是往 QApplication 自己发一个 QEvent::Quit；
+ *   * `QApplication::event()` 收到它先 `closeAllWindows()` —— 便签窗口的
+ *     closeEvent 是 `event->ignore()` + 藏起来（关窗口 = 收起那一块，见
+ *     StickyNoteWindow::closeEvent），于是"关"完还有窗口露着；
+ *   * 接着它逐个看顶层窗口，**只要还有一个露着的就 `e->ignore(); return true;`
+ *     —— Quit 事件被吃掉，程序不退出**。
+ *
+ * 用户看到的就是："有多个便签，点退出会关掉一个便签，程序还是不会退出"
+ * （每点一次关掉/收起一块，另一块又被 repairGroup 叫出来，循环往复）。
+ *
+ * `exit(0)` 直接让事件循环退出（见 Qt 源码 QCoreApplication::exit），不碰
+ * 任何窗口 —— 这也正是用户要的："不要关闭便签，程序直接关闭"。便签窗口原样
+ * 留在数据里（visible / 位置都没变），main.cpp 收尾时 notes.shutdown() 会把
+ * 清单落盘，下次启动那几块便签照旧摆在桌上。
+ */
+void WindowHelper::quitApp()
+{
+    QCoreApplication::exit(0);
+}
+
 void WindowHelper::askQuit()
 {
     /*

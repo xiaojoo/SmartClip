@@ -111,6 +111,16 @@ Window {
     property var opacities: []
     /* 正文里的链接 */
     property var links: []
+    /*
+     * 组合那一栏：可以叠到这一块身上的便签（"与「便签 3」组合"那一串）。
+     * 每条是 { id, label }，点一条走 fireGroupMate（act 形如 "group:<id>"）。
+     *
+     * 这是"组合"（归到一摞里）的**菜单入口**；用鼠标做就是拖一块便签的头部
+     * 到另一块身上松手（见 StickyNotes::dropNoteOn）。
+     */
+    property var groupMates: []
+    /* 这一块自己在不在某一摞里（决定那一条是"组合成摞"还是"拆分组合"） */
+    property bool grouped: false
 
     property string currentColor: ""
     property int currentOpacity: 100
@@ -137,6 +147,8 @@ Window {
             return 2 * panePadding + (opacities ? opacities.length : 0) * itemHeight
         if (kind === "links")
             return 2 * panePadding + (links ? links.length : 0) * itemHeight
+        if (kind === "group")
+            return 2 * panePadding + (groupMates ? groupMates.length : 0) * itemHeight
         return 0
     }
 
@@ -520,7 +532,17 @@ Window {
     function rebuild(node) {
         var pinned = node ? node.staysOnTop : true
         var locked = node ? node.locked : false
-        var note = node && node.noteData ? node.noteData : null
+        /*
+         * 这一块便签的数据。
+         *
+         * **要从 paper（便签的 QML 根项）上拿**，不能从 node 上拿：node 是
+         * C++ 那个 StickyNoteWindow，它身上没有 noteData 这个属性（那是便签
+         * QML 根上的属性）—— 写成 node.noteData 会静默拿到 undefined，
+         * 菜单里所有"看这条便签状态"的条目（正文里的链接 / 组合那一栏）就全是
+         * 空的，还不报错。踩过：组合那一栏永远是空的。
+         */
+        var note = paper && paper.noteData ? paper.noteData
+                                           : (node && node.noteData ? node.noteData : null)
         var linkCount = note ? note.linkCount : 0
         var total = notes ? notes.count : 0
         var shown = notes ? notes.visibleCount : 0
@@ -548,6 +570,18 @@ Window {
             }
         }
 
+        /*
+         * 组合那一栏的清单：叠到这一块身上的候选。
+         *
+         * 那份清单在 C++ 侧算（Notes.groupMatesFor）—— QML 这边翻不到 store
+         * （store() 不是 Q_INVOKABLE，读到 undefined，菜单会静默变空）。
+         *
+         * 已经在同一摞里的不列（点了什么也不会发生）；**别的摞里的要列**：选它
+         * 就是把两摞并成一摞（见 StickyNotes::groupWith）。自己也不列。
+         */
+        grouped = note ? note.groupId !== "" : false
+        groupMates = notes ? notes.groupMatesFor(note ? String(note.id) : "") : []
+
         var out = []
         out.push({ label: "新建便签", act: "new", icon: "plus", shortcut: "Ctrl+Alt+N" })
         out.push({ label: shown > 0 ? "排列所有便签（" + shown + " 块）" : "排列所有便签",
@@ -565,6 +599,25 @@ Window {
         out.push({ label: "锁定（鼠标穿透）", act: "lock", icon: "lock", checked: locked })
         out.push({ label: lockedTotal > 0 ? "解锁所有便签（" + lockedTotal + "）" : "解锁所有便签",
                    act: "unlock", icon: "unlock", disabled: lockedTotal === 0 })
+        out.push({ separator: true })
+        /*
+         * 组合那一条（**只有"组合"这一个意思**：哪几块归到一起）。
+         *
+         *   * 已经在某一摞里 -> 只给"拆分组合"，没有子面板；
+         *   * 别处还有能组合的便签 -> 带子面板，里面一条一块（"与「便签 3」组合"）；
+         *   * 一块能组合的都没有 -> 这一条根本不出现（没什么可点的）。
+         *
+         * 用鼠标做同一件事就是"拖一块便签的头部到另一块身上"。
+         *
+         * 名字里不带"摞 / 叠"：摆法（谁叠在谁上面、错开多少）是**排列**那件事，
+         * 和"哪几块归到一起"无关 —— 早先这条叫"组合成摞"，把两件事混成了一个
+         * 说法（用户明确要求分开）。
+         */
+        if (grouped) {
+            out.push({ label: "拆分组合", act: "ungroup", icon: "group" })
+        } else if (groupMates.length > 0) {
+            out.push({ label: "与…组合", act: "group", flyout: "group", icon: "group" })
+        }
         out.push({ separator: true })
         out.push({ label: "收起这块便签", act: "hide", icon: "hide" })
         out.push({ label: "收起其他便签", act: "hideothers", icon: "hide", disabled: shown <= 1 })
@@ -603,6 +656,16 @@ Window {
     /* 触发一条命令 */
     function fire(act) {
         var target = win
+        /*
+         * 这一块便签的**数据**只在 paper（便签的 QML 根项）上，别从 target
+         * （C++ 那个 StickyNoteWindow）上拿 —— 它身上没有 noteData 这个属性，
+         * 写成 target.noteData 会静默拿到 undefined。
+         *
+         * 踩过：`notes.ungroup(target.noteData)` 在 C++ 那边收到空指针、直接
+         * return false，菜单里点「拆分组合」**从来没有任何反应**，还不报错
+         * （和 rebuild 里那条注释是同一个坑，那条修了、这条漏了）。
+         */
+        var note = paper ? paper.noteData : null
         closeMenu()
         if (act === "new")
             notes.createNote()
@@ -626,6 +689,32 @@ Window {
             target.setLocked(!target.locked)
         else if (act === "pickColor")
             customColorRequested()
+        else if (act === "ungroup")
+            notes.ungroup(note)
+    }
+
+    /*
+     * 组合那一栏里点了一条（"与「便签 3」组合"）。
+     *
+     * 和别的条目不一样：它得带一个参数（跟**哪一块**组合）。act 统一写成
+     * "group:<便签 id>"，转发给便签 QML 根的 handleMenuAct —— 便签这边负责把
+     * id 换成那条数据再叫 Notes.groupWith（见 StickyNoteWindow.qml）。
+     */
+    function fireGroupMate(mateId) {
+        /*
+         * handleMenuAct 是**便签 QML 根对象**（paper）上的函数，不在 C++ 那个
+         * StickyNoteWindow（win）上 —— 写成 win.handleMenuAct 会报
+         * "Property 'handleMenuAct' of object StickyNoteWindow(…) is not a function"
+         * （踩过）。win 上那些能用的是 C++ 侧的 Q_INVOKABLE（closeNote /
+         * copyText / setLocked…），两条路别混。
+         *
+         * 返回值一路带出去（成没成组）：自检按它判断这一下真的成了。
+         */
+        var target = paper
+        closeMenu()
+        if (target && mateId)
+            return target.handleMenuAct("group:" + mateId)
+        return false
     }
 
     /* ---- 自检口子（见 src/SelfTest.cpp）：外面点不出 hover，只能从进程内走 ---- */
@@ -1083,7 +1172,8 @@ Window {
                             hoverEnabled: true
                             cursorShape: Qt.PointingHandCursor
                             onClicked: {
-                                var note = root.win ? root.win.noteData : null
+                                /* 数据在 paper 上，不在 C++ 那个 win 上（见 fire() 的说明） */
+                                var note = root.paper ? root.paper.noteData : null
                                 var index = linkRow.index
                                 root.closeMenu()
                                 if (note)
@@ -1093,10 +1183,47 @@ Window {
                     }
                 }
             }
+            /* ---- 组合：与哪一块组合（一条一块） ---- */
+            Column {
+                visible: root.flyoutKind === "group"
+                anchors.fill: parent
+                anchors.margins: root.panePadding
+                clip: true
+
+                Repeater {
+                    model: root.groupMates
+
+                    delegate: Rectangle {
+                        id: mateRow
+                        required property var modelData
+                        width: parent.width
+                        height: root.itemHeight
+                        radius: 4
+                        color: mateHit.containsMouse ? root.hoverColor : "transparent"
+
+                        Label {
+                            anchors.fill: parent
+                            anchors.leftMargin: 8
+                            anchors.rightMargin: 8
+                            verticalAlignment: Text.AlignVCenter
+                            text: mateRow.modelData.label
+                            font.pixelSize: 11
+                            color: root.textColor
+                            elide: Text.ElideRight
+                        }
+
+                        MouseArea {
+                            id: mateHit
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: root.fireGroupMate(mateRow.modelData.id)
+                        }
+                    }
+                }
+            }
         }
     }
-
-    /* 这一格色块是不是当前底色 */
     function isCurrent(hex) {
         return String(hex).toLowerCase() === root.currentColor
     }
@@ -1188,6 +1315,15 @@ Window {
                 ctx.moveTo(2.5, 4); ctx.lineTo(11.5, 4)
                 ctx.moveTo(7, 6.5); ctx.lineTo(7, 12)
                 ctx.moveTo(4.5, 9.5); ctx.lineTo(7, 12); ctx.lineTo(9.5, 9.5)
+                ctx.stroke()
+            } else if (k === "group") {
+                /*
+                 * 组合：两张错开的纸（后面那张只露一条边）—— 就是便签归到
+                 * 一摞里时叠在一起的样子。
+                 */
+                ctx.strokeRect(2.5, 1.5, 9, 8)
+                ctx.beginPath()
+                ctx.moveTo(4.5, 11.5); ctx.lineTo(11.5, 11.5); ctx.lineTo(11.5, 4.5)
                 ctx.stroke()
             } else if (k === "trash") {
                 ctx.beginPath()

@@ -46,16 +46,16 @@ Rectangle {
     property int windowNumber: 0
 
     /*
-     * 便签纸本身。
+     * 窗口这一层**整块透明**，便签纸是下面那张 paper。
      *
-     * 圆角 + 描边：窗口是无边框透明的，圆角要自己画；外面那圈描边和主窗口
-     * 一个做法（见 Main.qml 末尾那条 border 矩形），否则深色纸贴在深色桌面上
-     * 边界会糊掉。真正的透明裁剪由 QWidget 的 WA_TranslucentBackground 负责。
+     * 为什么把"纸"从根上拆下来：一摞便签左边那排切换色块要画在**卡片外面**
+     * （贴着桌面，见 tabStrip），窗口左边给色块让出的那一条就必须透出桌面 ——
+     * 根这一层要是还刷着纸色，色块看着就是"画在卡片里"（用户截图报的就是这个）。
+     *
+     * 圆角 / 描边跟着挪到 paper 上（原来画在这一层）。真正的透明裁剪由 QWidget
+     * 的 WA_TranslucentBackground 负责（见 src/StickyNotes.cpp 的构造函数）。
      */
-    color: root.noteData ? root.noteData.color : "transparent"
-    radius: 8
-    border.width: 1
-    border.color: root.softInkColor
+    color: "transparent"
 
     /*
      * 整块便签的透明度（菜单里「透明度」那条，见 StickyNote::opacity）。
@@ -121,6 +121,90 @@ Rectangle {
     readonly property real editorWidth: editor.width
     /* 头部那一条的鼠标形状（拖动把手）：自检拿它确认"按住头部能搬窗口" */
     readonly property string headerCursor: "open-hand"
+    /*
+     * 一摞便签那几个状态（转发 noteWindow 上的属性）：自检量"这一块在不在
+     * 一摞里、是不是露头那张"直接读根对象就行，不用再去 C++ 里绕。
+     */
+    readonly property bool inGroup: noteWindow ? noteWindow.inGroup : false
+    readonly property bool groupActive: noteWindow ? noteWindow.groupActive : false
+    readonly property int groupSize: noteWindow ? noteWindow.groupSize : 0
+    /* 有没有一块便签正被拖到这一块身上（头部那条会亮，见下面头部里的提示块） */
+    readonly property bool dropPreview: noteWindow ? noteWindow.dropPreview : false
+    /*
+     * 左边那条"文件夹标签"上画什么：**它所在那一摞（组合）里的每一块**一个
+     * 色块（自己也在里面）。
+     *
+     * 只有**组合过**的便签才有这条标签条（用户明确要求："这个左边的 tab 不是
+     * 每个卡片都有，只有组合的才有"）—— 没组合过的单独一块便签左边干干净净。
+     * 归成一摞之后，界面上只摆一张纸（露头那块），其余几块收成这排色块，
+     * 点一下换上来（见下面 tabStrip）。清单是 C++ 算好给的（窗口自己翻不到
+     * 别的便签的数据），这里只负责画。
+     */
+    readonly property var groupTabs: noteWindow ? noteWindow.groupTabs : []
+    /*
+     * 这一块是摞里"收起来的那张纸"：界面上它整块**不画**，只在标签条上留一个
+     * 色块。用 collapsed 而不是把窗口藏掉 —— 藏窗口那一下整摞会闪，而且
+     * "露着的那一块"和"标签条上选中的那一个"就对不上了。
+     */
+    readonly property bool collapsed: noteWindow ? noteWindow.tabbed : false
+    /*
+     * 要不要画标签条 / 那条占多宽 —— **由 C++ 明确推过来**（见下面
+     * Connections 里的 syncTabStrip），不写成"groupTabs.length > 1"那种绑定。
+     *
+     * 为什么不用绑定：`groupTabs` 是 C++ 的属性，它的 NOTIFY 到了 QML 这边
+     * 有时候推不动那几个派生值（实测：窗口刚建时是"没组合"-> 算出
+     * tabStripWidth = 0 / hasTabStrip = false，之后组合好了、C++ 那边
+     * groupTabs 已经是 3 项，这几个值却还停在 0/false —— 标签条整条不画，
+     * 屏幕上就是一张空白卡片，用户报的就是这个）。
+     *
+     * 现在这两个值只有一处会改：C++ 的 tabsChanged 一到，就在那个槽里现算
+     * 一次（colorChanged / 建组 / 拆组 / 换纸都会发 tabsChanged，见
+     * StickyNoteWindow::notifyTabsChanged）。窗口左边那条宽度的"真相"本来也
+     * 在 C++（frameRectFor 按 tabStripWidth() 算），这里跟着它走就一致了。
+     */
+    property bool hasTabStrip: false
+    property real tabStripWidth: 0
+    /* 自检用：标签条上有几个色块（自己那块也在里面） */
+    readonly property int tabCount: groupTabs.length
+    /*
+     * 那一排色块**是不是由这一块画**。
+     *
+     * 一摞便签是各自独立的窗口、每块都拿着同一份 groupTabs —— 同组几块要是都
+     * 画一遍，后面几块的色块会正好落在前面那块**透明的那一条**上，斜着叠成
+     * 一串。所以只让**露头那块**（完整露在桌面上的那张纸）画；收起来的那块
+     * 整块不画、只在别人的标签条上占一个色块（见 collapsed）。
+     */
+    readonly property bool chipStripDrawn: hasTabStrip && !collapsed
+
+    /*
+     * C++ 那边"标签条状态变了"的通知：现读一次 groupTabs 并把
+     * hasTabStrip / tabStripWidth 定下来（读的时候用 noteWindow.groupTabs
+     * 而不是上面那个只读绑定，免得又踩到绑定不刷新的坑）。
+     */
+    function syncTabStrip() {
+        var tabs = noteWindow ? noteWindow.groupTabs : []
+        var on = tabs ? tabs.length > 1 : false
+        if (hasTabStrip !== on)
+            hasTabStrip = on
+        var w = on ? 34 : 0
+        if (tabStripWidth !== w)
+            tabStripWidth = w
+    }
+
+    Connections {
+        target: noteWindow
+        function onTabsChanged() { root.syncTabStrip() }
+    }
+    Component.onCompleted: root.syncTabStrip()
+    /*
+     * 自检用：便签纸的左边缘 / 色块的右边缘（都是窗口坐标系里的 x）。
+     *
+     * 规矩是**色块整块落在纸外面**（chipRight < paperLeft）—— 这就是"切换 tab
+     * 在卡片外边"唯一能量出来的形式。只量 tabStripWidth > 0 是不够的：纸要是
+     * 还刷满整个窗口（色块压在纸上），那个断言照样是绿的（用户截图报的正是这个）。
+     */
+    readonly property real paperLeft: paper.x
+    readonly property real chipRight: tabStrip.x + tabColumn.x + tabColumn.width
     /* 正文里链接那一栏是不是展开着（自检看这个 + cardCount） */
     property bool linksExpanded: true
     /* 头部那个「⋯」菜单开着没（自检看它，见 windowState） */
@@ -149,10 +233,26 @@ Rectangle {
      *
      * 菜单本身不在这个窗口里（它是独立的 Window），所以点在菜单上不会走到
      * 这儿 —— 不用担心把菜单自己的点击吃掉。
+     *
+     * 组合那一句同理：这一块要是叠在下面（露着一条标题栏），点它就是
+     * "把这张纸抽到最上面"。onPressed 而不是 onTapped —— 像 Windows 便签那样
+     * 按下去就换到前面，不用等抬手（抬手那一下多半已经落在编辑区里在选字了）。
+     * 不抢鼠标：TapHandler 只是旁听，TextEdit 该收的按下事件照收。
      */
     TapHandler {
         gesturePolicy: TapHandler.DragThreshold
         onTapped: (eventPoint) => {
+            /*
+             * 点这一块 = 把它抽到最上面（叠着的纸里点了下面那张）。
+             *
+             * 用 onTapped（按下 + 抬起、没怎么动）而不是 onPressed：TapHandler
+             * 是**旁听**鼠标事件的（不能盖 MouseArea，否则编辑区选字、拖动把手
+             * 全完蛋），而 Qt 会把鼠标事件发给所有收到它的窗口 —— 别处点一下、
+             * 这一块刚好在那时候露出来，也会顺带触发。真点一下有完整的
+             * 按下 + 抬起，onTapped 不会被那种误触带上；promoteInGroup 自己
+             * 还会再确认一次"这一块是当前活动窗口"（见那里的说明）。
+             */
+            noteWindow.promoteInGroup()
             if (!noteMenu.opened)
                 return
             /* 头部那个「⋯」按钮自己会开/收，交给它，别在这儿抢先收掉 */
@@ -208,6 +308,18 @@ Rectangle {
             noteWindow.setOpacityPercent(parseInt(act.substring(8)))
             return true
         }
+        /*
+         * 组合：菜单里"与…组合"那一条点下去就是它（act 形如
+         * "group:<便签 id>"）。走的是和 C++ 直调同一条路 —— 菜单只负责把
+         * "和哪一块"告诉这边，怎么摆那一摞是 StickyNotes 的事。
+         */
+        if (act.indexOf("group:") === 0) {
+            var mate = findNoteById(act.substring(6))
+            if (!mate)
+                return false
+            return Notes.groupWith(noteData, [mate])
+        }
+        if (act === "ungroup") { return Notes.ungroup(noteData) }
         if (act === "pin") { noteWindow.toggleStaysOnTop(); return true }
         if (act === "lock") { noteWindow.setLocked(!noteWindow.locked); return true }
         if (act === "hide") { noteWindow.closeNote(); return true }
@@ -217,8 +329,19 @@ Rectangle {
         return false
     }
 
-    /* 在正文里定位第 index 条链接：把光标挪到那一行（卡片右下角那个小箭头） */
-    function revealLink(index) {
+    /* 按便签 id 找到那条数据（菜单里"与…组合"点了一条，拿到的就是这个 id） */
+    function findNoteById(id) {
+        if (!Notes || !id)
+            return null
+        var all = Notes.noteList()
+        for (var i = 0; i < all.length; ++i) {
+            if (all[i] && all[i].id === id)
+                return all[i]
+        }
+        return null
+    }
+
+    /* 在正文里定位第 index 条链接：把光标挪到那一行（卡片右下角那个小箭头） */    function revealLink(index) {
         if (!root.noteData || !root.noteData.links || index < 0 || index >= root.noteData.links.count)
             return
         /* role 号从 C++ 那边读（NoteLinkModel::lineRole），别在这里写魔数 */
@@ -243,14 +366,254 @@ Rectangle {
      * 逻辑更直白，也不会在正文高频改动时和视图复用打架。
      */
 
-    ColumnLayout {
+    /*
+     * 便签纸（卡片本体）。
+     *
+     * 左边那条 tabStripWidth 是**留给标签条**的：色块画在那条里，是露在卡片
+     * **外面**的一张张"文件夹标签"（见下面 tabStrip）；所以这张纸从色块右边
+     * 开始，窗口左边那一条留透明、让桌面透上来 —— 用户要的就是这个观感：
+     * 色块贴着桌面，纸是一张独立的卡片。
+     *
+     * 便签纸的**尺寸不变**，只是整张往右挪了标签条那一条：窗口 = 标签条 + 纸
+     * （C++ 的 frameRectFor 就是按这个把窗口往左长出来的，便签自己的几何
+     * 从头到尾都是这张纸），纸右边 / 上边 / 下边都还贴着窗口边（见 content 的
+     * leftMargin 也是同一个数，正文跟着纸走）。
+     *
+     * 圆角 + 描边：窗口是无边框透明的，圆角要自己画；外面那圈描边和主窗口
+     * 一个做法（见 Main.qml 末尾那条 border 矩形），否则深色纸贴在深色桌面上
+     * 边界会糊掉。
+     */
+    Rectangle {
+        id: paper
         anchors.fill: parent
+        anchors.leftMargin: root.tabStripWidth
+        color: root.noteData ? root.noteData.color : "transparent"
+        radius: 8
+        border.width: 1
+        border.color: root.softInkColor
+    }
+
+    /*
+     * ===========================================================================
+     * 左边那条"文件夹标签"：组合里的便签互相切换
+     * ===========================================================================
+     *
+     * 一块便签**组合**进某一摞之后，界面上只摆那一张纸（露头那块），同组其余
+     * 几块收成左边这排色块；点一下就把那一块换上来（见 StickyNotes::
+     * switchGroupTab）。没组合过的便签**没有这条标签条** —— 用户明确要求：
+     * "这个左边的 tab 不是每个卡片都有，只有组合的才有"。
+     *
+     * 几件必须说清楚的事：
+     *   * 色块的样子按用户给的参考图：矩形**右下角切掉一个斜角**（像一张文件夹
+     *     标签），选中的那个描一圈重边；
+     *   * 色块**露在卡片外面**、贴着桌面（纸从它右边开始，见上面 paper），和纸
+     *     之间留着一条缝（那条缝在窗口里是透明的，桌面直接透上来）；
+     *   * 颜色 / 编号是**每一块便签自己的**（groupTabs 里带来的）——这一块窗口
+     *     拿不到别的便签的数据，那列表是总管算好给的（见 StickyNoteWindow::
+     *     groupTabs）。
+     *
+     * 竖直排在左边、贴着顶：参考图就是从上往下排的，一眼能数出摞里有几张纸。
+     * 摆不下（一摞里块数多、便签又被拉得很矮）就滚动。
+     */
+    Item {
+        id: tabStrip
+        /*
+         * 色块只由**露头那块**画（见 chipStripDrawn 的说明）：同组几块要是都画
+         * 一遍，后面几块的色块会落在前面那块透明的那一条上，斜着叠成一串。
+         */
+        visible: root.chipStripDrawn
+        /* 抬一层：悬停提示往右压在正文那一带上，别被后声明的 content 盖住（见下面 tabTip） */
+        z: 5
+        x: 0
+        y: root.noteMargin
+        width: root.tabStripWidth
+        height: Math.max(0, root.height - 2 * root.noteMargin)
+
+        /* 色块：宽 = 标签条那条宽，高 = 宽（参考图里就是这个比例） */
+        readonly property real chipSize: root.tabStripWidth - 6
+        /* 右下角那个斜角多大（参考图里约 45°、四分之一条边） */
+        readonly property real chipBevel: 6
+
+        /*
+         * 上面那排色块：超出可视区就滚动（ListView 自己管内容高度）。
+         *
+         * 用 ListView 而不是 Flickable + Column：色块数量就是"这一摞里有几块
+         * 便签"，多的时候列表滚动比手算便宜，也顺手带上滚轮。
+         */
+        ListView {
+            id: tabColumn
+            x: 3
+            width: tabStrip.chipSize
+            height: tabStrip.height
+            spacing: 4
+            clip: true
+            boundsBehavior: Flickable.StopAtBounds
+            model: root.groupTabs
+            interactive: contentHeight > height
+            ScrollBar.vertical: NoteScrollBar { }
+
+            delegate: Item {
+                id: chip
+                required property var modelData
+                /* 选中的那个亮一圈（它就是右边露着的那张纸） */
+                readonly property bool selected: modelData.selected === true
+                width: tabColumn.width
+                height: tabColumn.width
+
+                Canvas {
+                    id: chipShape
+                    anchors.fill: parent
+                    antialiasing: true
+
+                    /*
+                     * 形状：整块减掉右下角那个三角（参考图里"文件夹标签"的样子）。
+                     * 用 Canvas 画而不是 Rectangle + radius：带圆角的矩形切一个
+                     * 斜角，QML 里没有现成的图元（Rectangle 只有一个 radius）。
+                     */
+                    onPaint: {
+                        const ctx = getContext("2d")
+                        const w = width
+                        const h = height
+                        const b = tabStrip.chipBevel
+                        /*
+                         * 清干净用 clearRect + beginPath，**不要用 ctx.reset()**：
+                         * 这个 Qt 里的 Canvas 没有实现 reset（调了什么都不发生，
+                         * 路径是空的 -> fill() 画不出任何东西），色块就"根本没画"
+                         * —— 用户看到的就是一张空白卡片、左边一格色块都没有
+                         * （踩过：抓住图里第 17 列整列都是透明的，才定位到这里）。
+                         * 本文件别的 Canvas 也都是 clearRect 起手。
+                         */
+                        ctx.clearRect(0, 0, w, h)
+                        ctx.beginPath()
+                        ctx.moveTo(0, 0)
+                        ctx.lineTo(w, 0)
+                        ctx.lineTo(w, h - b)
+                        ctx.lineTo(w - b, h)
+                        ctx.lineTo(0, h)
+                        ctx.closePath()
+                        ctx.fillStyle = chip.modelData.color
+                        ctx.fill()
+                        ctx.lineWidth = chip.selected ? 2 : 1
+                        ctx.strokeStyle = chip.selected
+                                          ? Qt.rgba(root.inkColor.r, root.inkColor.g,
+                                                    root.inkColor.b, 0.75)
+                                          : Qt.rgba(0, 0, 0, 0.28)
+                        ctx.stroke()
+                    }
+
+                    /*
+                     * 要重画的两个时机（Canvas 不会自己跟着绑定走）：
+                     *   * 尺寸定下来的时候（Component.onCompleted 那一下宽度很可能
+                     *     还是 0，画出来就是一片空白 —— 色块看着"根本没画"）；
+                     *   * 选中状态 / 委托被复用到另一条色块上（modelData 换了）。
+                     */
+                    onWidthChanged: requestPaint()
+                    onHeightChanged: requestPaint()
+                    Component.onCompleted: requestPaint()
+                }
+
+                MouseArea {
+                    id: chipHit
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: {
+                        /* 点自己那一块什么都不用做（它已经露着了） */
+                        if (!chip.selected)
+                            noteWindow.selectGroupTab(chip.modelData.id)
+                    }
+
+                    /*
+                     * 悬停：把"哪一块、它在哪一格"报给标签条那一层的提示（见下面
+                     * tabTip）。**提示不能挂在色块身上** —— 色块在 clip: true 的
+                     * ListView 里，委托是它的子树，画在色块外面的提示整块被裁掉
+                     * （用户看到的就是"气泡只剩左边两个字"）。
+                     */
+                    onContainsMouseChanged: {
+                        if (containsMouse) {
+                            tabStrip.hoveredChipId = chip.modelData.id
+                            tabStrip.hoveredChipNumber = chip.modelData.number
+                            /* 上下沿都按标签条那一层算（色块滚动时跟着一起变） */
+                            tabStrip.hoveredChipTop = chip.mapToItem(tabStrip, 0, 0).y
+                            tabStrip.hoveredChipBottom = tabStrip.hoveredChipTop + chip.height
+                        } else if (tabStrip.hoveredChipId === chip.modelData.id) {
+                            /*
+                             * 委托会被复用到别的色块上，鼠标从这一块挪到那一块时
+                             * 两条（离开 / 进入）的先后不定：只在"离开的正是现在
+                             * 报着的那一块"时才清，别把刚报上来的那次清掉。
+                             */
+                            tabStrip.hoveredChipId = ""
+                        }
+                    }
+                }
+            }
+        }
+
+        /*
+         * 悬停提示：贴着被悬停那块色块的下沿（用户要的"气泡"）。
+         *
+         * **提示不能挂在色块那个委托里**：色块在 clip: true 的 ListView 里
+         * （滚出可视区的色块不许画到便签外面去），委托是它的子树 —— 提示挂在
+         * 色块身上，整块就被裁在那一条 28px 宽的色块列里；用户看到的是"气泡
+         * 只剩左边两个字"（他们截了图："这个标签的气泡有些被截断了"）。
+         *
+         * 所以提示挂在标签条这一层（ListView 的**兄弟**），由色块委托把"哪一块
+         * 被悬停、它在哪一格"报上来（见上面 chipHit.onContainsMouseChanged）。
+         * 同一时刻只有一条提示，也就只有一个实例。
+         *
+         * 那个空 Item 只是个挂点：悬停时它挪到色块下沿，NoteTip 照它自己那条
+         * 规矩（贴着锚点父项的下沿、横着不许探出便签）画出来 —— 这一带已经出了
+         * ListView，裁不着了。x 跟着色块那一列，横着的位置和以前一样。
+         *
+         * 整条标签条抬一层（z）：提示往右会压在正文 / 链接卡片那一带上，不抬
+         * 的话它会被**后声明的** content 盖住（色块自己不越过便签纸，抬了不影响
+         * 别的）。
+         */
+        property string hoveredChipId: ""
+        property int hoveredChipNumber: 0
+        property real hoveredChipTop: 0
+        property real hoveredChipBottom: 0
+
+        Item {
+            id: tabTipAnchor
+            x: tabColumn.x
+            /*
+             * 挂点默认落在色块下沿（提示就画在它下面 4px）；下面真摆不下
+             * （便签矮、色块又多）就翻到色块上面去 —— 提示画在窗口里，探出
+             * 窗口的那部分和挂在色块身上时一样会被裁掉。
+             *
+             * 摆法写成绑定（不写在那条悬停报告里）：提示的高度跟着文字走，
+             * 换一块色块 / 便签被拉高拉矮，这里都会自己重算一次。
+             */
+            y: tabStrip.hoveredChipBottom + 4 + tabTip.height > tabStrip.height
+               ? Math.max(0, tabStrip.hoveredChipTop - 8 - tabTip.height)
+               : tabStrip.hoveredChipBottom
+            width: tabColumn.width
+
+            NoteTip {
+                id: tabTip
+                hovered: tabStrip.hoveredChipId !== ""
+                /* 只报编号：这一摞里有哪几张纸，用户点一下就知道了（不要多余的说明） */
+                text: "便签 " + tabStrip.hoveredChipNumber
+            }
+        }
+    }
+
+    ColumnLayout {
+        id: content
+        anchors.fill: parent
+        /*
+         * 左边那条标签条占一条（见上面 tabStrip）：卡片从它右边开始，所以
+         * 色块是露在卡片外面的。
+         */
+        anchors.leftMargin: root.tabStripWidth
         /*
          * 边距不给整块了：头部（标题那条）和底部链接栏各自留 noteMargin，
          * 正文那块要**铺满**便签左右 —— "整块都是输入区"（原来整块退 10px，
          * 正文那块再往里缩 6px，看着就是便签里又套了一个输入框）。
          */
         spacing: 8
+        visible: !root.collapsed
 
         /* ------------------------------------------------------------------
          * 头部：编号 + 拖动条 + 一排按键
@@ -268,6 +631,23 @@ Rectangle {
                 cursorShape: Qt.OpenHandCursor
                 acceptedButtons: Qt.LeftButton
                 onPressed: noteWindow.beginDrag()
+            }
+
+            /*
+             * 落点提示：有别的一块便签正被拖到这一块身上（拖头部叠过来），
+             * 整条头部亮一层 —— 松手就是把两块**组合**到一摞里（见
+             * StickyNotes::updateDropTarget）。不亮的话用户不知道松手会发生
+             * 什么，只能靠猜。
+             */
+            Rectangle {
+                anchors.fill: parent
+                anchors.margins: -3
+                radius: 4
+                z: -1
+                visible: root.dropPreview
+                color: Qt.rgba(root.inkColor.r, root.inkColor.g, root.inkColor.b, 0.22)
+                border.width: 1
+                border.color: Qt.rgba(root.inkColor.r, root.inkColor.g, root.inkColor.b, 0.55)
             }
 
             RowLayout {
@@ -358,7 +738,8 @@ Rectangle {
 
                     NoteTip {
                         hovered: menuHit.containsMouse && !noteMenu.opened
-                        text: "便签菜单（颜色 / 透明度 / 置顶 / 删除…）"
+                        /* 只报这是哪个按钮：里面有什么，点开就看见了（不要多余的说明） */
+                        text: "便签菜单"
                     }
                 }
             }

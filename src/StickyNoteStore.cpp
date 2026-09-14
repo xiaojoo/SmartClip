@@ -154,6 +154,13 @@ void StickyNote::setOpacity(qreal opacity) {
     emit opacityChanged();
 }
 
+void StickyNote::setGroupId(const QString &id) {
+    if (m_groupId == id)
+        return;
+    m_groupId = id;
+    emit groupIdChanged();
+}
+
 int StickyNote::opacityPercent() const {
     return qRound(m_opacity * 100.0);
 }
@@ -204,6 +211,12 @@ QJsonObject StickyNote::toJson() const {
     obj.insert(QStringLiteral("color"), colorToJson(m_color));
     obj.insert(QStringLiteral("visible"), m_visible);
     obj.insert(QStringLiteral("opacity"), m_opacity);
+    /*
+     * 只在真属于某个组合时才写 groupId：空组 id 存进去在 JSON 里是个没意义的
+     * 字段（也让"没有这一项的老文件"和"新文件里没组合的便签"长得一样）。
+     */
+    if (!m_groupId.isEmpty())
+        obj.insert(QStringLiteral("groupId"), m_groupId);
 
     /* 没摆过位置的便签不写 geometry：下次启动还是"找块空桌面放" */
     if (!m_geometry.isNull()) {
@@ -225,6 +238,8 @@ StickyNote *StickyNote::fromJson(const QJsonObject &obj, NoteThumbs *thumbs, QOb
     note->m_visible = obj.value(QStringLiteral("visible")).toBool(true);
     /* 没有 opacity 字段的老文件：当"完全不透明" */
     note->m_opacity = qBound(0.35, obj.value(QStringLiteral("opacity")).toDouble(1.0), 1.0);
+    /* 没有 groupId 字段的老文件：当"没组合"（单独一块便签） */
+    note->m_groupId = obj.value(QStringLiteral("groupId")).toString();
 
     const QJsonObject geo = obj.value(QStringLiteral("geometry")).toObject();
     if (!geo.isEmpty()) {
@@ -267,6 +282,7 @@ QString StickyNoteStore::defaultFilePath() {
 bool StickyNoteStore::load() {
     qDeleteAll(m_notes);
     m_notes.clear();
+    m_groupActive.clear();
 
     QFile file(m_path);
     if (!file.exists()) {
@@ -305,6 +321,18 @@ bool StickyNoteStore::load() {
         connect(note, &StickyNote::visibleChanged, this, &StickyNoteStore::touch);
         m_notes.append(note);
     }
+
+    /*
+     * 一摞便签"哪一块在最上面"（见 groupActiveId 的说明）。老文件里没有这一段
+     * —— 那就空着，恢复时按便签在文件里的先后（第一块在最上面）。
+     */
+    const QJsonObject groups = doc.object().value(QStringLiteral("groups")).toObject();
+    for (auto it = groups.constBegin(); it != groups.constEnd(); ++it) {
+        const QString active = it.value().toObject().value(QStringLiteral("active")).toString();
+        if (!active.isEmpty())
+            m_groupActive.insert(it.key(), active);
+    }
+
     emit changed();
     return true;
 }
@@ -329,6 +357,28 @@ bool StickyNoteStore::flush() {
     root.insert(QStringLiteral("notes"), items);
 
     /*
+     * 一摞便签"哪一块在最上面"（见 groupActiveId 的说明）。顺手把已经不存在
+     * 的组清掉：那几块便签都被删 / 都散伙了，留着这段只会让文件越攒越脏。
+     */
+    QJsonObject groups;
+    for (auto it = m_groupActive.constBegin(); it != m_groupActive.constEnd(); ++it) {
+        bool stillThere = false;
+        for (const StickyNote *note : std::as_const(m_notes)) {
+            if (note && note->groupId() == it.key()) {
+                stillThere = true;
+                break;
+            }
+        }
+        if (!stillThere)
+            continue;
+        QJsonObject entry;
+        entry.insert(QStringLiteral("active"), it.value());
+        groups.insert(it.key(), entry);
+    }
+    if (!groups.isEmpty())
+        root.insert(QStringLiteral("groups"), groups);
+
+    /*
      * 先写临时文件再 rename：直接截断重写的话，写到一半断电 / 被杀，
      * 用户的便签就剩半个 JSON（下次启动按坏文件处理，只能从 .bad 里捞）。
      */
@@ -346,6 +396,22 @@ bool StickyNoteStore::flush() {
 void StickyNoteStore::scheduleSave() {
     if (m_saveTimer)
         m_saveTimer->start();
+}
+
+QString StickyNoteStore::groupActiveId(const QString &groupId) const {
+    return m_groupActive.value(groupId);
+}
+
+void StickyNoteStore::setGroupActiveId(const QString &groupId, const QString &noteId) {
+    if (groupId.isEmpty())
+        return;
+    if (m_groupActive.value(groupId) == noteId)
+        return;
+    if (noteId.isEmpty())
+        m_groupActive.remove(groupId);
+    else
+        m_groupActive.insert(groupId, noteId);
+    scheduleSave();
 }
 
 StickyNote *StickyNoteStore::create() {

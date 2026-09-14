@@ -12,6 +12,8 @@
 #include <QApplication>
 #include <QAbstractNativeEventFilter>
 #include <QColor>
+#include <QDir>
+#include <QFileInfo>
 #include <QGuiApplication>
 #include <QPalette>
 #include <QQmlContext>
@@ -283,6 +285,68 @@ int main(int argc, char *argv[]) {
      * "module not installed"（和上面选区窗口预热同一个坑）。
      */
     notes.start();
+
+    /*
+     * 看一眼"一摞便签 + 左边标签条"长什么样（`SMARTCLIP_NOTES_DEMO=1`）。
+     *
+     * 只在设了这个环境变量时跑：建三块不同底色的便签、归到一摞里 —— 界面上
+     * 就是左边三个色块、右边露出当前那张。它是**看效果**用的口子，正常启动
+     * 一个字都不做。
+     *
+     * 清单在 start() **之前**就指到临时目录：不然这几块演示便签会写进用户自己的
+     * notes.json（踩过：跑一次演示，用户的便签清单里就多出三张"第 N 张纸"），
+     * 而且会把用户自己的便签一起显示出来。
+     *
+     * 已经有过演示清单（上一次跑剩下的）就不再建新的：直接让 start() 把它恢复
+     * 出来 —— 恢复那条路（一摞只摆一张纸、其余几块收起来）和正常启动完全一样，
+     * 正好用来看"重启之后是不是还是那个样子"。
+     */
+    if (qEnvironmentVariableIsSet("SMARTCLIP_NOTES_DEMO")) {
+        const QString demoPath = QDir::tempPath() + QStringLiteral("/smartclip-notes-demo.json");
+        const bool restoreExisting = QFileInfo::exists(demoPath);
+        notes.store()->setFilePath(demoPath);
+        if (restoreExisting) {
+            notes.start();
+        } else {
+            QList<StickyNote *> demo;
+            const QStringList colors{QStringLiteral("#ffe9a8"), QStringLiteral("#f7b6d2"),
+                                     QStringLiteral("#c9b6f7")};
+            for (int i = 0; i < colors.size(); ++i) {
+                StickyNote *note = notes.createNote();
+                if (!note)
+                    continue;
+                note->setColor(QColor(colors.at(i)));
+                note->setText(QStringLiteral("第 %1 张纸：这份便签的底色是 %2。\n"
+                                             "左边那排色块就是这一摞里的几张纸，点一下换一张。")
+                                  .arg(i + 1).arg(colors.at(i)));
+                demo.append(note);
+            }
+            /* 第一块（黄的）露头，其余两块跟着它 —— demo.first() 就是露头那张 */
+            if (demo.size() > 1)
+                notes.groupWith(demo.first(), demo.mid(1));
+            notes.store()->flush();
+        }
+    }
+
+    /*
+     * 开发口子：`SMARTCLIP_QUIT_AFTER_MS=<毫秒>` —— 起来这么多毫秒之后走一遍
+     * **真正的退出**（和关闭键问句里的「完全退出」、文件菜单里的「退出」同一条
+     * 路：WindowHelper::quitApp）。
+     *
+     * 为什么要有它：便签窗口是各自独立的顶层窗口，"有便签的时候退不出程序"
+     * 这类问题从外面既点不到、也不好判断进程到底退没退。用法：
+     *     SMARTCLIP_NOTES_DEMO=1 SMARTCLIP_QUIT_AFTER_MS=8000
+     * 起来三块便签、8 秒后自动退出；随后看进程是不是真没了、退出码是不是 0，
+     * 以及那份临时清单里三块便签是不是还写着 visible=true（下次启动照旧显示）。
+     */
+    bool quitAfterOk = false;
+    const int quitAfterMs = qEnvironmentVariableIntValue("SMARTCLIP_QUIT_AFTER_MS", &quitAfterOk);
+    if (quitAfterOk && quitAfterMs > 0) {
+        QTimer::singleShot(quitAfterMs, &app, [&windowHelper]() {
+            qWarning("QUIT-TRACE SMARTCLIP_QUIT_AFTER_MS -> quitApp()");
+            windowHelper.quitApp();
+        });
+    }
 
     /*
      * 便签专用自检（`SmartClip.exe --note-test`，见 src/SelfTest.h 的 runNotes）。

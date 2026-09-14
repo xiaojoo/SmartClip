@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QColor>
+#include <QHash>
 #include <QJsonObject>
 #include <QList>
 #include <QObject>
@@ -78,6 +79,23 @@ class StickyNote final : public QObject {
     /* 这条便签在这块屏幕上的位置和尺寸（逻辑像素） */
     Q_PROPERTY(QRect geometry READ geometry NOTIFY geometryChanged)
 
+    /*
+     * 这条便签属于哪一摞"组合"（空串 = 没组合，单独一块）。
+     *
+     * 组合就是 Windows 便签那种**归到一起**：把一块便签的头部拖到另一块身上
+     * 松手，几块就成一摞（见 StickyNotes::dropNoteOn）。归到一摞之后整摞一起
+     * 搬、一起收；摆成"露头 + 依次错开"的样子是**排列**那件事，见
+     * StickyNotes::applyGroupLayout。
+     *
+     * 为什么存成一个 id 而不是"一堆指针"：组合要跨进程重启活下来。几块便签
+     * 在 notes.json 里各自记一句"我属于哪一摞"，恢复时按这个 id 重新凑成一摞
+     * —— 谁在最上面由 notes.json 里 groups 那一段（哪块是露头的）决定。
+     *
+     * 组 id 本身只是个自增的短串（"g1"、"g2"…），不落盘也别的地方引用它，
+     * 所以不需要 UUID 那么长的东西。
+     */
+    Q_PROPERTY(QString groupId READ groupId WRITE setGroupId NOTIFY groupIdChanged)
+
 public:
     explicit StickyNote(QObject *parent = nullptr);
     /*
@@ -145,6 +163,12 @@ public:
     int width() const { return m_geometry.width(); }
     int height() const { return m_geometry.height(); }
 
+    QString groupId() const { return m_groupId; }
+    void setGroupId(const QString &id);
+
+    /* 在不在某一摞里（界面按它决定菜单那一条是"组合成摞"还是"拆分组合"） */
+    Q_INVOKABLE bool grouped() const { return !m_groupId.isEmpty(); }
+
     /* 0 = 没摆过（新建的便签按这个判断"要找你摆个位置"）；见 StickyNotes::create */
     bool hasGeometry() const { return !m_geometry.isNull(); }
 
@@ -170,6 +194,7 @@ signals:
     void visibleChanged();
     void opacityChanged();
     void geometryChanged();
+    void groupIdChanged();
 
 private:
     QString m_id;
@@ -179,6 +204,8 @@ private:
     bool m_visible = true;
     /* 便签纸不透明度，默认完全不透明（见 Q_PROPERTY 的说明） */
     qreal m_opacity = 1.0;
+    /* 所属组合（空串 = 单块），见 Q_PROPERTY 的说明 */
+    QString m_groupId;
     NoteLinkModel *m_links = nullptr;
 };
 
@@ -256,6 +283,22 @@ public:
     /* 便签的正文 / 颜色 / 位置改了：转成一次落盘 */
     void touch();
 
+    /*
+     * 一摞便签里"哪一块在最上面"（露头那张纸）。
+     *
+     * 每条便签自己只记"我属于哪一摞"（StickyNote::groupId）—— 那足够恢复出
+     * 一摞有哪几块；而**谁在最上面**是单独一件事（用户点过下面那几张纸、或者
+     * 拖过一块上去就变了），所以按组 id 另记一份在这里，跟着 notes.json 一起
+     * 落盘：
+     *
+     *     "groups": { "g1": { "active": "<便签 id>" } }
+     *
+     * 没记过的组、或者记的那块已经不在组里了，恢复时按便签在文件里的先后
+     * （第一块在最上面）—— 老文件里没有这一段，也走这条路。
+     */
+    QString groupActiveId(const QString &groupId) const;
+    void setGroupActiveId(const QString &groupId, const QString &noteId);
+
 signals:
     void changed();
 
@@ -263,6 +306,8 @@ private:
     QList<StickyNote *> m_notes;
     QString m_path;
     NoteThumbs *m_thumbs = nullptr;
+    /* 组 id -> 露头那块便签的 id（见 groupActiveId 的说明） */
+    QHash<QString, QString> m_groupActive;
     /* 防抖用：真正落盘的定时器，见 scheduleSave */
     class QTimer *m_saveTimer = nullptr;
 };

@@ -768,6 +768,30 @@ int SelfTest::runNotes(ClipboardStore *store, TrayIcon *tray, EditorController *
                     inScreen = false;
             }
             noteCheck(inScreen, QStringLiteral("排列：排完都在屏幕里"));
+
+            /*
+             * 每一行**从右往左填**（用户要的"排列从右开始"）：离右沿"整数个格子"
+             * 的位置才允许 —— 也就是第 0 格贴着工作区右沿，之后逐格往左退一个
+             * 步长。左对齐的话 x 会从 area.x() 起数，这里的余数就对不上了。
+             */
+            const int gap = 14;   /* kArrangeGap */
+            const int rightEdge = area.x() + area.width();
+            bool flushRight = true;
+            int leftMost = rects.isEmpty() ? 0 : rects.first().x();
+            for (const QRect &r : rects) {
+                if (r.width() <= 0)
+                    continue;
+                const int offset = rightEdge - (r.x() + r.width());
+                const int step = r.width() + gap;
+                const int column = offset >= 0 ? offset / step : -1;
+                const int expectedX = column >= 0 ? rightEdge - r.width() - column * step : -1;
+                if (column < 0 || qAbs(r.x() - expectedX) > 1)
+                    flushRight = false;
+                leftMost = qMin(leftMost, r.x());
+            }
+            noteCheck(flushRight,
+                      QStringLiteral("排列：每一行贴右沿开始（从右往左填）"),
+                      QStringLiteral("右沿 %1 / 最左 %2").arg(rightEdge).arg(leftMost));
         }
 
         /* 收起 / 再叫回来：数据都留着 */
@@ -784,7 +808,1066 @@ int SelfTest::runNotes(ClipboardStore *store, TrayIcon *tray, EditorController *
     }
 
     /* =====================================================================
-     * 8) 托盘那三条（收进托盘也能用）
+     * 8) 组合 + 排列成摞
+     *
+     * "组合" = 把几块便签归到一摞里（拖一块的头部到另一块身上松手，或者菜单
+     * 里选"与「便签 N」组合"）；"排列成摞" = 把一摞摆成露头 + 依次错开的样子。
+     * 这一节两件都量：归堆、摆法、整摞一起搬、点下面那张纸抽到最上面、拆开、
+     * 活过重启。
+     * =================================================================== */
+    {
+        const QString groupFile = dir.filePath(QStringLiteral("group-notes.json"));
+        notes->store()->setFilePath(groupFile);
+
+        auto windowStateOf = [notes](StickyNote *note, const QString &key) {
+            return notes->windowState(note ? note->id() : QString()).value(key);
+        };
+        auto noteRect = [&windowStateOf](StickyNote *note) {
+            return QRect(windowStateOf(note, QStringLiteral("x")).toInt(),
+                         windowStateOf(note, QStringLiteral("y")).toInt(),
+                         windowStateOf(note, QStringLiteral("w")).toInt(),
+                         windowStateOf(note, QStringLiteral("h")).toInt());
+        };
+
+        /* 三块新便签，先各自摆开（不然本来就是"一摞"叠着的，看不出重排效果） */
+        StickyNote *a = notes->createNote();
+        StickyNote *b = notes->createNote();
+        StickyNote *c = notes->createNote();
+        settle();
+
+        auto placeNote = [notes](StickyNote *note, const QRect &rect) {
+            if (QObject *windowObj = notes->windowForId(note ? note->id() : QString()))
+                QMetaObject::invokeMethod(windowObj, "setPlacement", Q_ARG(QRect, rect));
+        };
+        placeNote(a, QRect(300, 300, 330, 300));
+        placeNote(b, QRect(420, 360, 330, 300));
+        placeNote(c, QRect(540, 420, 330, 300));
+        settle();
+
+        /* ---- 组合 ---- */
+        /*
+         * 便签窗口里 handleMenuAct 是**QML 根对象**上的函数（不在 C++ 窗口
+         * 对象上），菜单里那几条命令最后都落到它身上。这个 lambda 让下面的
+         * 用例走的就是用户点菜单那条路。
+         */
+        auto menuAct = [notes](StickyNote *note, const QString &act) {
+            QObject *root = notes->windowRootForId(note ? note->id() : QString());
+            if (!root)
+                return false;
+            /*
+             * QML 里的函数在元对象系统里一律返回 QVariant，Q_RETURN_ARG(bool, …)
+             * 会被拒（"return type mismatch … cannot convert from QVariant to bool"），
+             * 所以这里按 QVariant 接、再自己转（和 revealLink 那边一个写法）。
+             */
+            QVariant ok;
+            QMetaObject::invokeMethod(root, "handleMenuAct", Q_RETURN_ARG(QVariant, ok),
+                                      Q_ARG(QVariant, QVariant(act)));
+            return ok.toBool();
+        };
+
+        /*
+         * 一次凑三块。
+         *
+         * 菜单里"与「便签 3」组合"一次只带**一条**，所以这里直接走那条命令最后
+         * 落到的地方：groupWith(这一块, [另两块]) —— 和菜单点是同一个函数，
+         * 只是名单长一点。
+         *
+         * 菜单那一条本身在下面那一节单独量（那一栏打得开、点一条能成组）；
+         * 鼠标那条路（拖头部叠上去）在更下面单独量。
+         */
+        QList<StickyNote *> mates;
+        if (b)
+            mates << b;
+        if (c)
+            mates << c;
+        const bool grouped = notes->groupWith(a, mates);
+        settle();
+        noteCheck(grouped, QStringLiteral("组合：能把三块便签凑成一摞"));
+
+        const QVariantMap groupState = notes->groupState(a ? a->id() : QString());
+        noteCheck(groupState.value(QStringLiteral("count")).toInt() == 3,
+                  QStringLiteral("组合：这一摞里就是那三块"),
+                  QStringLiteral("%1 块").arg(groupState.value(QStringLiteral("count")).toInt()));
+        noteCheck(!groupState.value(QStringLiteral("groupId")).toString().isEmpty()
+                      && a && a->groupId() == groupState.value(QStringLiteral("groupId")).toString()
+                      && b && b->groupId() == a->groupId()
+                      && c && c->groupId() == a->groupId(),
+                  QStringLiteral("组合：组 id 贴到了组里每一条身上（跟着 notes.json 存）"));
+
+        const QStringList order = groupState.value(QStringLiteral("members")).toStringList();
+        noteCheck(!order.isEmpty() && a && order.first() == a->id(),
+                  QStringLiteral("组合：点的那一块在最上面（它排第一）"));
+        noteCheck(groupState.value(QStringLiteral("activeId")).toString()
+                      == (a ? a->id() : QString()),
+                  QStringLiteral("组合：报得出来「露头那张纸」是哪一块"));
+
+        /* ---- 一摞只占一格：露头那块在原来的位置，其余几块对齐到同一格 ---- */
+        const QRect aRect = noteRect(a);
+        const QList<StickyNote *> members{a, b, c};
+        QList<QRect> rects;
+        for (StickyNote *member : members)
+            rects.append(noteRect(member));
+
+        noteCheck(rects.at(0).topLeft() == QPoint(300, 300),
+                  QStringLiteral("组合：露头那块留在原地（一摞围着它摆）"),
+                  QStringLiteral("%1,%2").arg(rects.at(0).x()).arg(rects.at(0).y()));
+        /*
+         * 同组其余几块**对齐到同一格**（用户要求："组合的卡片只显示一张卡片，
+         * 这一张卡片切换"）：它们藏起来等着被换上来，位置就在露头那块那一格，
+         * 换标签才是原地换纸。
+         */
+        noteCheck(rects.at(1).topLeft() == rects.at(0).topLeft()
+                      && rects.at(2).topLeft() == rects.at(0).topLeft(),
+                  QStringLiteral("组合：其余几块都对齐到露头那一格（桌面上只占一格）"),
+                  QStringLiteral("%1,%2 / %3,%4 / %5,%6")
+                      .arg(rects.at(0).x()).arg(rects.at(0).y())
+                      .arg(rects.at(1).x()).arg(rects.at(1).y())
+                      .arg(rects.at(2).x()).arg(rects.at(2).y()));
+        noteCheck(rects.at(0).size() == rects.at(1).size()
+                      && rects.at(1).size() == rects.at(2).size(),
+                  QStringLiteral("组合：一摞里的纸一样大"));
+        /* 露头那一块是**完整露着**的，其余几块收起来只留标签 */
+        noteCheck(notes->windowState(a->id()).value(QStringLiteral("visible")).toBool()
+                      && !notes->windowState(b->id()).value(QStringLiteral("visible")).toBool()
+                      && !notes->windowState(c->id()).value(QStringLiteral("visible")).toBool(),
+                  QStringLiteral("组合：一摞里只有露头那一张纸露着（其余收成标签）"));
+
+        bool inScreen = true;
+        if (QScreen *screen = QGuiApplication::primaryScreen()) {
+            const QRect area = screen->availableGeometry();
+            for (const QRect &r : rects) {
+                if (!area.contains(r))
+                    inScreen = false;
+            }
+        }
+        noteCheck(inScreen, QStringLiteral("组合：整摞（那一格）都在屏幕里"));
+
+        /* ---- QML 侧也看得出状态（菜单里两条文案按它挑） ---- */
+        if (QObject *root = notes->windowRootForId(a ? a->id() : QString())) {
+            noteCheck(root->property("inGroup").toBool()
+                          && root->property("groupActive").toBool()
+                          && root->property("groupSize").toInt() == 3,
+                      QStringLiteral("组合：界面读得到「在组里 / 是不是露头 / 组里几块」"));
+        } else {
+            noteCheck(false, QStringLiteral("组合：拿得到便签的 QML 根对象"));
+        }
+
+        /* ---- 组合过的不能再凑一摞 ---- */
+        const bool again = menuAct(a, QStringLiteral("group:%1").arg(b ? b->id() : QString()));
+        noteCheck(!again, QStringLiteral("组合：已经组合过的便签不能再凑一摞（一次只做一层）"));
+
+        /* ---- 整摞一起搬 ---- */
+        /*
+         * 拖的是**露头那块**（层叠顺序里排第一的；前面抽过主角之后不一定是 a）。
+         * 走的是真实那条路：按下头部（beginDrag 记下基准）之后窗口被搬动，
+         * moveEvent 里整摞按同一份位移跟着走（见 beginGroupDrag）。
+         *
+         * 用 QWidget::move 而不是 setPlacement：后者是"程序把便签摆到某处"
+         * （带 m_placing 闸门，不当成拖动），那正是拖窗口的反面。
+         */
+        const QRect frontRectBefore = noteRect(notes->groupState(a->id())
+                                                   .value(QStringLiteral("activeId"))
+                                                   .toString()
+                                               == (b ? b->id() : QString())
+                                               ? b
+                                               : a);
+        StickyNote *draggedNote = (a && noteRect(a).topLeft() == frontRectBefore.topLeft()) ? a : b;
+        StickyNote *otherNote1 = (draggedNote == a) ? b : a;
+        const QRect draggedBefore = noteRect(draggedNote);
+        const QRect other1Before = noteRect(otherNote1);
+        const QRect other2Before = noteRect(c);
+        const QPoint delta(64, 48);
+        bool moved = false;
+        bool refused = false;
+        if (auto *front = qobject_cast<QWidget *>(notes->windowForId(draggedNote->id()))) {
+            QMetaObject::invokeMethod(front, "beginDrag");
+            /*
+             * 搬的是**窗口**（QWidget::move 只认窗口坐标），而 noteRect 量的是
+             * **卡片**：窗口左边还挂着一条标签条（见 frameRectFor），所以这里
+             * 要把卡片的起点换算成窗口的起点再搬。
+             */
+            const QPoint frameOffset(front->geometry().left() - draggedBefore.left(), 0);
+            front->move(draggedBefore.topLeft() + frameOffset + delta);
+            settle();
+            moved = noteRect(otherNote1).topLeft() == other1Before.topLeft() + delta
+                    && noteRect(c).topLeft() == other2Before.topLeft() + delta;
+            QMetaObject::invokeMethod(front, "promoteInGroup", Q_RETURN_ARG(bool, refused));
+        }
+        noteCheck(moved, QStringLiteral("拖动：拖露头那块，整摞按同一份位移跟着走"),
+                  QStringLiteral("被拖 %1,%2 / 另一块 %3,%4 期望 %5,%6")
+                      .arg(draggedBefore.x()).arg(draggedBefore.y())
+                      .arg(noteRect(otherNote1).x()).arg(noteRect(otherNote1).y())
+                      .arg(other1Before.x() + delta.x()).arg(other1Before.y() + delta.y()));
+        noteCheck(!refused, QStringLiteral("拖动：本来就在最上面的那块不用再抽一次"));
+
+        /* ---- 换标签：点另一块，它换上来、原来那张收回去（原地换纸） ---- */
+        /*
+         * 一摞在桌面上只有一张纸：其余几块是**藏着的窗口**（点不着），换哪一块
+         * 只能走左边那排标签 —— 也就是 switchGroupTab（界面点色块那条路）。
+         */
+        const QRect stackOrigin = noteRect(notes->groupState(a->id())
+                                               .value(QStringLiteral("activeId"))
+                                               .toString()
+                                           == (b ? b->id() : QString())
+                                           ? b
+                                           : a);
+        const bool switchedToB = notes->switchGroupTab(b->id());
+        settle();
+        /*
+         * "谁露头"看 groupState 的 activeId（= notes.json 里记的那一块），
+         * **不看 members 的第一条**：members 是层叠顺序那套留下的（第一块曾是
+         * "最上面那张"），现在一摞平铺在同一格、谁露着由 active 说了算。
+         */
+        const QVariantMap afterSwitch = notes->groupState(b ? b->id() : QString());
+        noteCheck(switchedToB
+                      && afterSwitch.value(QStringLiteral("activeId")).toString()
+                             == (b ? b->id() : QString()),
+                  QStringLiteral("换标签：点另一块，它换上来（露头那张纸换人）"),
+                  QStringLiteral("露头 %1")
+                      .arg(afterSwitch.value(QStringLiteral("activeId")).toString().left(4)));
+        noteCheck(noteRect(b).topLeft() == stackOrigin.topLeft()
+                      && noteRect(a).topLeft() == stackOrigin.topLeft()
+                      && noteRect(c).topLeft() == stackOrigin.topLeft(),
+                  QStringLiteral("换标签：原地换纸（一摞那一格没挪窝）"),
+                  QStringLiteral("b %1,%2 / 那一格 %3,%4")
+                      .arg(noteRect(b).x()).arg(noteRect(b).y())
+                      .arg(stackOrigin.x()).arg(stackOrigin.y()));
+        noteCheck(notes->windowState(b->id()).value(QStringLiteral("visible")).toBool()
+                      && !notes->windowState(a->id()).value(QStringLiteral("visible")).toBool()
+                      && !notes->windowState(c->id()).value(QStringLiteral("visible")).toBool(),
+                  QStringLiteral("换标签：换上来那块露着、原来那张收起来"));
+
+        /* ---- 抽过主角之后再拖一次：整摞还是刚性的（不许跳一格） ---- */
+        {
+            /*
+             * 这一条是**回归钉子**：抽一块上来之后，"露头那块"（z 序最上面）
+             * 和"占着整摞左上角那块"不再是同一块了。层叠偏移要是按组内顺序
+             * 当级数算，这时候拖一次整摞会整体平移一格（鼠标一动、纸跳一下）。
+             *
+             * 拖的还是露头那块（b），量另外两块是不是跟着走了同一份位移。
+             */
+            const QList<QRect> before2 = {noteRect(a), noteRect(b), noteRect(c)};
+            const QPoint delta2(40, 24);
+            bool moved2 = false;
+            if (auto *front = qobject_cast<QWidget *>(notes->windowForId(b->id()))) {
+                QMetaObject::invokeMethod(front, "beginDrag");
+                /* 同上面那一条：卡片起点 -> 窗口起点（窗口左边还有一条标签条） */
+                const QPoint frameOffset(front->geometry().left() - before2.at(1).left(), 0);
+                front->move(before2.at(1).topLeft() + frameOffset + delta2);
+                settle();
+                moved2 = noteRect(a).topLeft() == before2.at(0).topLeft() + delta2
+                         && noteRect(c).topLeft() == before2.at(2).topLeft() + delta2;
+            }
+            noteCheck(moved2,
+                      QStringLiteral("拖动：换过露头那块之后再拖，整摞仍然按同一份位移走"),
+                      QStringLiteral("c %1,%2 -> %3,%4 / 期望 %5,%6")
+                          .arg(before2.at(2).x()).arg(before2.at(2).y())
+                          .arg(noteRect(c).x()).arg(noteRect(c).y())
+                          .arg(before2.at(2).x() + delta2.x())
+                          .arg(before2.at(2).y() + delta2.y()));
+        }
+
+        /* ---- 层叠顺序要活过重启 ---- */
+        notes->store()->flush();
+        const QString activeBefore = notes->groupState(b->id()).value(QStringLiteral("activeId")).toString();
+        {
+            StickyNoteStore probeStore;
+            probeStore.setFilePath(groupFile);
+            noteCheck(probeStore.load()
+                          && probeStore.count() == notes->count(),
+                      QStringLiteral("落盘：组合那一摞写进了 notes.json"));
+            noteCheck(probeStore.groupActiveId(activeBefore.isEmpty()
+                                                   ? QString()
+                                                   : b->groupId())
+                          == activeBefore,
+                      QStringLiteral("落盘：连「哪一块在最上面」都记下来了（重启后摆回原样）"),
+                      probeStore.groupActiveId(b->groupId()));
+        }
+        {
+            /* 从文件重建一遍：三块还是属于同一个组、组里的先后也回来了 */
+            StickyNoteStore reload;
+            reload.setFilePath(groupFile);
+            reload.load();
+            QStringList ids;
+            QString reloadGroup;
+            for (StickyNote *note : reload.notes()) {
+                if (!note || note->groupId().isEmpty())
+                    continue;
+                reloadGroup = note->groupId();
+                ids << note->id();
+            }
+            noteCheck(ids.size() == 3 && !reloadGroup.isEmpty(),
+                      QStringLiteral("落盘：读回来还是那三块在一摞里"),
+                      QStringLiteral("%1 块").arg(ids.size()));
+        }
+
+        /* ---- 菜单里那一条：组合着的便签给的是「拆分组合」 ---- */
+        if (QObject *root = notes->windowRootForId(a->id())) {
+            QMetaObject::invokeMethod(root, "openNoteMenu",
+                                      Q_ARG(QVariant, QVariant(1400)),
+                                      Q_ARG(QVariant, QVariant(700)));
+            settle();
+            const QString groupedLabels = notes->menuState(a->id())
+                                              .value(QStringLiteral("labels")).toString();
+            noteCheck(groupedLabels.contains(QStringLiteral("拆分组合")),
+                      QStringLiteral("菜单：组合着的便签给的是「拆分组合」"), groupedLabels);
+            noteCheck(!groupedLabels.contains(QStringLiteral("与…组合")),
+                      QStringLiteral("菜单：组合着的便签不再给「与…组合」那一栏"));
+            noteCheck(notes->openMenuFlyout(a->id(), QStringLiteral("group")) == true
+                          && notes->menuState(a->id()).value(QStringLiteral("flyout")).toString()
+                                 .isEmpty(),
+                      QStringLiteral("菜单：组合着的便签没有「与…组合」那一栏"));
+            QMetaObject::invokeMethod(root, "closeNoteMenu");
+            settle();
+        }
+
+        /* ---- 解散：摊开成几块单独的卡片 ---- */
+        const QList<QRect> beforeUngroup = {noteRect(a), noteRect(b), noteRect(c)};
+        const bool ungrouped = menuAct(b, QStringLiteral("ungroup"));
+        settle();
+        noteCheck(ungrouped, QStringLiteral("解散：菜单那条路能把这一摞散了"));
+        noteCheck(a->groupId().isEmpty() && b->groupId().isEmpty() && c->groupId().isEmpty(),
+                  QStringLiteral("解散：三块的组 id 都摘干净了"));
+        noteCheck(noteRect(b) == beforeUngroup.at(1),
+                  QStringLiteral("解散：点的那一块留在原地（不跳回原来摆开的地方）"));
+        /*
+         * 其余几块**当场摊开**（用户明确要求："拆分组合点击后，展开成单独的
+         * 卡片"）。不摊开的话它们严丝合缝叠在同一格上，屏幕上还是只有一张纸，
+         * 而且压在最上面的正好是刚从"收起来的那张纸"状态出来的那块 —— 露出来
+         * 的是一张空白卡片（用户截了图）。
+         */
+        noteCheck(noteRect(a) != beforeUngroup.at(0) && noteRect(c) != beforeUngroup.at(2)
+                      && !noteRect(a).intersects(noteRect(b))
+                      && !noteRect(a).intersects(noteRect(c))
+                      && !noteRect(b).intersects(noteRect(c)),
+                  QStringLiteral("解散：三块摊开成单独的卡片（互不重叠）"),
+                  QStringLiteral("a %1,%2 / b %3,%4 / c %5,%6")
+                      .arg(noteRect(a).x()).arg(noteRect(a).y())
+                      .arg(noteRect(b).x()).arg(noteRect(b).y())
+                      .arg(noteRect(c).x()).arg(noteRect(c).y()));
+        noteCheck(notes->windowState(a->id()).value(QStringLiteral("visible")).toBool()
+                      && notes->windowState(b->id()).value(QStringLiteral("visible")).toBool()
+                      && notes->windowState(c->id()).value(QStringLiteral("visible")).toBool(),
+                  QStringLiteral("解散：收起来的那几块都放回桌面上"));
+        /*
+         * 拆完每一块都得画回**完整卡片**：collapsed 要是停在"收起来的那张纸"
+         * 那个状态，屏幕上就是一张空白卡片（用户报的就是这个）。
+         */
+        {
+            const QList<StickyNote *> after{a, b, c};
+            QStringList stillCollapsed;
+            for (StickyNote *probe : std::as_const(after)) {
+                QObject *root = notes->windowRootForId(probe ? probe->id() : QString());
+                if (!root || root->property("collapsed").toBool())
+                    stillCollapsed << (probe ? probe->id().left(4) : QStringLiteral("?"));
+            }
+            noteCheck(stillCollapsed.isEmpty(),
+                      QStringLiteral("解散：三块都画回完整卡片（没有谁停在「收起来」状态）"),
+                      stillCollapsed.join(QStringLiteral(",")));
+        }
+        noteCheck(notes->groupState(a->id()).value(QStringLiteral("count")).toInt() == 0,
+                  QStringLiteral("解散：这一摞没了（组合状态报空）"));
+
+        /*
+         * ---- 真在菜单里点一次"与「便签 N」组合" ----
+         *
+         * 上面成组走的是 groupWith（名单长一点那条路），这里补上**菜单那条**：
+         * 打开菜单 -> "与…组合"那一栏里有几块可选 -> 点第一条 -> 成一摞。
+         */
+        /*
+         * 别处（前面几节）还摆着几块便签，"组合"那一栏里会把它们一起列出来
+         * —— 所以这里不写死条数，只看**至少**列出了另外两块（b 和 c），而且
+         * 点其中一条能成组。
+         */
+        const QVariantList available = notes->groupMatesFor(a->id());
+        noteCheck(available.size() >= 2,
+                  QStringLiteral("菜单：「与…组合」列出了能凑到一起的几块（≥2）"),
+                  QStringLiteral("%1 条").arg(available.size()));
+        if (QObject *root = notes->windowRootForId(a->id())) {
+            QMetaObject::invokeMethod(root, "openNoteMenu",
+                                      Q_ARG(QVariant, QVariant(1400)),
+                                      Q_ARG(QVariant, QVariant(700)));
+            settle();
+            noteCheck(notes->openMenuFlyout(a->id(), QStringLiteral("group")),
+                      QStringLiteral("菜单：「与…组合」那一栏打得开"));
+            settle();
+            const QVariantMap flyoutState = notes->menuState(a->id());
+            noteCheck(flyoutState.value(QStringLiteral("flyout")).toString()
+                          == QLatin1String("group")
+                          && flyoutState.value(QStringLiteral("entryCount")).toInt() > 0,
+                      QStringLiteral("菜单：那一栏真的摆出了条目"),
+                      QStringLiteral("flyout=%1")
+                          .arg(flyoutState.value(QStringLiteral("flyout")).toString()));
+
+            QObject *menu = root->findChild<QObject *>(QStringLiteral("noteMenu"));
+            bool fired = false;
+            if (menu && !available.isEmpty()) {
+                const QString mateId = available.first().toMap()
+                                           .value(QStringLiteral("id")).toString();
+                const QString mateLabel = available.first().toMap()
+                                              .value(QStringLiteral("label")).toString();
+                noteCheck(mateLabel.contains(QStringLiteral("便签")),
+                          QStringLiteral("菜单：那一条写清楚了和哪一块组合"), mateLabel);
+                /* QML 函数一律按 QVariant 接返回值（见上面 menuAct 的说明） */
+                QVariant ok;
+                QMetaObject::invokeMethod(menu, "fireGroupMate", Q_RETURN_ARG(QVariant, ok),
+                                          Q_ARG(QVariant, QVariant(mateId)));
+                fired = ok.toBool();
+            }
+            settle();
+            noteCheck(fired && a && !a->groupId().isEmpty(),
+                      QStringLiteral("菜单：点一条「与…组合」就真的凑成了一摞"),
+                      QStringLiteral("组=%1").arg(a->groupId()));
+            settle();
+        }
+        const QStringList menuOrder =
+            notes->groupState(a->id()).value(QStringLiteral("members")).toStringList();
+        noteCheck(menuOrder.size() >= 2 && a && !menuOrder.isEmpty()
+                      && menuOrder.first() == a->id(),
+                  QStringLiteral("菜单：成组那块在最上面（菜单是挂在它身上打开的）"),
+                  QStringLiteral("%1 块").arg(menuOrder.size()));
+
+        /* =================================================================
+         * 组合的**鼠标那条路**：拖一块便签的头部到另一块身上松手
+         * ---------------------------------------------------------------
+         * 界面上真跑起来是：按下头部（beginDrag）-> beginNoteDrag，拖动期间
+         * dragPollTimer 每拍算一次落点（谁的头被压着谁就亮）-> 松手时
+         * finishNoteDrag -> dropNoteOn。
+         *
+         * 自检没法真按住鼠标把窗口拖过去（光标是模拟的，被拖的窗口不会跟着
+         * 走）—— 所以"拖过去"这一步用**真的把窗口挪过去**代替（QWidget::move，
+         * 就是用户在拖它），光标也摆到落点那一块的头部上；之后走的全是真实
+         * 链路：落点判定、亮灯、松手、组合。
+         * =============================================================== */
+        {
+            StickyNote *d = notes->createNote();
+            StickyNote *e = notes->createNote();
+            settle();
+            placeNote(d, QRect(300, 800, 330, 300));
+            placeNote(e, QRect(900, 800, 330, 300));
+            settle();
+
+            const QRect eRect = noteRect(e);
+            const QPoint eHead(eRect.x() + eRect.width() / 2, eRect.y() + 10);
+            const QPoint eBody(eRect.x() + eRect.width() / 2, eRect.y() + eRect.height() - 20);
+
+            bool targetOk = false;
+            bool bodyNotTarget = false;
+            bool geoSeen = false;     /* 落点那三个数留一份，失败详情里要打 */
+            bool markSeen = false;
+            QPoint dropAt;
+            if (auto *dragWin = qobject_cast<QWidget *>(notes->windowForId(d->id()))) {
+                /*
+                 * 窗口左边还挂着一条标签条（见 frameRectFor）：QWidget::move 走
+                 * 的是**窗口**坐标，而"落在哪儿"要按**卡片**算 —— 这里先量一次
+                 * 两者的差，后面每次搬窗口都把它补上。
+                 */
+                const QPoint frameOffset(dragWin->geometry().left() - noteRect(d).left(), 0);
+                /*
+                 * 先把它挪到"没压着 e 的头部"的地方，再把光标钉在 e 的头部上，
+                 * 然后按下头部开始拖。
+                 *
+                 * 为什么先挪：真拖的时候窗口是**跟着光标走**的（光标压在 e 的
+                 * 头部上时，被拖的 d 已经在 e 旁边，不会盖住那一点）。自检里
+                 * 光标是直接摆过去的、窗口不会跟，得手工把这件事补上 —— 不然
+                 * 光标那一点落在**自己身上**，落点判定当然找不到目标。
+                 */
+                dragWin->move(eRect.right() + 40, eRect.bottom() + 40);
+                settle();
+                /*
+                 * 松手的位置：自检里窗口不跟光标走，所以这里手工选一个落点
+                 * ——"拖到哪儿"量的是**卡片**（用户看的是那张纸）。
+                 *
+                 * 搬的是**窗口**坐标：卡片要落在 droppedCard，窗口就在再往左
+                 * 一条标签条的地方（见 frameRectFor）。
+                 */
+                const QRect droppedCard(noteRect(d).topLeft() + QPoint(-60, 10) + frameOffset,
+                                        noteRect(d).size());
+                QCursor::setPos(eHead);
+                settle();
+
+                QMetaObject::invokeMethod(dragWin, "beginDrag");
+                dragWin->move(droppedCard.topLeft() - frameOffset);
+                settle();
+                /* 松手时被拖那块在哪（只用来打诊断信息，见下面那条断言） */
+                dropAt = noteRect(d).topLeft();
+                /*
+                 * ---- 落点预览（"底下那一块亮起来"）----
+                 *
+                 * 界面上这一拍由 dragPollTimer（60ms）算，这里**直接调那一拍**
+                 * （updateDropTarget 就是定时器回调里的第一句，不是另开一条路）。
+                 *
+                 * 关键是这中间**一次 settle() 都不能有**：那个定时器还负责判定
+                 * "用户松手了"（光标连续两拍没动 + 左键没按着 -> finishNoteDrag，
+                 * 见 StickyNotes 的构造函数）。自检没真按鼠标、光标又是钉着的，
+                 * 一跑事件循环它就自己把这次拖动收掉、把 m_dragWindow 清掉 ——
+                 * 再来读落点预览永远是 0。这条一直偶发红就是这个（三次运行的
+                 * "几何判定 / 界面标记"三个数每次都不一样，也是它）。
+                 *
+                 * 所以：光标钉稳 -> 调那一拍 -> 立刻读三个数，中间不给事件循环
+                 * 机会。光标钉几次是因为极少数情况下一次 setPos 没落到位。
+                 */
+                for (int attempt = 0; attempt < 5 && QCursor::pos() != eHead; ++attempt)
+                    QCursor::setPos(eHead);
+                QMetaObject::invokeMethod(notes, "updateDropTarget");
+                geoSeen = notes->dropPreviewAt(e, eHead);
+                markSeen = notes->windowState(e->id())
+                               .value(QStringLiteral("dropPreview")).toBool();
+                const bool bodySays = notes->dropPreviewAt(e, eBody);
+                targetOk = geoSeen && markSeen;
+                bodyNotTarget = !bodySays;
+                noteOut(QStringLiteral("（落点：几何判定 %1 / 界面标记 %2 / 身子那条 %3）")
+                            .arg(geoSeen ? 1 : 0).arg(markSeen ? 1 : 0).arg(bodySays ? 1 : 0));
+                /* 松手：finishNoteDrag 是**总管**上的（见 StickyNotes.h） */
+                QMetaObject::invokeMethod(notes, "finishNoteDrag");
+                settle();
+            }
+            noteCheck(targetOk,
+                      QStringLiteral("组合（鼠标）：拖到另一块头部上时，那一块亮起「可以放这儿」"),
+                      QStringLiteral("几何判定 %1 / 界面标记 %2")
+                          .arg(geoSeen ? 1 : 0).arg(markSeen ? 1 : 0));
+            noteCheck(bodyNotTarget,
+                      QStringLiteral("组合（鼠标）：压在身子上不算落点（只有头部那条算）"));
+            noteCheck(d->groupId() == e->groupId() && !d->groupId().isEmpty(),
+                      QStringLiteral("组合（鼠标）：松手就把两块组合成一摞"),
+                      QStringLiteral("d=%1 e=%2").arg(d->groupId(), e->groupId()));
+            noteCheck(notes->groupState(d->id()).value(QStringLiteral("count")).toInt() == 2,
+                      QStringLiteral("组合（鼠标）：这一摞里正好两块"));
+            /*
+             * 放下之后这一摞归谁：**落点那一块留在原地露着**，被拖的那块并进来
+             * 收起来（见 dropNoteOn 里"为什么不是被拖的那块排第一"那段 —— 反过来
+             * 用户看到的是"原来那几张不见了"）。早先这两条断言写的是旧设计
+             * （被拖的那块露头、留在松手的位置），所以拖动一旦成功它们必红。
+             */
+            const QStringList dragOrder =
+                notes->groupState(d->id()).value(QStringLiteral("members")).toStringList();
+            noteCheck(!dragOrder.isEmpty() && dragOrder.first() == e->id(),
+                      QStringLiteral("组合（鼠标）：落点那一块在最上面（它留在原地露着）"),
+                      QStringLiteral("露头 %1 / 落点 %2")
+                          .arg(dragOrder.isEmpty() ? QStringLiteral("?") : dragOrder.first().left(4),
+                               e->id().left(4)));
+            noteCheck(noteRect(e).topLeft() == eRect.topLeft()
+                          && noteRect(d).topLeft() == eRect.topLeft()
+                          && noteRect(d).size() == noteRect(e).size(),
+                      QStringLiteral("组合（鼠标）：整摞落在落点那一格（被拖的那块对齐过去）"),
+                      QStringLiteral("e %1,%2 / d %3,%4 / 期望 %5,%6（松手时 d 在 %7,%8）")
+                          .arg(noteRect(e).x()).arg(noteRect(e).y())
+                          .arg(noteRect(d).x()).arg(noteRect(d).y())
+                          .arg(eRect.x()).arg(eRect.y())
+                          .arg(dropAt.x()).arg(dropAt.y()));
+            noteCheck(notes->windowState(e->id()).value(QStringLiteral("visible")).toBool()
+                          && !notes->windowState(d->id()).value(QStringLiteral("visible")).toBool(),
+                      QStringLiteral("组合（鼠标）：落点那块露着、被拖的那块收成色块"));
+
+            /* 顺手量一下"拖到空处不会乱组"：光标落在空桌面上 */
+            const QString dGroup = d->groupId();
+            StickyNote *f = notes->createNote();
+            settle();
+            placeNote(f, QRect(1500, 800, 330, 300));
+            settle();
+            QCursor::setPos(1800, 1900);   /* 空桌面 */
+            settle();
+            bool alone = false;
+            if (QObject *windowObj = notes->windowForId(f->id())) {
+                QMetaObject::invokeMethod(windowObj, "beginDrag");
+                settle();
+                /*
+                 * 空桌面：这一块（f）身上不该有落点 —— 光标 1800,1900 离那些
+                 * 便签都远着。注意 d 和 e 这会儿已经在同一摞里了，**同一个组
+                 * 的不算落点**，所以拿它们来量必须选另一摞的目标。
+                 */
+                alone = notes->dropPreviewAt(f, QPoint(1800, 1900)) == false;
+            }
+            QMetaObject::invokeMethod(notes, "finishNoteDrag");
+            settle();
+            noteCheck(alone && f->groupId().isEmpty() && d->groupId() == dGroup,
+                      QStringLiteral("组合（鼠标）：拖到空处就只是挪个位置，不会乱组"));
+
+            /* 收尾：光标挪开，别影响后面几节 */
+            QCursor::setPos(1800, 1900);
+            notes->deleteNote(d);
+            notes->deleteNote(e);
+            notes->deleteNote(f);
+            settle();
+        }
+
+        /* =================================================================
+         * 左边那条标签条：**只有组合的便签才有**，一摞只看一张纸
+         * ---------------------------------------------------------------
+         * 用户明确要求："这个左边的 tab 不是每个卡片都有，只有组合的才有，
+         * 而且组合的卡片只显示一张卡片。这一张卡片切换。"
+         *
+         * 所以这一节量四件事：
+         *   1) 没组合过的便签**没有**标签条（左边干干净净、窗口 = 卡片宽）；
+         *   2) 组合之后才长出来，色块 = 摞里的每一块（颜色取各自的底色）；
+         *   3) 摞里只摆**一张纸**（其余几块窗口收起来，位置对齐到同一格）；
+         *   4) 点一个色块 = 换那一张纸上来，色块先后一动不动。
+         * =============================================================== */
+        {
+            StickyNote *t1 = notes->createNote();
+            StickyNote *t2 = notes->createNote();
+            StickyNote *t3 = notes->createNote();
+            settle();
+            placeNote(t1, QRect(300, 300, 330, 300));
+            placeNote(t2, QRect(700, 300, 330, 300));
+            placeNote(t3, QRect(1100, 300, 330, 300));
+            settle();
+
+            /* 各自给一个不一样的底色，标签条上那排色块才分得出来 */
+            t1->setColor(QColor(QStringLiteral("#a8e6a1")));
+            t2->setColor(QColor(QStringLiteral("#f7b6d2")));
+            t3->setColor(QColor(QStringLiteral("#c9b6f7")));
+            settle();
+
+            QObject *root2 = notes->windowRootForId(t2->id());
+            auto *t2Window = qobject_cast<StickyNoteWindow *>(notes->windowForId(t2->id()));
+
+            /* ---- 1) 没组合过：没有标签条 ---- */
+            noteCheck(root2 && t1->groupId().isEmpty() && t2->groupId().isEmpty()
+                          && t3->groupId().isEmpty()
+                          && root2->property("tabCount").toInt() == 0
+                          && root2->property("hasTabStrip").toBool() == false,
+                      QStringLiteral("标签条：没组合过的便签没有标签条（左边干干净净）"),
+                      QStringLiteral("tabCount=%1")
+                          .arg(root2 ? root2->property("tabCount").toInt() : -1));
+            if (t2Window) {
+                noteCheck(t2Window->width() == noteRect(t2).width(),
+                          QStringLiteral("标签条：没标签条时窗口就是那张纸（不多一条宽）"),
+                          QStringLiteral("窗口 %1 / 卡片 %2")
+                              .arg(t2Window->width()).arg(noteRect(t2).width()));
+            } else {
+                noteCheck(false, QStringLiteral("标签条：拿得到便签窗口对象（量窗口宽度）"));
+            }
+
+            /* ---- 2) 组合之后：标签条长出来，色块 = 摞里的三块 ---- */
+            QList<StickyNote *> trio{t2, t3};
+            noteCheck(notes->groupWith(t1, trio), QStringLiteral("标签条：三块先归成一摞"));
+            settle();
+
+            QObject *root1 = notes->windowRootForId(t1->id());
+            noteCheck(root1 && root1->property("tabCount").toInt() == 3,
+                      QStringLiteral("标签条：组合之后露头那块画出 3 个色块"),
+                      QStringLiteral("tabCount=%1")
+                          .arg(root1 ? root1->property("tabCount").toInt() : -1));
+            const QVariantList tabs = root1 ? root1->property("groupTabs").toList() : QVariantList();
+            QStringList tabColors;
+            bool selectedIsT1 = false;
+            for (const QVariant &entry : tabs) {
+                const QVariantMap tab = entry.toMap();
+                tabColors << tab.value(QStringLiteral("color")).toString();
+                if (tab.value(QStringLiteral("id")).toString() == t1->id()
+                    && tab.value(QStringLiteral("selected")).toBool()) {
+                    selectedIsT1 = true;
+                }
+            }
+            bool colorsOk = tabs.size() == 3 && selectedIsT1
+                            && tabColors.contains(QStringLiteral("#a8e6a1"))
+                            && tabColors.contains(QStringLiteral("#f7b6d2"))
+                            && tabColors.contains(QStringLiteral("#c9b6f7"));
+            noteCheck(colorsOk,
+                      QStringLiteral("标签条：每个色块用的是那一块便签自己的底色（选中圈在露头那块上）"),
+                      tabColors.join(QStringLiteral(" ")));
+
+            /*
+             * ---- 3) 组合之后只摆一张纸 ----
+             *
+             * 露头那块（t1）是完整的纸；t2/t3 的窗口收起来、位置对齐到同一格
+             * —— 用户在桌面上看到的只有一张卡片 + 左边那排标签。
+             */
+            const QRect stackCard = noteRect(t1);
+            noteCheck(noteRect(t2).topLeft() == stackCard.topLeft()
+                          && noteRect(t3).topLeft() == stackCard.topLeft(),
+                      QStringLiteral("组合：一摞里其余几块都对齐到同一格（只显示一张卡片）"),
+                      QStringLiteral("t1 %1,%2 / t2 %3,%4 / t3 %5,%6")
+                          .arg(stackCard.x()).arg(stackCard.y())
+                          .arg(noteRect(t2).x()).arg(noteRect(t2).y())
+                          .arg(noteRect(t3).x()).arg(noteRect(t3).y()));
+            noteCheck(notes->windowState(t1->id()).value(QStringLiteral("visible")).toBool()
+                          && !notes->windowState(t2->id()).value(QStringLiteral("visible")).toBool()
+                          && !notes->windowState(t3->id()).value(QStringLiteral("visible")).toBool(),
+                      QStringLiteral("组合：桌面上只摆露头那一张（其余几块收成标签）"));
+            noteCheck(root1 && root1->property("collapsed").toBool() == false
+                          && root1->property("chipStripDrawn").toBool() == true,
+                      QStringLiteral("标签条：露头那块自己画那排色块（内容照常显示）"));
+            QObject *rootCollapsed = notes->windowRootForId(t2->id());
+            noteCheck(rootCollapsed && rootCollapsed->property("collapsed").toBool() == true
+                          && rootCollapsed->property("chipStripDrawn").toBool() == false,
+                      QStringLiteral("标签条：收起来的那几块自己不再画一排色块（不叠成一串）"));
+
+            /* ---- 4) 点一个色块：换那一张纸上来，色块先后不动 ---- */
+            QStringList tabIdsBefore;
+            for (const QVariant &entry : tabs)
+                tabIdsBefore << entry.toMap().value(QStringLiteral("id")).toString();
+
+            const QRect stackBefore = noteRect(t1);
+            const bool switched = notes->switchGroupTab(t2->id());
+            settle();
+            noteCheck(switched && noteRect(t2) == stackBefore,
+                      QStringLiteral("标签条：换标签是原地换纸（整摞不挪窝）"),
+                      QStringLiteral("%1,%2 / 期望 %3,%4")
+                          .arg(noteRect(t2).x()).arg(noteRect(t2).y())
+                          .arg(stackBefore.x()).arg(stackBefore.y()));
+            noteCheck(notes->groupState(t2->id()).value(QStringLiteral("activeId")).toString()
+                          == t2->id()
+                          && notes->windowState(t2->id()).value(QStringLiteral("visible")).toBool()
+                          && !notes->windowState(t1->id()).value(QStringLiteral("visible")).toBool()
+                          && !notes->windowState(t3->id()).value(QStringLiteral("visible")).toBool(),
+                      QStringLiteral("标签条：点第二个色块，那一块换上来、原来那张收回去"));
+            QObject *rootAfter = notes->windowRootForId(t2->id());
+            const QVariantList tabsAfter = rootAfter ? rootAfter->property("groupTabs").toList()
+                                                     : QVariantList();
+            QStringList tabIdsAfter;
+            bool selectedIsT2 = false;
+            for (const QVariant &entry : tabsAfter) {
+                const QVariantMap tab = entry.toMap();
+                tabIdsAfter << tab.value(QStringLiteral("id")).toString();
+                if (tab.value(QStringLiteral("id")).toString() == t2->id()
+                    && tab.value(QStringLiteral("selected")).toBool()) {
+                    selectedIsT2 = true;
+                }
+            }
+            noteCheck(tabIdsAfter == tabIdsBefore && selectedIsT2,
+                      QStringLiteral("标签条：换纸只挪选中圈，这排色块的先后一动不动"),
+                      tabIdsAfter.join(QStringLiteral(",")));
+
+            /* 窗口 = 卡片 + 左边那条标签条（纸一点没挪，多出来那条全在窗口左边） */
+            if (t2Window) {
+                noteCheck(t2Window->width() - noteRect(t2).width()
+                              == StickyNoteWindow::tabStripWidth(),
+                          QStringLiteral("标签条：窗口 = 卡片 + 左边那一条（卡片位置尺寸都没变）"),
+                          QStringLiteral("窗口 %1 / 卡片 %2 / 标签条 %3")
+                              .arg(t2Window->width()).arg(noteRect(t2).width())
+                              .arg(StickyNoteWindow::tabStripWidth()));
+            }
+            /*
+             * "色块在卡片**外面**"这件事本身（用户要的观感）：
+             *   * 便签纸（paper）从色块右边才开始 —— 色块整块落在纸外面；
+             *   * 窗口根那一层是**透的**（纸色只画在 paper 上），所以色块底下
+             *     露出来的是桌面，不是一块纸色。
+             *
+             * 只量 tabStripWidth 是不够的：那是"打算让出多宽"，纸要是仍然刷满
+             * 整个窗口，色块看着就是画在卡片里（用户截图报的正是这个）。
+             */
+            const qreal chipRight = rootAfter ? rootAfter->property("chipRight").toReal() : -1;
+            const qreal paperLeft = rootAfter ? rootAfter->property("paperLeft").toReal() : -1;
+            noteCheck(rootAfter && chipRight > 0 && chipRight < paperLeft,
+                      QStringLiteral("标签条：色块整块落在便签纸外面（切换 tab 在卡片外边）"),
+                      QStringLiteral("chipRight=%1 paperLeft=%2")
+                          .arg(chipRight).arg(paperLeft));
+            const QColor rootFill = rootAfter ? rootAfter->property("color").value<QColor>()
+                                              : QColor();
+            noteCheck(rootAfter && rootFill.alpha() == 0,
+                      QStringLiteral("标签条：窗口根那一层是透的（纸色只画在纸那一层）"),
+                      QStringLiteral("rootColor=%1")
+                          .arg(rootFill.name(QColor::HexArgb)));
+
+            /*
+             * ---- 收起露头那一块：换一张纸露着，而且**数据也得跟着对** ----
+             *
+             * show() 只改窗口、不改数据。repairGroup 那条"这一摞至少留一块露着"
+             * 的兜底把同组一块叫出来时，要是不把它置回 visible，界面上摆着一张
+             * 纸、清单里却写着 false：下次启动它就不见了，拆分组合 / 换标签这些
+             * 按 note->visible() 挑人的地方也全会认错（用户那份清单里六条全是
+             * visible=false、桌面上却还摆着卡片，就是这么来的）。
+             */
+            {
+                const QString frontBefore = notes->groupState(t1->id())
+                                                .value(QStringLiteral("activeId")).toString();
+                StickyNote *frontNote = nullptr;
+                const QList<StickyNote *> everyone{t1, t2, t3};
+                for (StickyNote *probe : std::as_const(everyone)) {
+                    if (probe && probe->id() == frontBefore)
+                        frontNote = probe;
+                }
+                noteCheck(frontNote && menuAct(frontNote, QStringLiteral("hide")),
+                          QStringLiteral("收起露头那块：菜单那条路收得掉"));
+                settle();
+                const QString shownAfter = notes->groupState(t1->id())
+                                               .value(QStringLiteral("activeId")).toString();
+                StickyNote *shownNote = nullptr;
+                for (StickyNote *probe : std::as_const(everyone)) {
+                    if (probe && probe->id() == shownAfter)
+                        shownNote = probe;
+                }
+                QObject *shownRoot2 = notes->windowRootForId(shownAfter);
+                noteCheck(!shownAfter.isEmpty() && shownAfter != frontBefore && shownRoot2
+                              && shownRoot2->property("collapsed").toBool() == false,
+                          QStringLiteral("收起露头那块：换一张纸露着（不是一张空白卡片）"),
+                          QStringLiteral("露头 %1").arg(shownAfter.left(4)));
+                noteCheck(shownNote && shownNote->property("visible").toBool()
+                              && notes->groupState(t1->id()).value(QStringLiteral("count")).toInt() == 3,
+                          QStringLiteral("收起露头那块：换上来那块的数据也置回「摆着」了"),
+                          QStringLiteral("visible=%1")
+                              .arg(shownNote && shownNote->property("visible").toBool() ? 1 : 0));
+            }
+
+            /*
+             * ---- 收起全部 / 显示全部：一摞还是"一张纸 + 左边那排色块" ----
+             *
+             * "显示全部便签"不能把同组那几块都摆出来：它们叠在同一格上，而
+             * **后 show 出来的那块压在最上面**，它又是"收起来的那张纸"
+             * （content 不画）—— 屏幕上就是一张空白卡片（用户报的就是这个）。
+             */
+            notes->hideAll();
+            settle();
+            noteCheck(notes->visibleCount() == 0,
+                      QStringLiteral("显示全部：先收起全部，桌面上干净了"),
+                      QStringLiteral("%1 块摆着").arg(notes->visibleCount()));
+            notes->showAll();
+            settle();
+            /*
+             * 一摞只摆一张纸，而且摆的得是**露头那张**（这一节前面点过标签，
+             * 露头的已经是 t2 了 —— 所以这里按 activeId 量，不写死是哪一块）。
+             */
+            {
+                const QString activeId = notes->groupState(t1->id())
+                                             .value(QStringLiteral("activeId")).toString();
+                const QList<StickyNote *> trioProbe{t1, t2, t3};
+                int shownCount = 0;
+                bool onlyFrontShown = true;
+                for (StickyNote *probe : std::as_const(trioProbe)) {
+                    const bool shown = probe && windowStateOf(probe, QStringLiteral("visible")).toBool();
+                    if (shown)
+                        ++shownCount;
+                    if (probe && shown != (probe->id() == activeId))
+                        onlyFrontShown = false;
+                }
+                noteCheck(shownCount == 1 && onlyFrontShown,
+                          QStringLiteral("显示全部：一摞还是只摆露头那一张（其余仍收成色块）"),
+                          QStringLiteral("摆着 %1 块 / 露头 %2")
+                              .arg(shownCount).arg(activeId.left(4)));
+            }
+
+            /*
+             * 收起其他便签：别的便签收掉、别的**摞**也得整个收掉 —— 只收露头
+             * 那一块的话，兜底会把同组那张收起来的纸拉出来，一摞照样占着桌面。
+             */
+            auto *t1Window = qobject_cast<StickyNoteWindow *>(notes->windowForId(t1->id()));
+            noteCheck(t1Window && notes->hideOthers(t1Window),
+                      QStringLiteral("收起其他：点的那一块留着，其余都收掉"));
+            settle();
+            noteCheck(windowStateOf(t1, QStringLiteral("visible")).toBool()
+                          && notes->visibleCount() == 1,
+                      QStringLiteral("收起其他：桌面上只剩点的那一块"),
+                      QStringLiteral("%1 块摆着").arg(notes->visibleCount()));
+            /* 叫回来，后面几节还要用这几块 */
+            notes->showAll();
+            settle();
+
+            /* ---- 拆开：标签条收掉，收起来的那几块都放出来 ---- */
+            /*
+             * 走**菜单对象上那条真路**（NoteMenu.fire）：用户在菜单里点「拆分
+             * 组合」落到的是它，和便签根上的 handleMenuAct 不是同一个入口。
+             *
+             * 这里踩过一个大坑：fire 里把参数写成了 C++ 窗口的 noteData（那个
+             * 属性根本不存在），C++ 收到空指针直接 return false —— 菜单里点
+             * 「拆分组合」从来没有任何反应，还不报错。所以这一条必须从 fire
+             * 进去，只调 notes->ungroup 是量不到它的。
+             */
+            {
+                QObject *menuRoot = notes->windowRootForId(t2->id());
+                QObject *menuObj = menuRoot
+                                       ? menuRoot->findChild<QObject *>(QStringLiteral("noteMenu"))
+                                       : nullptr;
+                noteCheck(menuObj != nullptr,
+                          QStringLiteral("菜单：按名字找得到便签菜单对象（NoteMenu）"));
+                if (menuRoot && menuObj) {
+                    QMetaObject::invokeMethod(menuRoot, "openNoteMenu",
+                                              Q_ARG(QVariant, QVariant(1400)),
+                                              Q_ARG(QVariant, QVariant(700)));
+                    settle();
+                    QVariant fired;
+                    QMetaObject::invokeMethod(menuObj, "fire", Q_RETURN_ARG(QVariant, fired),
+                                              Q_ARG(QVariant, QVariant(QStringLiteral("ungroup"))));
+                    settle();
+                }
+                noteCheck(t1->groupId().isEmpty() && t2->groupId().isEmpty()
+                              && t3->groupId().isEmpty(),
+                          QStringLiteral("菜单：真点一次「拆分组合」把这一摞拆了（fire 那条路）"),
+                          QStringLiteral("%1/%2/%3")
+                              .arg(t1->groupId().left(4), t2->groupId().left(4),
+                                   t3->groupId().left(4)));
+            }
+            QObject *rootUngrouped = notes->windowRootForId(t2->id());
+            noteCheck(rootUngrouped && rootUngrouped->property("hasTabStrip").toBool() == false
+                          && rootUngrouped->property("tabCount").toInt() == 0,
+                      QStringLiteral("标签条：拆开之后标签条收掉（又变成普通便签）"));
+            noteCheck(notes->windowState(t1->id()).value(QStringLiteral("visible")).toBool()
+                          && notes->windowState(t3->id()).value(QStringLiteral("visible")).toBool(),
+                      QStringLiteral("标签条：拆开之后收起来的那几块都放出来了"));
+            /*
+             * 拆完每一块都得画回**完整卡片**（collapsed 要是停在"收起来的那张
+             * 纸"那个状态，屏幕上就是一张空白卡片 —— 用户报的就是这个），而且
+             * 得摊开、不许还叠在同一格上。
+             */
+            {
+                const QList<StickyNote *> apart{t1, t2, t3};
+                QStringList stillCollapsed;
+                for (StickyNote *probe : std::as_const(apart)) {
+                    QObject *root = notes->windowRootForId(probe ? probe->id() : QString());
+                    if (!root || root->property("collapsed").toBool())
+                        stillCollapsed << (probe ? probe->id().left(4) : QStringLiteral("?"));
+                }
+                noteCheck(stillCollapsed.isEmpty(),
+                          QStringLiteral("标签条：拆开之后每一块都画回完整卡片（没有空白卡片）"),
+                          stillCollapsed.join(QStringLiteral(",")));
+                noteCheck(noteRect(t1) != noteRect(t2) && noteRect(t2) != noteRect(t3)
+                              && noteRect(t1) != noteRect(t3),
+                          QStringLiteral("标签条：拆开之后三块摊开（不再叠在同一格上）"),
+                          QStringLiteral("t1 %1,%2 / t2 %3,%4 / t3 %5,%6")
+                              .arg(noteRect(t1).x()).arg(noteRect(t1).y())
+                              .arg(noteRect(t2).x()).arg(noteRect(t2).y())
+                              .arg(noteRect(t3).x()).arg(noteRect(t3).y()));
+            }
+
+            notes->deleteNote(t1);
+            notes->deleteNote(t2);
+            notes->deleteNote(t3);
+            settle();
+        }
+
+        /* =================================================================
+         * 组合**一块一块地加**（组合四个）—— 标签条得跟着长到四个
+         * ---------------------------------------------------------------
+         * 用户报的 bug：四块便签一次次凑成一摞之后，左边只有 3 个色块，再点
+         * 一下色块又少一个（"组合四个后只能显示三个 tab，再点一下就变成第三
+         * 个了"）。
+         *
+         * 为什么会这样（这一节就是那个 bug 的回归钉子）：一摞里**收起来的
+         * 那几块**（已经变成色块的那几张）在重排时不算"露着的"，而组的成员
+         * 清单原来是按"露着的几块"写回去的（见 StickyNotes::applyGroupLayout）
+         * —— 每加一块就把上一块从清单里挤掉一个：色块少一个还算轻的，重的那
+         * 半是下一次"合进来"的名单也从这份清单里取（groupWith / dropNoteOn
+         * 都走 groupMembers），被挤掉的那块从此**既露不出来也点不到**，组
+         * id 却还留在它身上（重启之后它变成桌上一块单独的便签，用户看到的就是
+         * "四块里少了一块"）。
+         *
+         * 所以这里逐块加、每加一块量一次"这一摞还是那几块"，最后再换一遍
+         * 标签 —— 换标签会重新读一遍标签条，短板最容易在那儿露出来。
+         * =============================================================== */
+        {
+            StickyNote *q1 = notes->createNote();
+            StickyNote *q2 = notes->createNote();
+            StickyNote *q3 = notes->createNote();
+            StickyNote *q4 = notes->createNote();
+            settle();
+            placeNote(q1, QRect(300, 300, 330, 300));
+            placeNote(q2, QRect(640, 300, 330, 300));
+            placeNote(q3, QRect(980, 300, 330, 300));
+            placeNote(q4, QRect(1320, 300, 330, 300));
+            settle();
+
+            /* 四块不一样的底色：色块少一个、或者色块张冠李戴都看得出来 */
+            q1->setColor(QColor(QStringLiteral("#ffe9a8")));
+            q2->setColor(QColor(QStringLiteral("#f7b6d2")));
+            q3->setColor(QColor(QStringLiteral("#a8e6a1")));
+            q4->setColor(QColor(QStringLiteral("#c9b6f7")));
+            settle();
+
+            /* 标签条上那排色块的 id（顺序也算：点第几个换哪张纸全看它） */
+            auto tabIdsOf = [notes](StickyNote *note) {
+                QStringList out;
+                QObject *root = notes->windowRootForId(note ? note->id() : QString());
+                const QVariantList tabs = root ? root->property("groupTabs").toList()
+                                               : QVariantList();
+                for (const QVariant &entry : tabs)
+                    out << entry.toMap().value(QStringLiteral("id")).toString();
+                return out;
+            };
+            auto tabCountOf = [notes](StickyNote *note) {
+                QObject *root = notes->windowRootForId(note ? note->id() : QString());
+                return root ? root->property("tabCount").toInt() : -1;
+            };
+
+            /* 一次加一块：和用户拖一块到那一摞身上是同一条路，只是名单短 */
+            QList<StickyNote *> one;
+            one << q2;
+            noteCheck(notes->groupWith(q1, one),
+                      QStringLiteral("组合四个：第 2 块加进来了"));
+            settle();
+            one.clear();
+            one << q3;
+            noteCheck(notes->groupWith(q1, one),
+                      QStringLiteral("组合四个：第 3 块加进来了"));
+            settle();
+            /*
+             * 第 4 块走**鼠标那条路**：拖它的头部丢到 q1 身上（dropNoteOn）。
+             * 用户组合就是一块一块丢上去的，而这条路自己算一份名单（不是
+             * groupWith 那份），漏人也是从这儿漏 —— 所以两条路都得量。
+             */
+            noteCheck(notes->dropNoteOn(q4, q1),
+                      QStringLiteral("组合四个：第 4 块拖到那一摞身上加进来了"));
+            settle();
+
+            /*
+             * 四块都得在这一摞里：组 id 贴到每一条身上（被挤掉的那块会留着上
+             * 一摞的组 id）、组里报得出来 4 块、标签条画 4 个色块。
+             */
+            const QString groupId = q1->groupId();
+            noteCheck(!groupId.isEmpty() && q2->groupId() == groupId && q3->groupId() == groupId
+                          && q4->groupId() == groupId,
+                      QStringLiteral("组合四个：四块的组 id 是同一个（没有谁被挤出去）"),
+                      QStringLiteral("%1/%2/%3/%4")
+                          .arg(q1->groupId().left(4), q2->groupId().left(4),
+                               q3->groupId().left(4), q4->groupId().left(4)));
+            noteCheck(notes->groupState(q1->id()).value(QStringLiteral("count")).toInt() == 4,
+                      QStringLiteral("组合四个：这一摞里报得出来 4 块"),
+                      QStringLiteral("%1 块")
+                          .arg(notes->groupState(q1->id()).value(QStringLiteral("count")).toInt()));
+            noteCheck(tabCountOf(q1) == 4,
+                      QStringLiteral("组合四个：露头那块画出 4 个色块"),
+                      QStringLiteral("tabCount=%1").arg(tabCountOf(q1)));
+
+            /* 换一次标签：这一步会重新读一遍标签条，短板就在这儿露出来 */
+            noteCheck(notes->switchGroupTab(q2->id()),
+                      QStringLiteral("组合四个：能换到第二块去"));
+            settle();
+            noteCheck(tabCountOf(q2) == 4
+                          && notes->groupState(q2->id()).value(QStringLiteral("count")).toInt() == 4,
+                      QStringLiteral("组合四个：换过标签之后这排还是 4 个色块"),
+                      QStringLiteral("tabCount=%1 / 组里 %2 块")
+                          .arg(tabCountOf(q2))
+                          .arg(notes->groupState(q2->id())
+                                   .value(QStringLiteral("count"))
+                                   .toInt()));
+            const QStringList idsNow = tabIdsOf(q2);
+            noteCheck(idsNow.size() == 4 && idsNow.contains(q1->id()) && idsNow.contains(q2->id())
+                          && idsNow.contains(q3->id()) && idsNow.contains(q4->id()),
+                      QStringLiteral("组合四个：这排色块正好是那四块（一个不少、也不张冠李戴）"),
+                      idsNow.join(QStringLiteral(",")));
+
+            /* 四个色块每一个都换得上纸：谁被挤出去，谁就在这儿点不动 */
+            const QList<StickyNote *> four{q1, q2, q3, q4};
+            QStringList notSwitched;
+            for (StickyNote *probe : four) {
+                if (!probe)
+                    continue;
+                if (notes->groupState(probe->id()).value(QStringLiteral("active")).toBool())
+                    continue;   /* 已经露着的那块点它自己返回 false，是设计如此 */
+                if (!notes->switchGroupTab(probe->id()))
+                    notSwitched << probe->id().left(4);
+                settle();
+            }
+            noteCheck(notSwitched.isEmpty(),
+                      QStringLiteral("组合四个：四个色块每一个都换得上纸（没有点不动的）"),
+                      notSwitched.join(QStringLiteral(",")));
+
+            notes->deleteNote(q1);
+            notes->deleteNote(q2);
+            notes->deleteNote(q3);
+            notes->deleteNote(q4);
+            settle();
+        }
+
+        /* 收工：把这几块删掉，别影响后面几节 */
+        notes->deleteNote(a);
+        notes->deleteNote(b);
+        notes->deleteNote(c);
+        settle();
+    }
+
+    /* =====================================================================
+     * 9) 托盘那三条（收进托盘也能用）
      * =================================================================== */
     if (tray) {
         QMenu *menu = tray->menu();
