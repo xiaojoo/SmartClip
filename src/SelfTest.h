@@ -6,6 +6,8 @@ class Screenshot;
 class TrayIcon;
 class EditorController;
 class StickyNotes;
+class TranslateCards;
+class LlmClient;
 
 /*
  * 自检模式：`SmartClip.exe --self-test`
@@ -31,10 +33,14 @@ bool enabled(int argc, char **argv);
 /* `--note-test`：只跑便签那一节（见 runNotes） */
 bool noteTestEnabled(int argc, char **argv);
 
+/* `--translate-test`：只跑翻译那一节（见 runTranslate） */
+bool translateTestEnabled(int argc, char **argv);
+
 /* qmlRoot 是 Main.qml 的根对象；run() 通过它的 dispatch() 发命令 */
 int run(QObject *qmlRoot, ClipboardStore *store, Screenshot *screenshot = nullptr,
         TrayIcon *tray = nullptr, EditorController *cmd = nullptr,
-        StickyNotes *notes = nullptr);
+        StickyNotes *notes = nullptr, TranslateCards *cards = nullptr,
+        LlmClient *llm = nullptr);
 
 /*
  * 便签专用自检：**只测便签**，别的功能一律不碰。
@@ -58,5 +64,21 @@ int runNotes(ClipboardStore *store, TrayIcon *tray = nullptr,
  */
 int notesPassed();
 int notesFailed();
+
+/*
+ * 翻译专用自检：**只测翻译**（卡片界面 / 双向状态 / 请求那套的 token 契约 /
+ * 落盘），不碰编辑区、不碰截图，也不发真请求。
+ *
+ * 和便签那份同一个用意：改翻译的时候不用把 SelfTest.cpp 那几千行全跑一遍。
+ * 它不显示主窗口，也不弹任何模态框。返回失败项数（0 = 全过）。
+ */
+int runTranslate(TranslateCards *cards, LlmClient *llm = nullptr, TrayIcon *tray = nullptr);
+
+/*
+ * 翻译自检跑完之后，它那几十项里通过了几项、失败了几项。
+ * 全量自检（run）要把这两笔并进自己的总计里 —— 理由同 notesPassed。
+ */
+int translatePassed();
+int translateFailed();
 
 }  // namespace SelfTest

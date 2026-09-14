@@ -6,6 +6,7 @@
 #include "SelfTest.h"
 #include "StickyNotes.h"
 #include "StickyNoteStore.h"
+#include "Translate.h"
 #include "TrayIcon.h"
 #include "WindowHelper.h"
 
@@ -162,6 +163,19 @@ int main(int argc, char *argv[]) {
     StickyNotes notes;
 
     /*
+     * 翻译（见 src/Translate.h）。
+     *
+     * llm 是 LLM 客户端（QML 单例 Llm）：配置 + 发请求 + 启动本机推理服务；
+     * cards 是桌面翻译卡片的总管（QML 单例 Trans）：只有一张卡片，入口统一在
+     * showCard() 上（图标条 / 托盘 / 快捷键都落到那里）。
+     *
+     * 这两个也**必须声明在 host 之前** —— 卡片窗口的 QQuickWidget 用的是
+     * quick->engine()，而引擎是 host 的子对象（理由同上面 Screenshot / 便签）。
+     */
+    LlmClient llm;
+    TranslateCards cards(&llm);
+
+    /*
      * 主窗口用 QWidget 承载，而不是 QQmlApplicationEngine 直接开 QQuickWindow。
      *
      * 为什么必须这样（这是"编辑器真正嵌进去"能否成立的前提）：
@@ -249,6 +263,12 @@ int main(int argc, char *argv[]) {
     qmlRegisterSingletonInstance("SmartClip.Globals", 1, 0, "Win", &windowHelper);
     qmlRegisterSingletonInstance("SmartClip.Globals", 1, 0, "Cmd", &editorController);
     qmlRegisterSingletonInstance("SmartClip.Globals", 1, 0, "Shot", &screenshot);
+    /*
+     * 翻译那两个也走单例（不是上下文属性），理由同上面那段：
+     * 卡片窗口的 QML 在对象构造期间就要读到 Llm / Trans。
+     */
+    qmlRegisterSingletonInstance("SmartClip.Globals", 1, 0, "Llm", &llm);
+    qmlRegisterSingletonInstance("SmartClip.Globals", 1, 0, "Trans", &cards);
 
     /* QTP0001 = NEW 之后 QML 模块的资源前缀是 /qt/qml/<URI> */
     quick->setSource(QUrl(QStringLiteral("qrc:/qt/qml/SmartClip/Main.qml")));
@@ -266,6 +286,8 @@ int main(int argc, char *argv[]) {
      * addImageProvider 对同名是替换语义，重复挂也只会留一份。
      */
     notes.attachEngine(quick->engine());
+    /* 翻译卡片同理：QQuickWidget 要主引擎才 import 得到 SmartClip.Globals */
+    cards.attachEngine(quick->engine());
 
     /*
      * 预建并预热选区窗口（藏着）：抓屏那一刻只剩"换图 + show"。
@@ -285,6 +307,12 @@ int main(int argc, char *argv[]) {
      * "module not installed"（和上面选区窗口预热同一个坑）。
      */
     notes.start();
+
+    /*
+     * 翻译卡片：上次退出时是摆着的就按上次的样子摆回来（见 TranslateCards::start）。
+     * 和便签同一个位置、同一个理由 —— 必须在这份单例注册之后。
+     */
+    cards.start();
 
     /*
      * 看一眼"一摞便签 + 左边标签条"长什么样（`SMARTCLIP_NOTES_DEMO=1`）。
@@ -359,7 +387,12 @@ int main(int argc, char *argv[]) {
      * 这一条也不显示主窗口：省得跟着便签一起晃。
      */
     const bool noteTest = SelfTest::noteTestEnabled(argc, argv);
-    if (!noteTest) {
+    /*
+     * 翻译专用自检（`--translate-test`，见 src/SelfTestTranslate.cpp）。
+     * 和便签那条同一个用意：只跑翻译那一节，不显示主窗口、不弹模态框。
+     */
+    const bool translateTest = SelfTest::translateTestEnabled(argc, argv);
+    if (!noteTest && !translateTest) {
         host.resize(1460, 900);
         host.show();
     }
@@ -382,7 +415,7 @@ int main(int argc, char *argv[]) {
      * 建在自检分支**之前**：自检要验那个菜单（见 src/SelfTest.cpp），
      * 拿不到对象就验不了。自检模式下它只是短暂亮一下，无害。
      */
-    TrayIcon tray(&host, &screenshot, &editorController, &notes, &app);
+    TrayIcon tray(&host, &screenshot, &editorController, &notes, &cards, &app);
 
     if (noteTest) {
         int result = -1;
@@ -396,6 +429,27 @@ int main(int argc, char *argv[]) {
         });
         app.exec();
         notes.shutdown();
+        cards.shutdown();
+        llm.shutdown();
+        return result < 0 ? 9 : result;
+    }
+
+    if (translateTest) {
+        int result = -1;
+        QTimer::singleShot(600, &app, [&]() {
+            result = SelfTest::runTranslate(&cards, &llm, &tray);
+            app.quit();
+        });
+        QTimer::singleShot(40000, &app, []() {
+            qWarning("翻译自检超时，强制退出");
+            ::exit(9);
+        });
+        app.exec();
+        /*
+         * 不再调 cards.shutdown()：翻译自检自己会落盘并把改过的配置写回去
+         * （见 SelfTestTranslate.cpp），这里再 save 一次会把那份恢复覆盖掉。
+         */
+        llm.shutdown();
         return result < 0 ? 9 : result;
     }
 
@@ -411,7 +465,7 @@ int main(int argc, char *argv[]) {
         /* 给 QML 引擎一点时间把原生子窗口（编辑区）真正建起来再跑检查 */
         QTimer::singleShot(600, &app, [&]() {
             result = SelfTest::run(quick->rootObject(), &store, &screenshot, &tray,
-                                   &editorController, &notes);
+                                   &editorController, &notes, &cards, &llm);
             app.quit();
         });
 
@@ -432,10 +486,18 @@ int main(int argc, char *argv[]) {
          * 正常启动那条路同理，见下面 app.exec() 之后那一行。
          */
         notes.shutdown();
+        /*
+         * 翻译这边只收尾 LLM（本地推理服务进程），**不**再调 cards.shutdown()：
+         * 翻译自检自己会落盘并把改过的配置写回去（见 SelfTestTranslate.cpp），
+         * 这里再 save 一次会把那份恢复覆盖掉。
+         */
+        llm.shutdown();
         return result < 0 ? 9 : result;
     }
 
     const int code = app.exec();
     notes.shutdown();
+    cards.shutdown();
+    llm.shutdown();
     return code;
 }

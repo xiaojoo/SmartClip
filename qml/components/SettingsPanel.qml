@@ -53,7 +53,7 @@ Popup {
     /* 改键失败的原因（撞键 / 不认识的键），显示在右栏底部 */
     property string hint: ""
 
-    /* 显示的栏目：shortcuts / storage / about */
+    /* 显示的栏目：shortcuts / storage / translate / about */
     property string section: "shortcuts"
 
     /* 顶部标题栏文案（"=" 栏目名），以及它在拖拽时的偏移 */
@@ -99,8 +99,34 @@ Popup {
     readonly property var navItems: [
         { key: "shortcuts", label: "快捷键", icon: "gear" },
         { key: "storage",   label: "存储",   icon: "folder" },
+        { key: "translate", label: "翻译",   icon: "translate" },
         { key: "about",     label: "关于",   icon: "info" }
     ]
+
+    /*
+     * 语言下拉的条目（[ { label, act, checked } ]，见 DropdownMenu 的说明）。
+     * 语言清单在 C++ 侧那一份（Llm.languages / Llm.targetLanguages），界面不另抄。
+     */
+    function languageEntries(list, current) {
+        var out = []
+        for (var i = 0; i < (list ? list.length : 0); ++i)
+            out.push({ label: list[i], act: list[i], checked: list[i] === current })
+        return out
+    }
+
+    /*
+     * 把"选中的本地推理程序 / 模型文件"填进对应那个框。
+     *
+     * 对话框由 Main.qml 开，不由这个面板自己调 —— 面板是置顶的原生窗口，
+     * Windows 的文件选择框会被它压住。那边先让面板让开再开框，选完从这里
+     * 回来填（同一条路见 Main.qml 的 withSettingsPanelAway / chooseStorageRoot）。
+     */
+    function setLocalPath(kind, path) {
+        if (kind === "exe")
+            exeField.text = path
+        else
+            modelField.text = path
+    }
 
     function titleFor(key) {
         for (var i = 0; i < navItems.length; ++i)
@@ -998,6 +1024,363 @@ Popup {
                                 hoverEnabled: true
                                 cursorShape: Qt.PointingHandCursor
                                 onClicked: root.commandRequested("treeImportFolder")
+                            }
+                        }
+                    }
+
+                    /* ============ 翻译（LLM 模型怎么配） ============ */
+                    Column {
+                        anchors.fill: parent
+                        anchors.margins: 14
+                        spacing: 9
+                        visible: root.section === "translate"
+
+                        Text {
+                            text: "翻译 / AI 模型"
+                            color: root.textBright
+                            font.pixelSize: 14
+                            font.bold: true
+                        }
+
+                        Text {
+                            width: parent.width
+                            wrapMode: Text.WordWrap
+                            color: root.mutedColor
+                            font.pixelSize: 11
+                            text: "翻译卡片（左侧图标条上那个地球图标，或 Ctrl+Alt+T）用这里的模型翻译。"
+                                  + "接口按 OpenAI 兼容格式填 —— OpenAI / DeepSeek / 通义 / Kimi / "
+                                  + "Ollama / LM Studio 都是这个格式；密钥只存在本机设置里。"
+                        }
+
+                        /* ---- 两种模式：现成的 API 服务 / 本机自己启动一个 ---- */
+                        Row {
+                            spacing: 8
+
+                            Repeater {
+                                model: [ { k: "api", label: "API 模型" },
+                                         { k: "local", label: "本地模型（本程序启动）" } ]
+
+                                delegate: Rectangle {
+                                    id: modeCell
+                                    required property var modelData
+
+                                    readonly property bool active: Llm.mode === modeCell.modelData.k
+
+                                    width: modeLabel.implicitWidth + 22
+                                    height: 26
+                                    radius: 4
+                                    color: modeHit.containsMouse ? root.rowHover : "transparent"
+                                    border.width: 1
+                                    border.color: modeCell.active ? root.accentColor : root.borderColor
+
+                                    Text {
+                                        id: modeLabel
+                                        anchors.centerIn: parent
+                                        text: modeCell.modelData.label
+                                        color: modeCell.active ? root.textBright : root.textColor
+                                        font.pixelSize: 12
+                                    }
+
+                                    MouseArea {
+                                        id: modeHit
+                                        anchors.fill: parent
+                                        hoverEnabled: true
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: Llm.mode = modeCell.modelData.k
+                                    }
+                                }
+                            }
+                        }
+
+                        /* ---- API 模式：地址 / 密钥 / 模型名 ---- */
+                        Column {
+                            width: parent.width
+                            spacing: 6
+                            visible: Llm.mode === "api"
+
+                            Repeater {
+                                model: [ { k: "apiBase", label: "接口地址",
+                                           hint: "https://api.deepseek.com/v1" },
+                                         { k: "apiKey",  label: "密钥",
+                                           hint: "sk-…（Ollama 这类本地服务可以留空）" },
+                                         { k: "model",   label: "模型名",
+                                           hint: "deepseek-chat / gpt-4o-mini / qwen-plus …" } ]
+
+                                delegate: Row {
+                                    id: apiRow
+                                    required property var modelData
+                                    spacing: 8
+
+                                    Text {
+                                        width: 62
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        text: apiRow.modelData.label
+                                        color: root.mutedColor
+                                        font.pixelSize: 12
+                                    }
+
+                                    TextField {
+                                        id: apiField
+                                        width: 420
+                                        height: 26
+                                        text: Llm[apiRow.modelData.k]
+                                        placeholderText: apiRow.modelData.hint
+                                        color: root.textColor
+                                        placeholderTextColor: root.mutedColor
+                                        font.pixelSize: 12
+                                        selectByMouse: true
+                                        leftPadding: 7
+                                        rightPadding: 7
+                                        /* 改完（或按回车）就落盘：Llm 的属性 setter 自己写 QSettings */
+                                        onEditingFinished: Llm[apiRow.modelData.k] = text
+                                        background: Rectangle {
+                                            color: "#26282b"
+                                            border.color: root.borderColor
+                                            border.width: 1
+                                            radius: 4
+                                        }
+                                    }
+                                }
+                            }
+
+                            Text {
+                                width: parent.width
+                                wrapMode: Text.WordWrap
+                                color: root.mutedColor
+                                font.pixelSize: 11
+                                text: "已经在跑 Ollama / LM Studio 的话，选这种模式、地址填 "
+                                      + "http://127.0.0.1:11434/v1（Ollama）或它给的地址就行，不用下面那套。"
+                            }
+                        }
+
+                        /* ---- 本地模式：自己启动一个 OpenAI 兼容的推理服务 ---- */
+                        Column {
+                            width: parent.width
+                            spacing: 6
+                            visible: Llm.mode === "local"
+
+                            Row {
+                                spacing: 8
+
+                                Text {
+                                    width: 62
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    text: "服务程序"
+                                    color: root.mutedColor
+                                    font.pixelSize: 12
+                                }
+                                TextField {
+                                    id: exeField
+                                    width: 320
+                                    height: 26
+                                    text: Llm.localExe
+                                    placeholderText: "llama-server.exe（llama.cpp 那个）"
+                                    color: root.textColor
+                                    placeholderTextColor: root.mutedColor
+                                    font.pixelSize: 12
+                                    selectByMouse: true
+                                    leftPadding: 7
+                                    rightPadding: 7
+                                    onEditingFinished: Llm.localExe = text
+                                    background: Rectangle {
+                                        color: "#26282b"
+                                        border.color: root.borderColor
+                                        border.width: 1
+                                        radius: 4
+                                    }
+                                }
+                                Rectangle {
+                                    width: 58; height: 26; radius: 4
+                                    anchors.verticalCenter: exeField.verticalCenter
+                                    color: exePickHit.containsMouse ? root.rowHover : "transparent"
+                                    border.width: 1
+                                    border.color: root.borderColor
+                                    Text {
+                                        anchors.centerIn: parent
+                                        text: "选择…"
+                                        color: root.textColor
+                                        font.pixelSize: 12
+                                    }
+                                    MouseArea {
+                                        id: exePickHit
+                                        anchors.fill: parent
+                                        hoverEnabled: true
+                                        cursorShape: Qt.PointingHandCursor
+                                        /* 交给 Main.qml 开框（面板要先让开，见 setLocalPath） */
+                                        onClicked: root.commandRequested("translateChooseExe")
+                                    }
+                                }
+                            }
+
+                            Row {
+                                spacing: 8
+
+                                Text {
+                                    width: 62
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    text: "模型文件"
+                                    color: root.mutedColor
+                                    font.pixelSize: 12
+                                }
+                                TextField {
+                                    id: modelField
+                                    width: 320
+                                    height: 26
+                                    text: Llm.localModel
+                                    placeholderText: "*.gguf 模型文件"
+                                    color: root.textColor
+                                    placeholderTextColor: root.mutedColor
+                                    font.pixelSize: 12
+                                    selectByMouse: true
+                                    leftPadding: 7
+                                    rightPadding: 7
+                                    onEditingFinished: Llm.localModel = text
+                                    background: Rectangle {
+                                        color: "#26282b"
+                                        border.color: root.borderColor
+                                        border.width: 1
+                                        radius: 4
+                                    }
+                                }
+                                Rectangle {
+                                    width: 58; height: 26; radius: 4
+                                    anchors.verticalCenter: modelField.verticalCenter
+                                    color: modelPickHit.containsMouse ? root.rowHover : "transparent"
+                                    border.width: 1
+                                    border.color: root.borderColor
+                                    Text {
+                                        anchors.centerIn: parent
+                                        text: "选择…"
+                                        color: root.textColor
+                                        font.pixelSize: 12
+                                    }
+                                    MouseArea {
+                                        id: modelPickHit
+                                        anchors.fill: parent
+                                        hoverEnabled: true
+                                        cursorShape: Qt.PointingHandCursor
+                                        /* 同上：走 Main.qml，面板先让开 */
+                                        onClicked: root.commandRequested("translateChooseModel")
+                                    }
+                                }
+                            }
+
+                            Row {
+                                spacing: 8
+
+                                Text {
+                                    width: 62
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    text: "端口"
+                                    color: root.mutedColor
+                                    font.pixelSize: 12
+                                }
+                                TextField {
+                                    id: portField
+                                    width: 90
+                                    height: 26
+                                    text: String(Llm.localPort)
+                                    color: root.textColor
+                                    font.pixelSize: 12
+                                    selectByMouse: true
+                                    leftPadding: 7
+                                    rightPadding: 7
+                                    validator: IntValidator { bottom: 1; top: 65535 }
+                                    onEditingFinished: Llm.localPort = parseInt(text)
+                                    background: Rectangle {
+                                        color: "#26282b"
+                                        border.color: root.borderColor
+                                        border.width: 1
+                                        radius: 4
+                                    }
+                                }
+
+                                Rectangle {
+                                    width: 118; height: 26; radius: 4
+                                    anchors.verticalCenter: portField.verticalCenter
+                                    color: startHit.containsMouse ? root.rowHover : "transparent"
+                                    border.width: 1
+                                    border.color: Llm.localRunning ? root.warnColor : root.accentColor
+                                    Text {
+                                        anchors.centerIn: parent
+                                        text: Llm.localRunning ? "停止本地模型" : "启动本地模型"
+                                        color: Llm.localRunning ? root.warnColor : root.textBright
+                                        font.pixelSize: 12
+                                    }
+                                    MouseArea {
+                                        id: startHit
+                                        anchors.fill: parent
+                                        hoverEnabled: true
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: {
+                                            if (Llm.localRunning)
+                                                Llm.stopLocal()
+                                            else
+                                                Llm.startLocal()
+                                        }
+                                    }
+                                }
+
+                                /*
+                                 * 提示：本地服务第一次要加载模型，几秒到几十秒都有可能 ——
+                                 * 文案跟着 Llm.status 走（"模型加载中…" / "已就绪" / 失败原因）。
+                                 */
+                                Text {
+                                    anchors.verticalCenter: portField.verticalCenter
+                                    width: Math.max(60, parent.width - 62 - 90 - 118 - 32)
+                                    text: Llm.status
+                                    color: root.mutedColor
+                                    font.pixelSize: 11
+                                    elide: Text.ElideRight
+                                }
+                            }
+
+                            /* 服务程序的输出（启动失败时唯一能看的地方，最多三行） */
+                            Text {
+                                width: parent.width
+                                visible: Llm.mode === "local" && Llm.localLog !== ""
+                                wrapMode: Text.WrapAnywhere
+                                maximumLineCount: 3
+                                elide: Text.ElideRight
+                                color: root.mutedColor
+                                font.pixelSize: 10
+                                font.family: "Consolas"
+                                text: Llm.localLog
+                            }
+                        }
+
+                        /* ---- 两种模式共用：测试一下 ---- */
+                        Row {
+                            spacing: 10
+
+                            Rectangle {
+                                width: 88; height: 24; radius: 4
+                                color: testHit.containsMouse ? root.rowHover : "transparent"
+                                border.width: 1
+                                border.color: root.borderColor
+                                Text {
+                                    anchors.centerIn: parent
+                                    text: "测试连接"
+                                    color: testHit.containsMouse ? root.textBright : root.textColor
+                                    font.pixelSize: 12
+                                }
+                                MouseArea {
+                                    id: testHit
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: Llm.probe()
+                                }
+                            }
+
+                            Text {
+                                anchors.verticalCenter: parent.verticalCenter
+                                width: Math.max(60, parent.width - 100)
+                                text: Llm.busy ? "正在测试…" : Llm.status
+                                color: (Llm.status.indexOf("正常") >= 0) ? root.accentColor
+                                                                        : root.mutedColor
+                                font.pixelSize: 11
+                                elide: Text.ElideRight
                             }
                         }
                     }

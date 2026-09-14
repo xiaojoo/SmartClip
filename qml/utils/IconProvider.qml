@@ -107,6 +107,14 @@ QtObject {
         else if (kind === "line-height")   s = p('M6 3.6 H14 M6 8 H14 M6 12.4 H14') + p('M2.6 4 V12') + p('M1.5 5.1 L2.6 4 L3.7 5.1') + p('M1.5 10.9 L2.6 12 L3.7 10.9')
         else if (kind === "select-all")    s = p('M3 4.6 H11 M3 8 H11 M3 11.4 H7.6') + p('M9.2 11.2 L10.8 12.8 L13.8 9.2')
         else if (kind === "lock")          s = p('M4.6 7.4 H11.4 V13.4 H4.6 Z') + p('M6.4 7.4 V5.6 A1.6 1.6 0 0 1 9.6 5.6 V7.4') + ci(8, 10.4, 1)
+        /*
+         * 翻译：一个地球（语言那个意思）。左侧图标条那一格、翻译卡片标题栏上
+         * 那个置顶按钮旁边都用它/它那一族。
+         */
+        else if (kind === "translate")     s = co(8, 8, 6) + p('M2 8 H14')
+                                                 + '<ellipse cx="8" cy="8" rx="3.2" ry="6" fill="none" stroke="' + c + '" stroke-width="1.7"/>'
+        /* 置顶（固定在桌面上）：一枚图钉 —— 帽 + 针 */
+        else if (kind === "pin")           s = p('M6 2.6 H10') + p('M6.8 2.6 V6.4 L5 9.4 H11 L9.2 6.4 V2.6') + p('M8 9.4 V13.4')
         else if (kind === "info")          s = co(8, 8, 6) + p('M8 7.4 V11.4') + ci(8, 4.9, 0.95)
         return "data:image/svg+xml;charset=utf-8," + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">' + s + '</svg>')
     }

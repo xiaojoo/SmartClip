@@ -109,7 +109,8 @@ bool SelfTest::enabled(int argc, char **argv) {
 }
 
 int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, TrayIcon *tray,
-                  EditorController *cmd, StickyNotes *notes) {
+                  EditorController *cmd, StickyNotes *notes, TranslateCards *cards,
+                  LlmClient *llm) {
     EditorViewItem *view = EditorViewItem::instance();
 
     /*
@@ -3727,6 +3728,17 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
         /* 通过 / 失败都并进来：只并失败的话，总数上会少了便签那几十项 */
         gPassed += SelfTest::notesPassed();
         gFailed += SelfTest::notesFailed();
+    }
+
+    /*
+     * 翻译那一节也在最后（src/SelfTestTranslate.cpp）：它会叫出一张卡片窗口、
+     * 起一个本地回环上的假模型服务，摆在前面同样会给编辑区 / 截图那几节添乱。
+     * 它自己会把改过的配置写回去（见那个文件开头），自检不留痕。
+     */
+    if (cards && llm) {
+        SelfTest::runTranslate(cards, llm, tray);
+        gPassed += SelfTest::translatePassed();
+        gFailed += SelfTest::translateFailed();
     }
 
     out() << Qt::endl

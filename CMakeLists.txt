@@ -62,6 +62,9 @@ set(SMARTCLIP_SOURCES
     src/StickyNoteStore.cpp
     src/StickyNotes.h
     src/StickyNotes.cpp
+    # 翻译（LLM 客户端 + 桌面卡片，见 src/Translate.h）：
+    src/Translate.h
+    src/Translate.cpp
     src/TrayIcon.h
     src/TrayIcon.cpp
     src/SelfTest.h
@@ -70,6 +73,8 @@ set(SMARTCLIP_SOURCES
     # 和 SelfTest.cpp 那三千多行分开，改便签时不用把编辑区 / 截图那些
     # 有时序问题的检查也跑一遍。
     src/SelfTestNotes.cpp
+    # 翻译自检（`--translate-test` 只跑它，见 src/SelfTest.h）：
+    src/SelfTestTranslate.cpp
 )
 
 qt_add_executable(SmartClip ${SMARTCLIP_SOURCES})
@@ -138,6 +143,7 @@ qt_add_qml_module(SmartClip
         qml/models/ClipboardModel.qml
         qml/notes/StickyNoteWindow.qml
         qml/notes/NoteMenu.qml
+        qml/translate/TranslateCard.qml
         qml/screenshot/CaptureOverlay.qml
         qml/utils/IconProvider.qml
         qml/utils/AppIcon.qml

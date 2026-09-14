@@ -4,6 +4,7 @@
 #include "LightMenu.h"
 #include "Screenshot.h"
 #include "StickyNotes.h"
+#include "Translate.h"
 
 #include <QAction>
 #include <QApplication>
@@ -13,7 +14,7 @@
 #include <QWidget>
 
 TrayIcon::TrayIcon(QWidget *host, Screenshot *shot, EditorController *cmd, StickyNotes *notes,
-                   QObject *parent)
+                   TranslateCards *cards, QObject *parent)
     : QObject(parent), m_host(host) {
     /*
      * 图标用随包的 SVG，不走 QIcon::fromTheme()：Windows 上没有图标主题，
@@ -71,6 +72,24 @@ TrayIcon::TrayIcon(QWidget *host, Screenshot *shot, EditorController *cmd, Stick
 
         m_notesArrangeAct = m_menu.addAction(QStringLiteral("排列便签"));
         connect(m_notesArrangeAct, &QAction::triggered, this, [notes]() { notes->arrangeAll(); });
+    }
+
+    /*
+     * 翻译卡片（见 src/Translate.h）。
+     *
+     * 只有一张：点它就是"叫出来"——没有就建、有就置前。和图标条那一格、
+     * Ctrl+Alt+T 落到的是同一个入口（Trans.showCard）。
+     */
+    if (cards) {
+        QAction *translateAct = m_menu.addAction(QStringLiteral("翻译卡片"));
+        if (cmd) {
+            const QString key = cmd->shortcutFor(QStringLiteral("translate"));
+            if (!key.isEmpty()) {
+                translateAct->setShortcut(QKeySequence(key));
+                translateAct->setShortcutContext(Qt::WidgetShortcut);
+            }
+        }
+        connect(translateAct, &QAction::triggered, this, [cards]() { cards->showCard(); });
     }
 
     m_menu.addSeparator();

@@ -1,0 +1,369 @@
+#pragma once
+
+#include <QObject>
+#include <QPointer>
+#include <QRect>
+#include <QString>
+#include <QStringList>
+#include <QWidget>
+
+class QNetworkAccessManager;
+class QProcess;
+class QQmlEngine;
+class QQuickWidget;
+class QTimer;
+class TranslateCards;
+
+/*
+ * LLM 客户端（QML 单例 Llm，见 src/main.cpp 的 qmlRegisterSingletonInstance）。
+ *
+ * 两件事：
+ *   1) **配置**：接口地址 / 密钥 / 模型名（api 模式），或者本地服务程序 +
+ *      模型文件 + 端口（local 模式）。都落在 QSettings 的 translate/ 下，
+ *      改一下立刻落盘，设置面板直接绑属性。
+ *   2) **翻译**：translate() 发一次 OpenAI 兼容的 chat/completions 请求，
+ *      结果通过 finished(token, 文字) / failed(token, 原因) 回来。
+ *
+ * 为什么走 HTTP 而不是内嵌一个推理库：
+ *   现在主流的模型服务（OpenAI / DeepSeek / 通义 / Ollama / LM Studio /
+ *   llama.cpp 的 llama-server）都提供同一套 OpenAI 兼容接口，一套 HTTP 客户端
+ *   全都能用；内嵌推理（llama.cpp 的库）要跟一堆编译选项和显卡后端绑死，
+ *   这个项目里不值得。
+ *
+ * 为什么要 token：一块翻译卡片发出去一个请求，用户可能在等的时候又点一次 ——
+ * 回来的两份结果必须能分清是谁的。translate() 返回的串就是这份请求的身份证，
+ * 界面把它记下来，回调里对上了才认。
+ *
+ * 密钥就存在 QSettings 里（明文，和这个程序里别的设置一样）。它只是本机
+ * 桌面程序的一份配置，别在共享账号的机器上填自己的 key。
+ */
+class LlmClient final : public QObject {
+    Q_OBJECT
+
+    /*
+     * "api" = 用现成的 API 服务；"local" = 启动本机的推理服务再连它。
+     * 两种模式共用同一套请求代码，只有"接口地址从哪来"不一样。
+     */
+    Q_PROPERTY(QString mode READ mode WRITE setMode NOTIFY settingsChanged)
+    /* API 模式：接口地址，可填到 /v1 或直接填到 /chat/completions */
+    Q_PROPERTY(QString apiBase READ apiBase WRITE setApiBase NOTIFY settingsChanged)
+    Q_PROPERTY(QString apiKey READ apiKey WRITE setApiKey NOTIFY settingsChanged)
+    Q_PROPERTY(QString model READ model WRITE setModel NOTIFY settingsChanged)
+
+    /* 本地模式：OpenAI 兼容的推理服务程序（如 llama-server.exe）+ 模型文件 */
+    Q_PROPERTY(QString localExe READ localExe WRITE setLocalExe NOTIFY settingsChanged)
+    Q_PROPERTY(QString localModel READ localModel WRITE setLocalModel NOTIFY settingsChanged)
+    Q_PROPERTY(int localPort READ localPort WRITE setLocalPort NOTIFY settingsChanged)
+
+    /* 新建卡片时的默认目标语言（语言名见 languages()） */
+    Q_PROPERTY(QString defaultTarget READ defaultTarget WRITE setDefaultTarget
+                   NOTIFY settingsChanged)
+
+    /* 本地服务进程在不在（设置面板那个按钮的文案跟着它变） */
+    Q_PROPERTY(bool localRunning READ localRunning NOTIFY localRunningChanged)
+    /* 本地服务最近几行输出（启动失败时唯一能看的地方） */
+    Q_PROPERTY(QString localLog READ localLog NOTIFY localLogChanged)
+
+    /* 有请求在飞（界面据此转圈 / 禁用按钮） */
+    Q_PROPERTY(bool busy READ busy NOTIFY busyChanged)
+    /* 一句话状态：正在翻译 / 就绪 / 出错原因（设置面板和卡片都显示它） */
+    Q_PROPERTY(QString status READ status NOTIFY statusChanged)
+
+    /*
+     * 语言清单（中文名，直接进提示词）。
+     * languages 第一项是"自动检测"（只当源语言用），targetLanguages 去掉它。
+     */
+    Q_PROPERTY(QStringList languages READ languages CONSTANT)
+    Q_PROPERTY(QStringList targetLanguages READ targetLanguages CONSTANT)
+
+public:
+    explicit LlmClient(QObject *parent = nullptr);
+    ~LlmClient() override;
+
+    QString mode() const;
+    void setMode(const QString &value);
+
+    QString apiBase() const;
+    void setApiBase(const QString &value);
+
+    QString apiKey() const;
+    void setApiKey(const QString &value);
+
+    QString model() const;
+    void setModel(const QString &value);
+
+    QString localExe() const;
+    void setLocalExe(const QString &value);
+
+    QString localModel() const;
+    void setLocalModel(const QString &value);
+
+    int localPort() const;
+    void setLocalPort(int value);
+
+    QString defaultTarget() const;
+    void setDefaultTarget(const QString &value);
+
+    bool localRunning() const;
+    QString localLog() const { return m_localLog; }
+    bool busy() const { return m_busy; }
+    QString status() const { return m_status; }
+
+    QStringList languages() const;
+    QStringList targetLanguages() const;
+
+    /*
+     * 翻译一条。返回这次请求的 token（界面记下来，和回调里的 token 对上才认）。
+     * text 空 / 没配置模型 / 已经在忙，都会异步地回一个 failed(token, 原因)，
+     * 不会阻塞调用方。
+     */
+    Q_INVOKABLE QString translate(const QString &text, const QString &target,
+                                  const QString &source = QString());
+
+    /*
+     * 试一下配置对不对：发一句最短的翻译，结果只更新 status。
+     * 走的是和 translate 完全同一条路 ——"连得上"这件事没有第二种判据。
+     */
+    Q_INVOKABLE void probe();
+
+    /* 启动 / 停掉本地推理服务进程（local 模式） */
+    Q_INVOKABLE bool startLocal();
+    Q_INVOKABLE void stopLocal();
+
+    /*
+     * 退出前收尾：把本地服务进程掐掉。
+     *
+     * main.cpp 在事件循环还活着的时候调一次（和 notes.shutdown() 同一个位置）
+     * —— 留到析构那会儿，子进程可能已经跟着进程树一起没了，Qt 会在收尾阶段
+     * 报一堆"process destroyed while running"。
+     */
+    void shutdown();
+
+signals:
+    void settingsChanged();
+    void localRunningChanged();
+    void localLogChanged();
+    void busyChanged();
+    void statusChanged();
+    /* 翻译回来了：token 是 translate() 返回的那个 */
+    void finished(const QString &token, const QString &text);
+    /* 出错了（网络 / 配置 / 模型返回的报错），error 是人能看懂的一句话 */
+    void failed(const QString &token, const QString &error);
+
+private:
+    /* 拼出 chat/completions 的完整地址（api 模式用用户填的，本地模式用端口） */
+    QString chatUrl() const;
+    QString baseUrl() const;
+    /* 真正发请求；probe 为真时不发 finished，只更新 status */
+    void post(const QString &token, const QString &text, const QString &target,
+              const QString &source, bool probe);
+    void setStatus(const QString &text);
+    void setBusy(bool on);
+    void persist(const QString &key, const QVariant &value);
+    void appendLocalLog(const QString &chunk);
+    /* 本地服务起来之后轮询 /models，能通了就报"已就绪" */
+    void pollLocalReady(int attempt);
+
+    QNetworkAccessManager *m_net = nullptr;
+    QProcess *m_proc = nullptr;
+    QTimer *m_readyTimer = nullptr;
+    QString m_probeToken;
+
+    /* 配置（默认值见 .cpp 的构造函数） */
+    QString m_mode;
+    QString m_apiBase;
+    QString m_apiKey;
+    QString m_model;
+    QString m_localExe;
+    QString m_localModel;
+    int m_localPort = 8080;
+    QString m_defaultTarget;
+
+    bool m_busy = false;
+    QString m_status;
+    QString m_localLog;
+    int m_nextToken = 1;
+};
+
+/*
+ * 桌面上的翻译卡片：**一个置顶无边框小窗 + 一个 QQuickWidget**，
+ * 界面在 qml/translate/TranslateCard.qml 里 —— 和便签窗口
+ * （StickyNoteWindow）、截图选区窗口是同一个套路，理由也一样：
+ * 置顶 / 无边框 / 不进任务栏都是窗口标志位，拖动和拖边改大小走
+ * startSystemMove / startSystemResize 交给窗口管理器。
+ *
+ * 它只有一张（不是便签那种一堆）：用户要的是"桌面上有一块翻译用的小卡片"。
+ * 关掉 = hide()，数据留在 QSettings 里，下次启动按上次的样子回来。
+ *
+ * QML 侧拿到的属性（setInitialProperties 传进去，见构造函数的说明）：
+ *   cardWin     这个窗口（拖动 / 改大小 / 关闭 / 置顶开关）
+ *   textIn      上面那个框（输入）
+ *   textOut     下面那个框（译文）
+ *   sourceLang  源语言（"自动检测" = 让模型自己认）
+ *   targetLang  目标语言
+ *   pinned      置顶（默认开）
+ *   cardNumber  身份号（标题栏"翻译"旁边那个号，自检也用）
+ *
+ * 翻译本身不在这里：QML 直接调 Llm.translate(...)，结果写回 textOut。
+ * 这个类只管"窗口 + 这份状态存哪儿"。
+ */
+class TranslateCard final : public QWidget {
+    Q_OBJECT
+
+    Q_PROPERTY(QString textIn READ textIn WRITE setTextIn NOTIFY textInChanged)
+    Q_PROPERTY(QString textOut READ textOut WRITE setTextOut NOTIFY textOutChanged)
+    Q_PROPERTY(QString sourceLang READ sourceLang WRITE setSourceLang NOTIFY languagesChanged)
+    Q_PROPERTY(QString targetLang READ targetLang WRITE setTargetLang NOTIFY languagesChanged)
+    Q_PROPERTY(bool pinned READ pinned WRITE setPinned NOTIFY pinnedChanged)
+    Q_PROPERTY(int cardNumber READ cardNumber CONSTANT)
+
+public:
+    /* engine 必须传：不传 QQuickWidget 会自己 new 一个引擎，卡片里就 import
+     * 不到 SmartClip.Globals（见构造函数里的说明）。 */
+    explicit TranslateCard(QQmlEngine *engine);
+    ~TranslateCard() override;
+
+    QString textIn() const { return m_textIn; }
+    void setTextIn(const QString &text);
+
+    QString textOut() const { return m_textOut; }
+    void setTextOut(const QString &text);
+
+    QString sourceLang() const { return m_sourceLang; }
+    void setSourceLang(const QString &lang);
+
+    QString targetLang() const { return m_targetLang; }
+    void setTargetLang(const QString &lang);
+
+    bool pinned() const { return m_pinned; }
+    void setPinned(bool on);
+
+    int cardNumber() const { return m_number; }
+
+    QObject *qmlRoot() const;
+    /* 界面加载失败时那条错误（成功返回空串）；自检拿它钉"卡片真的建起来了" */
+    QString qmlError() const;
+
+    /* 卡片所在那块屏的工作区（摆位用，和便签那边同一个理由） */
+    Q_INVOKABLE QRect screenBounds() const;
+
+    /* ---- QML 调的（界面动作） ---- */
+    /* 标题栏按住：交给窗口管理器拖动 */
+    Q_INVOKABLE void beginDrag();
+    /* 右下角按住：交给窗口管理器改大小 */
+    Q_INVOKABLE void beginResize();
+    /* 关掉卡片：藏起来（状态留着，图标条 / 托盘能再叫出来） */
+    Q_INVOKABLE void closeCard();
+    /* 把译文复制到系统剪贴板 */
+    Q_INVOKABLE void copyResult();
+    /* 源 / 目标语言对调（"自动检测"不参与对调，那时只把目标语言抄到源语言） */
+    Q_INVOKABLE void swapLanguages();
+    /* 清空两个框 */
+    Q_INVOKABLE void clearAll();
+    Q_INVOKABLE void togglePinned();
+
+signals:
+    void textInChanged();
+    void textOutChanged();
+    void languagesChanged();
+    void pinnedChanged();
+    /* 卡片被藏起来了（总管据此更新"桌面上还有没有"） */
+    void closed();
+    /* 卡片里的状态改了（总管据此排一次落盘） */
+    void stateChanged();
+
+protected:
+    void moveEvent(QMoveEvent *event) override;
+    void resizeEvent(QResizeEvent *event) override;
+    void closeEvent(QCloseEvent *event) override;
+
+private:
+    void applyWindowFlags();
+    /*
+     * 把这个属性推给 QML 根对象（restore 时用）。
+     *
+     * 两份状态的分工：**窗口在跑的时候 QML 是界面那一份**（输入框里用户敲的字
+     * 由它写回这里），C++ 这份是落盘用的存档。恢复时方向相反 —— 存档里的值要
+     * 推回界面，所以每个 setter 都顺手同步一次。值相同就不推（setProperty 会
+     * 打断 QML 那边的绑定，也会绕回来）。
+     */
+    void pushToQml(const char *name, const QVariant &value);
+
+    friend class TranslateCards;
+
+    QQmlEngine *m_engine = nullptr;
+    QQuickWidget *m_view = nullptr;
+
+    QString m_textIn;
+    QString m_textOut;
+    QString m_sourceLang;
+    QString m_targetLang;
+    bool m_pinned = true;
+    int m_number = 1;
+    /* 正在 placeAt 里改几何：那会儿的 move/resize 不该再写一次位置 */
+    bool m_placing = false;
+};
+
+/*
+ * 翻译卡片总管（QML 单例 Trans，见 src/main.cpp）。
+ *
+ * 管三件事：卡片窗口的生死、上次的样子（QSettings 的 translate/card/*）、
+ * 以及"把它叫出来"这一个入口（图标条 / 托盘 / 快捷键都落到 showCard()）。
+ *
+ * 只有一张卡片，所以这里没有便签那套清单和组合逻辑：showCard() 建一次，
+ * 之后就是 show + raise。窗口**不设父子**（顶层窗口），显式指针管着它。
+ */
+class TranslateCards final : public QObject {
+    Q_OBJECT
+
+    /* 摆着的卡片数（0 / 1）—— 图标条那一格亮不亮看它 */
+    Q_PROPERTY(int visibleCount READ visibleCount NOTIFY changed)
+
+public:
+    /*
+     * llm 是那个 LLM 客户端（新建卡片时向它要默认目标语言；可为 nullptr）。
+     * engine 是主窗口那个 QQuickWidget 的引擎（可为 nullptr，那样卡片的 QML
+     * 就 import 不到 SmartClip.Globals 那几个单例）。都**不**登记成父子关系
+     * —— 引擎是宿主 QWidget 的子对象，而本对象比那个 QWidget 活得久
+     * （见 main.cpp 里的声明顺序）。
+     */
+    explicit TranslateCards(LlmClient *llm = nullptr, QQmlEngine *engine = nullptr,
+                            QObject *parent = nullptr);
+    ~TranslateCards() override;
+
+    /* 引擎建好之后补挂一次（main.cpp 里 quick 建好就调，见便签那边同一个坑） */
+    void attachEngine(QQmlEngine *engine);
+
+    /* 上次退出时卡片是摆着的就恢复出来（启动时调一次） */
+    void start();
+    /* 退出前收尾：落盘（幂等） */
+    void shutdown();
+
+    /* 把卡片叫到桌面上：没有就建，有就 show + raise + 激活 */
+    Q_INVOKABLE TranslateCard *showCard();
+    /* 收起来（数据留着） */
+    Q_INVOKABLE void hideCard();
+
+    int visibleCount() const;
+
+    /* 卡片状态改了：排一次落盘（防抖，和便签那份 store 一个做法） */
+    void scheduleSave();
+    /* 卡片被藏起来了 */
+    void onCardClosed();
+
+signals:
+    void changed();
+
+private:
+    TranslateCard *ensureCard();
+    /* 把 QSettings 里那份存档读进卡片（正文 / 语言 / 置顶 / 位置） */
+    void restore(TranslateCard *card);
+    void save() const;
+
+    LlmClient *m_llm = nullptr;
+    QQmlEngine *m_engine = nullptr;
+    QPointer<TranslateCard> m_card;
+    QTimer *m_saveTimer = nullptr;
+    /* 卡片编号：只有一张，但界面上"翻译 1"那个号还是要发 */
+    int m_nextNumber = 1;
+};

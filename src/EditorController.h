@@ -92,6 +92,14 @@ public:
                                            const QString &startDir = QString());
 
     /*
+     * 选一个**文件**（设置里填本地推理程序 / 模型文件走这条）。
+     *
+     * filter 是 Qt 的过滤器写法（"可执行文件 (*.exe);;所有文件 (*.*)"），
+     * 给空就用"所有文件"。用户取消返回空串。
+     */
+    Q_INVOKABLE QString chooseFileDialog(const QString &title, const QString &filter = QString());
+
+    /*
      * 让用户填一行文本（重命名文件用）。
      * 取消或原样返回时 QML 那边自己判断要不要动手。
      */
@@ -156,8 +164,11 @@ public:
      *
      * 给"全局截图热键"那条路用：WM_HOTKEY 是窗口消息，回不到 QML 那边，
      * 只能由 C++ 转一下。信号是 protected 的，外面 emit 不了，所以留这个口子。
+     *
+     * Q_INVOKABLE：别的顶层窗口（翻译卡片）也要能把主界面叫起来（比如
+     * "去设置里配模型"），它没有 Main.qml 那个 dispatch。
      */
-    void activateCommand(const QString &name);
+    Q_INVOKABLE void activateCommand(const QString &name);
 
     /*
      * 截图那个全局热键注册上了没。

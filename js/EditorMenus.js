@@ -119,6 +119,12 @@ function fileMenu(ov) {
         { label: "排列便签", act: "notesArrange", icon: "grid" },
         { label: "显示全部便签", act: "notesShowAll", icon: "note" },
         { label: "收起全部便签", act: "notesHideAll", icon: "note" },
+        /*
+         * 翻译卡片（见 src/Translate.h）。和便签同一类东西：桌面上的一块小卡片，
+         * 收进托盘也能用（Ctrl+Alt+T 也是系统级热键）。只有一张 —— 点它就是
+         * 叫出来（没有就建）。
+         */
+        { label: "翻译卡片", act: "translate", shortcut: "Ctrl+Alt+T", icon: "translate" },
         { separator: true },
         { label: "保存", act: "save", shortcut: "Ctrl+S", icon: "save" },
         { label: "另存为…", act: "saveAs", shortcut: "Ctrl+Shift+S", icon: "save-as" },

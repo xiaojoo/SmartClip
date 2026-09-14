@@ -43,6 +43,8 @@ struct GlobalHotkeyEntry {
 const GlobalHotkeyEntry kGlobalHotkeys[] = {
     {0x5C01, "shot"},
     {0x5C02, "note"},
+    /* 翻译卡片 / 便签都是"把一个工具从桌面上叫出来"，同样值得有系统级热键 */
+    {0x5C03, "translate"},
 };
 
 #if defined(Q_OS_WIN)
@@ -250,6 +252,7 @@ const ShortcutEntry kShortcutTable[] = {
     {"shot",          "截图",       "文件", "Ctrl+Alt+A"},
     {"note",          "新建便签",   "文件", "Ctrl+Alt+N"},
     {"notesArrange",  "排列便签",   "文件", ""},
+    {"translate",     "翻译卡片",   "文件", "Ctrl+Alt+T"},
     {"saveAll",       "全部保存",   "文件", "Ctrl+Alt+S"},
     {"print",         "打印",       "文件", "Ctrl+P"},
     {"closeTab",      "关闭标签",   "文件", "Ctrl+W"},
@@ -483,6 +486,20 @@ QString EditorController::chooseFolderDialog(const QString &title, const QString
         QSettings().setValue(settingsKey(QStringLiteral("lastDir")), m_lastDir);
     }
     return dir;
+}
+
+QString EditorController::chooseFileDialog(const QString &title, const QString &filter) {
+    const QString start = m_lastDir.isEmpty() ? QDir::homePath() : m_lastDir;
+
+    const QString path = QFileDialog::getOpenFileName(
+        m_widget, title.isEmpty() ? tr("选择文件") : title, start,
+        filter.isEmpty() ? tr("所有文件 (*.*)") : filter);
+
+    if (!path.isEmpty()) {
+        m_lastDir = QFileInfo(path).absolutePath();
+        QSettings().setValue(settingsKey(QStringLiteral("lastDir")), m_lastDir);
+    }
+    return path;
 }
 
 QString EditorController::askText(const QString &title, const QString &label,

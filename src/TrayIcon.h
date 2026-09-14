@@ -8,14 +8,16 @@ class QWidget;
 class EditorController;
 class Screenshot;
 class StickyNotes;
+class TranslateCards;
 
 /*
  * 托盘图标（任务栏右下角那个）。
  *
- * 右键菜单：截图 / 便签（新建 / 显示全部 / 排列）/ 显示主窗口 / 收进托盘 / 退出。
- * 前两组放在这里的用处是 —— 主窗口被别的程序压着、或者缩在一边时，不用先把它
- * 叫出来就能截图、就能开一块便签（截图那个全局热键 Ctrl+Alt+A 只在主窗口是活动
- * 窗口时才响，而"新建便签"的全局热键是系统级的）。
+ * 右键菜单：截图 / 便签（新建 / 显示全部 / 排列）/ 翻译卡片 / 显示主窗口 /
+ * 收进托盘 / 退出。前几组放在这里的用处是 —— 主窗口被别的程序压着、或者缩在
+ * 一边时，不用先把它叫出来就能截图、就能开一块便签、就能叫出翻译卡片
+ * （截图那个全局热键 Ctrl+Alt+A 只在主窗口是活动窗口时才响，而"新建便签""翻译
+ * 卡片"的全局热键是系统级的）。
  *
  * 为什么单独一个类、而不是继续写在 main() 里：自检要验"菜单里到底有没有截图 /
  * 便签这几条、连没连上"（见 src/SelfTest.cpp）。托盘图标本身点不出来
@@ -27,7 +29,7 @@ class TrayIcon final : public QObject {
 
 public:
     TrayIcon(QWidget *host, Screenshot *shot, EditorController *cmd, StickyNotes *notes = nullptr,
-             QObject *parent = nullptr);
+             TranslateCards *cards = nullptr, QObject *parent = nullptr);
 
     /* 右键菜单（自检用；不拥有它，别删） */
     QMenu *menu() { return &m_menu; }

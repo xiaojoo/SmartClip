@@ -497,6 +497,30 @@ Rectangle {
         })
     }
 
+    /*
+     * 设置 → 翻译：选本地推理程序 / 模型文件（kind 是 "exe" / "model"）。
+     *
+     * 走和"选择保存位置…"同一条路：**先让设置面板让开**再开文件框。面板是
+     * 置顶的原生窗口，不让开的话 Windows 的文件选择框会被它整块盖住（用户
+     * 截图报的就是这个，详见 withSettingsPanelAway 上面那段说明）。选完面板
+     * 按原栏目放回来，再把选中的路径填进对应那个框。
+     */
+    function chooseTranslateLocalFile(kind) {
+        var path = withSettingsPanelAway(function () {
+            return Cmd.chooseFileDialog(
+                        kind === "exe" ? "选择推理服务程序" : "选择模型文件",
+                        kind === "exe" ? "可执行文件 (*.exe);;所有文件 (*.*)"
+                                       : "GGUF 模型 (*.gguf);;所有文件 (*.*)")
+        })
+        if (path === "")
+            return
+        if (kind === "exe")
+            Llm.localExe = path
+        else
+            Llm.localModel = path
+        settingsPanel.setLocalPath(kind, path)
+    }
+
     /* ------------------------------------------------------------------
      * 命令分发
      *
@@ -1240,6 +1264,13 @@ Rectangle {
         if (act === "notesArrange") { Notes.arrangeAll(); return }
         if (act === "notesShowAll") { Notes.showAll(); return }
         if (act === "notesHideAll") { Notes.hideAll(); return }
+        /*
+         * 翻译卡片（见 src/Translate.h / qml/translate/TranslateCard.qml）。
+         *
+         * 只有一张卡片：叫出来 = 没有就建、有就 show + 置前（Trans.showCard）。
+         * 图标条 / 托盘 / 快捷键落到的都是这一个入口。
+         */
+        if (act === "translate") { Trans.showCard(); return }
         if (act === "save") { saveFile(); return }
         if (act === "saveAs") { saveFileAs(); return }
         if (act === "saveAll") { saveAll(); return }
@@ -1319,6 +1350,11 @@ Rectangle {
         if (act === "settings") { showShortcuts(); return }
         /* 设置面板的"存储"栏：保存位置 / 导入的文件夹 */
         if (act === "storage") { showStorage(); return }
+        /* 设置面板的"翻译"栏：模型怎么配（翻译卡片上的提示会指到这儿） */
+        if (act === "settingsTranslate") { settingsPanel.show("translate"); return }
+        /* 设置 → 翻译里那两个「选择…」（面板先让开，再开系统文件框） */
+        if (act === "translateChooseExe") { chooseTranslateLocalFile("exe"); return }
+        if (act === "translateChooseModel") { chooseTranslateLocalFile("model"); return }
         if (act === "about") { showAbout(); return }
     }
 
@@ -1502,7 +1538,15 @@ Rectangle {
              */
             noteCount: Notes.count,
             noteVisibleCount: Notes.visibleCount,
-            noteFile: Notes.notesFilePath
+            noteFile: Notes.notesFilePath,
+
+            /*
+             * 翻译卡片（见 src/Translate.h）。
+             *
+             * 和便签一样是**独立顶层窗口**，这里量的是"主界面这一侧知不知道
+             * 它摆着没有"—— 也就是图标条那一格的状态。
+             */
+            translateVisibleCount: Trans.visibleCount
         }
     }
 
@@ -1926,14 +1970,16 @@ Rectangle {
                     anchors.fill: parent; anchors.topMargin: 8; anchors.bottomMargin: 8; spacing: 6
                     Repeater {
                         /*
-                         * 只有"文件夹 / 截图 / 便签"三格接上了动作，其余几格还是
-                         * 装饰（见下面 navHit 的 onClicked）。截图和便签那两格
-                         * 放在最前面几个工具窗口图标之间，因为它们也是"叫出一个
-                         * 工具"—— 便签那一格点一下就地新建一块，长按（右键）才
-                         * 是排列 / 收起那些（老用户不会误点，新用户看一眼提示就懂）。
+                         * 只有"文件夹 / 截图 / 便签 / 翻译"四格接上了动作，其余几格
+                         * 还是装饰（见下面 navHit 的 onClicked）。截图 / 便签 /
+                         * 翻译那三格放在最前面几个工具窗口图标之间，因为它们也是
+                         * "叫出一个工具"—— 便签那一格点一下就地新建一块，长按
+                         * （右键）才是排列 / 收起那些（老用户不会误点，新用户看
+                         * 一眼提示就懂）；翻译那一格是把翻译卡片叫到桌面上。
                          */
                         model: [ { k: "folder", active: true }, { k: "screenshot", active: false },
                                  { k: "note", active: false },
+                                 { k: "translate", active: false },
                                  { k: "file", active: false },
                                  { k: "search", active: false }, { k: "play", active: false },
                                  { k: "branch", active: false } ]
@@ -1946,6 +1992,7 @@ Rectangle {
                             readonly property bool acts: modelData.k === "folder"
                                                          || modelData.k === "screenshot"
                                                          || modelData.k === "note"
+                                                         || modelData.k === "translate"
 
                             /*
                              * 这一格算不算"当前打开的工具窗口"。
@@ -1964,7 +2011,9 @@ Rectangle {
                                                              ? !window.folderTreeHidden
                                                              : (modelData.k === "note"
                                                                 ? Notes.visibleCount > 0
-                                                                : modelData.active)
+                                                                : (modelData.k === "translate"
+                                                                   ? Trans.visibleCount > 0
+                                                                   : modelData.active))
 
                             /*
                              * 悬停态：整格填强调蓝 + 图标转白。
@@ -2012,6 +2061,8 @@ Rectangle {
                                         else
                                             Notes.createNote()
                                     }
+                                    else if (modelData.k === "translate")
+                                        Trans.showCard()
                                 }
                             }
 
@@ -2022,8 +2073,10 @@ Rectangle {
                                       ? (window.folderTreeHidden ? "显示项目树" : "收起项目树")
                                       : (modelData.k === "screenshot"
                                          ? "截图（" + window.shortcutLabel("shot", "Ctrl+Alt+A") + "）"
-                                         : "新建便签（" + window.shortcutLabel("note", "Ctrl+Alt+N")
-                                           + "）· 右键排列")
+                                         : (modelData.k === "translate"
+                                            ? "翻译卡片（" + window.shortcutLabel("translate", "Ctrl+Alt+T") + "）"
+                                            : "新建便签（" + window.shortcutLabel("note", "Ctrl+Alt+N")
+                                              + "）· 右键排列"))
                                 /* 贴着窗口左沿放：默认的"居中在格子上"会往左出界 */
                                 x: 2
                                 y: -implicitHeight - 3
