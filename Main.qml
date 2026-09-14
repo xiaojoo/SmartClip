@@ -1042,6 +1042,36 @@ Rectangle {
     }
 
     /*
+     * "便签"那一格的右键菜单（新建 / 排列 / 显示全部 / 收起全部）。
+     *
+     * 落点和别的右键菜单一样是 openAtPoint：菜单左上角紧贴鼠标那一点。
+     * 条目见 js/EditorMenus.js 的 notesMenu —— 走的是界面里共用那份
+     * DropdownMenu（深色 + 图标 + 快捷键），和"帮助"那份同一个长相。
+     */
+    function openNotesCellMenu(anchor, x, y) {
+        ddMenu.openAtPoint(anchor, x, y, Menus.notesMenu(notesMenuState(), shortcutOverrides()))
+    }
+
+    /* 那份菜单要的当前状态：便签总数 / 正摆在桌面上的条数（见 Menus.notesMenu） */
+    function notesMenuState() {
+        return { count: Notes.count, visible: Notes.visibleCount }
+    }
+
+    /*
+     * 自检用：便签那格右键菜单的动作名（见 src/SelfTest.cpp）。
+     * 和界面上弹出的是**同一份构造**（Menus.notesMenu），断言看到的就是用户能点的。
+     */
+    function notesMenuActs() {
+        var items = Menus.notesMenu(notesMenuState(), shortcutOverrides())
+        var out = []
+        for (var i = 0; i < items.length; ++i) {
+            if (items[i] && items[i].act !== undefined)
+                out.push(String(items[i].act))
+        }
+        return out
+    }
+
+    /*
      * 左树一行上按右键：文件给"打开 / 重命名 / 删除 / 在文件夹中显示"，
      * 文件夹给"新建 / 刷新 / 在文件夹中显示"（导入的目录多一条移除）。
      *
@@ -1696,6 +1726,8 @@ Rectangle {
      */
     AskCard {
         id: quitAsk
+        /* 自检按名字找它那块原生窗（见 src/SelfTest.cpp 里"问句是一块小卡片"） */
+        objectName: "quitAskCard"
         parent: window
         onAnswered: (choice) => {
             if (choice === 0) Win.hideToTray()
@@ -1969,39 +2001,17 @@ Rectangle {
                                          * 左键 = 新建一块；右键 = 排列 / 收起那些。
                                          * 便签这一格迟早要放好几条命令，但格子上
                                          * 挂不下第二个按钮，右键菜单是最省地方的做法。
+                                         *
+                                         * 菜单本身走共用那份 DropdownMenu（深色 +
+                                         * 图标），不是 Qt Quick Controls 的 Menu ——
+                                         * 那个白底、没图标，和界面里其它菜单不是一个
+                                         * 长相（用户要求统一成"帮助"那份的样子）。
                                          */
                                         if (mouse.button === Qt.RightButton)
-                                            navNotesMenu.popup()
+                                            window.openNotesCellMenu(navCell, mouse.x, mouse.y)
                                         else
                                             Notes.createNote()
                                     }
-                                }
-                            }
-
-                            /* 便签那一格的右键菜单（排列 / 显示全部 / 收起全部） */
-                            Menu {
-                                id: navNotesMenu
-                                parent: navCell
-
-                                Action {
-                                    text: "新建便签"
-                                    onTriggered: Notes.createNote()
-                                }
-                                MenuSeparator { }
-                                Action {
-                                    text: "排列便签（" + Notes.visibleCount + " 块摆着）"
-                                    enabled: Notes.visibleCount > 0
-                                    onTriggered: Notes.arrangeAll()
-                                }
-                                Action {
-                                    text: "显示全部便签"
-                                    enabled: Notes.count > 0
-                                    onTriggered: Notes.showAll()
-                                }
-                                Action {
-                                    text: "收起全部便签"
-                                    enabled: Notes.visibleCount > 0
-                                    onTriggered: Notes.hideAll()
                                 }
                             }
 

@@ -1231,8 +1231,17 @@ Rectangle {
             /* 收起来时只留底下那条细杠（还能再展开） */
             Layout.preferredHeight: root.hasLinks
                                  ? (root.linksExpanded
-                                    ? Math.min(linksFlow.height + 4, 150) : 1)
+                                    ? Math.min(linksRow.height + 4 + (linksScrollable ? 9 : 0),
+                                               150)
+                                    : 1)
                                  : 0
+            /*
+             * 一行装不下（第三张起）就出横向滚动条，那条要占 9px（见下面 linksBar）。
+             *
+             * 判据是"卡片行比可视区宽"：卡片宽是按可视区**均分**出来的
+             * （见 linksRow.cardWidth），所以两张永远正好铺满、三张起才溢出。
+             */
+            readonly property bool linksScrollable: linksRow.width > linksFlick.width + 0.5
             /* 链接栏还是原来的纸边（只有正文那块铺满，见上面 ColumnLayout 的说明） */
             Layout.margins: root.noteMargin
             visible: root.hasLinks
@@ -1255,16 +1264,58 @@ Rectangle {
                 anchors.fill: parent
                 anchors.margins: 2
                 clip: true
-                contentWidth: width
-                contentHeight: linksFlow.height
+                /* 卡片只有一行，装不下就**横向**滚（原来是一行行往下换 + 竖着滚） */
+                contentWidth: linksRow.width
+                contentHeight: height
+                flickableDirection: Flickable.HorizontalFlick
                 boundsBehavior: Flickable.StopAtBounds
                 visible: root.linksExpanded
-                ScrollBar.vertical: NoteScrollBar { }
+                /*
+                 * 横向滚动条：和正文那条竖的一样细（见下面 NoteScrollBar 那段说明）。
+                 *
+                 * 单独写一份、没复用 NoteScrollBar：那个组件是**照着竖的**写死的
+                 * （width 6 / contentItem.implicitWidth 6），横过来会变成一根 6px
+                 * 宽的竖条。这里只改成长边朝下，其余（"Fusion 下 AsNeeded 不生效，
+                 * 自己判 needed、藏的时候只改 opacity / enabled"）照抄。
+                 */
+                ScrollBar.horizontal: ScrollBar {
+                    id: linksBar
+                    policy: ScrollBar.AsNeeded
+                    readonly property bool needed: size < 1.0
+                    height: 6
+                    opacity: needed ? 1.0 : 0.0
+                    enabled: needed
+                    padding: 0
 
-                Flow {
-                    id: linksFlow
-                    width: linksFlick.width
+                    contentItem: Rectangle {
+                        implicitHeight: 6
+                        radius: 3
+                        color: Qt.rgba(root.inkColor.r, root.inkColor.g, root.inkColor.b, 0.35)
+                        opacity: linksBar.pressed ? 1.0 : 0.7
+                    }
+
+                    background: Item { }
+                }
+
+                /*
+                 * 卡片一行摆开（Row，不再 Flow 换行）。
+                 *
+                 * 宽度按**均分这一行**算：两张就各占一半，把那截空档吃满（用户要求
+                 * "这两个撑满空间"）；再多也不缩到 cardMinWidth 以下 —— 第三张起就
+                 * 装不下了，交给上面那条横向滚动条（用户要求"还有第三个就出现横向
+                 * 滚动条"）。
+                 */
+                Row {
+                    id: linksRow
                     spacing: 6
+                    /* 一张卡片的最小宽：到了这个宽度就不再缩，剩下的横向滚 */
+                    readonly property real cardMinWidth: 128
+                    /* 卡片数就是便签那条 cardCount（同一份，见文件开头） */
+                    readonly property real cardWidth: root.cardCount > 0
+                        ? Math.max(cardMinWidth,
+                                   (linksFlick.width - (root.cardCount - 1) * spacing)
+                                   / root.cardCount)
+                        : cardMinWidth
 
                     Repeater {
                         id: linkRepeater
@@ -1280,7 +1331,7 @@ Rectangle {
                             required property string thumbSource
                             required property bool ready
 
-                            width: 128
+                            width: linksRow.cardWidth
                             height: 86
                             radius: 5
                             color: Qt.rgba(1, 1, 1, 0.55)

@@ -4,7 +4,10 @@
 #include "EditorViewItem.h"
 #include "Screenshot.h"
 #include <QMessageBox>
+#include <QPointer>
 #include <QQmlEngine>
+#include <QQuickItem>
+#include <QQuickWindow>
 #include <QWidget>
 #include <QWindow>
 
@@ -200,6 +203,19 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
         QVariant result;
         QMetaObject::invokeMethod(qmlRoot, "treeRowMenuActs", Q_RETURN_ARG(QVariant, result),
                                   Q_ARG(QVariant, QVariant(kind)));
+        return result.toList();
+    };
+
+    /*
+     * 读"便签那一格"右键菜单的条目清单（见 Main.qml 的 notesMenuActs）。
+     *
+     * 这一格以前弹的是 Qt Quick Controls 的 `Menu`（白底、没图标），现在换成
+     * 界面里共用那份 DropdownMenu —— 这里钉的就是"换成共用那份之后条目还是
+     * 这四条、动作名还是同一批"。
+     */
+    auto notesMenuActs = [qmlRoot]() {
+        QVariant result;
+        QMetaObject::invokeMethod(qmlRoot, "notesMenuActs", Q_RETURN_ARG(QVariant, result));
         return result.toList();
     };
 
@@ -1986,6 +2002,28 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
                   folderActs.join(QLatin1Char('/')));
 
             /*
+             * "便签"那一格（左侧那排工具格里的便签图标）的右键菜单。
+             *
+             * 这一格以前弹的是 Qt Quick Controls 的 `Menu` —— 白底、没图标，
+             * 和界面里其它菜单长相不一致（用户截图报的就是这个）。现在走共用那份
+             * DropdownMenu（深色 + 图标 + 右边快捷键），条目在 js/EditorMenus.js
+             * 的 notesMenu 里，act 用的是"文件"菜单里同一批（dispatch 落到
+             * Notes 那四条命令上，和托盘菜单是同一份实现）。
+             */
+            {
+                QStringList noteActs;
+                for (const QVariant &a : notesMenuActs())
+                    noteActs << a.toString();
+                check(noteActs.size() == 4
+                          && noteActs.value(0) == QLatin1String("note")
+                          && noteActs.value(1) == QLatin1String("notesArrange")
+                          && noteActs.value(2) == QLatin1String("notesShowAll")
+                          && noteActs.value(3) == QLatin1String("notesHideAll"),
+                      QStringLiteral("便签那格右键菜单四条（新建 / 排列 / 显示全部 / 收起全部）"),
+                      noteActs.join(QLatin1Char('/')));
+            }
+
+            /*
              * 右键菜单指着的那一行要有灰黑底。
              *
              * 蓝底（rowHighlight）是"这份文件开在编辑器里"，和"菜单要动哪一行"
@@ -3514,8 +3552,24 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
             /*
              * 卡片是 Popup.Window 开出来的 **QQuickWindow**，不是 QWidget ——
              * 得看 QWindow 列表，`topLevelWidgets()` 里根本找不到它（第一版就栽在这）。
+             *
+             * 认的是**这一块卡片自己的窗**（quitAskCard 的 popupItem / contentItem
+             * 所在那块，见 Main.qml 里那一行 objectName），而不是"可见小窗只能有
+             * 一个"：便签窗口也是 330x300 的小窗，桌面上摆着便签时那种写法必红
+             * （用户环境里跑出来的那两条红就是这么来的）。遮罩那种"铺满整窗"的
+             * 窗口仍然会被 big 抓住 —— 它一定比主窗口还大。
+             *
+             * popupItem 这个属性名不一定在（拿不到就退回 contentItem，两个都在
+             * 卡片那块原生窗里；和 StickyNoteWindow::raisePopupWindow 同一套取法）。
              */
-            int small = 0;
+            QPointer<QQuickWindow> cardWindow;
+            if (QObject *card = qmlRoot->findChild<QObject *>(QStringLiteral("quitAskCard"))) {
+                auto *item = card->property("popupItem").value<QQuickItem *>();
+                if (!item)
+                    item = card->property("contentItem").value<QQuickItem *>();
+                if (item)
+                    cardWindow = item->window();
+            }
             int big = 0;
             QStringList seen;
             const auto tops = QGuiApplication::topLevelWindows();
@@ -3523,24 +3577,23 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
                 if (!w->isVisible())
                     continue;
                 seen << QStringLiteral("%1x%2").arg(w->width()).arg(w->height());
-                if (w->width() < 800 && w->height() < 400)
-                    ++small;      /* 卡片 */
-                else
-                    ++big;        /* 主窗口那种大窗口 */
+                if (w->width() >= 800 || w->height() >= 400)
+                    ++big;        /* 主窗口那种大窗口；遮罩会在这里露馅 */
             }
-            check(small == 1 && big <= 1,
+            check(cardWindow && cardWindow->isVisible()
+                      && cardWindow->width() < 800 && cardWindow->height() < 400 && big <= 1,
                   QStringLiteral("窗口：问句是一块小卡片，没有铺满整窗的遮罩"),
-                  QStringLiteral("小窗 %1 / 大窗 %2；可见顶层窗口：%3")
-                      .arg(small).arg(big).arg(seen.join(QStringLiteral("，"))));
+                  QStringLiteral("卡片 %1x%2 / 大窗 %3；可见顶层窗口：%4")
+                      .arg(cardWindow ? cardWindow->width() : -1)
+                      .arg(cardWindow ? cardWindow->height() : -1)
+                      .arg(big).arg(seen.join(QStringLiteral("，"))));
 
             QMetaObject::invokeMethod(qmlRoot, "closeQuitAsk");
             QCoreApplication::processEvents(QEventLoop::AllEvents, 100);
-            bool stillThere = false;
-            for (QWindow *w : QGuiApplication::topLevelWindows()) {
-                if (w->isVisible() && w->width() < 800 && w->height() < 400)
-                    stillThere = true;
-            }
-            check(!stillThere, QStringLiteral("窗口：问句收得掉（不留残窗）"));
+            check(!cardWindow || !cardWindow->isVisible(),
+                  QStringLiteral("窗口：问句收得掉（不留残窗）"),
+                  QStringLiteral("卡片那块窗还在：%1")
+                      .arg(cardWindow ? QStringLiteral("是") : QStringLiteral("已经没了")));
         }
     }
 

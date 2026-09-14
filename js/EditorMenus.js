@@ -475,6 +475,36 @@ function tabMenu(view, index, ov) {
 }
 
 /*
+ * 左侧那排工具格里**便签那一格**的右键菜单（点一下是新建，右键弹这份）。
+ *
+ * 以前这一格用的是 Qt Quick Controls 那个 `Menu`：白底、没图标，和界面里其它
+ * 菜单（深色 + 图标列 + 右边快捷键）不是一个长相 —— 用户要求改成和"帮助"那
+ * 一份一样的样子，所以现在走共用那份 DropdownMenu，条目就是下面这几条。
+ *
+ * act 用的是"文件"菜单里同一批（note / notesArrange / notesShowAll /
+ * notesHideAll），由 Main.qml 的 dispatch 落到 Notes 那四条命令上 ——
+ * 和托盘菜单点的是同一份实现，三处行为必须一模一样。
+ *
+ * state 由 Main.qml 的 notesMenuState() 给：
+ *   { count, visible }（便签总条数 / 正摆在桌面上的条数）
+ * "排列 / 收起"按 visible 置灰，"显示全部"按 count 置灰：一条都没有时点下去
+ * 什么也不会发生的条目，不该是可点的样子。
+ */
+function notesMenu(state, ov) {
+    var s = state || {}
+    var total = Number(s.count || 0)
+    var shown = Number(s.visible || 0)
+    return applyOverrides([
+        { label: "新建便签", act: "note", shortcut: "Ctrl+Alt+N", icon: "note" },
+        { separator: true },
+        { label: "排列便签（" + shown + " 块摆着）", act: "notesArrange", icon: "grid",
+          disabled: shown === 0 },
+        { label: "显示全部便签", act: "notesShowAll", icon: "note", disabled: total === 0 },
+        { label: "收起全部便签", act: "notesHideAll", icon: "note", disabled: shown === 0 }
+    ], ov)
+}
+
+/*
  * 左侧项目树标题栏的"更多"菜单（也挂在标题"项目 ∨"上，见 FolderTree.qml）。
  *
  * state 由 Main.qml 的 treeMenuState() 给：
