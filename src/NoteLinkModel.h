@@ -52,8 +52,9 @@ class NoteLinkModel final : public QAbstractListModel {
      */
     Q_PROPERTY(int lineRole READ lineRole CONSTANT)
     /*
-     * TitleRole / UrlRole 的数值。同上：菜单里"正文里的链接"那一栏要按 role
-     * 取值（标题 / 地址），QML 这边够不到 C++ 的 enum。
+     * TitleRole / UrlRole 的数值。同上：链接卡片上那几个字（标题 / 地址）要按
+     * role 取值，QML 这边够不到 C++ 的 enum。
+     * （菜单里那栏"正文里的链接"已经删了，这两个 role 现在只给卡片用。）
      */
     Q_PROPERTY(int titleRole READ titleRole CONSTANT)
     Q_PROPERTY(int urlRole READ urlRole CONSTANT)

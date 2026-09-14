@@ -3,21 +3,23 @@
 #include "NoteThumbs.h"
 #include "StickyNoteStore.h"
 
-#include <QColorDialog>
+#include <QCoreApplication>
 #include <QCursor>
 #include <QApplication>
 #include <QDateTime>
-#include <QDialog>
 #include <QDir>
 #include <QFile>
 #include <QGuiApplication>
+#include <QImage>
 #include <QMouseEvent>
 #include <QMoveEvent>
+#include <QPixmap>
 #include <QQmlContext>
 #include <QQmlEngine>
 #include <QQmlError>
 #include <QQuickItem>
 #include <QQuickWidget>
+#include <QQuickWindow>
 #include <QResizeEvent>
 #include <QScreen>
 #include <QTextStream>
@@ -470,18 +472,22 @@ void StickyNoteWindow::setLocked(bool on) {
         return;
     m_locked = on;
     /*
-     * 锁定 = 整块窗口**鼠标穿透**（Qt::WindowTransparentForInput）。
+     * 锁定 = 这块便签**不再响应鼠标**（正文点不动、拖不动、改不了大小、标签条
+     * 也点不着），只剩头部那一排按钮还能点 —— 好让用户把它解开。
      *
-     * 用这个而不是"把 MouseArea 全关掉"：穿透是窗口级的，连拖动、改大小、
-     * 编辑区全都一起让开，点它等于点底下的窗口 —— 这才是"Lock Note"该有的
-     * 手感（便签成了一张贴在桌面上的纸）。
+     * 早先这里是 `setWindowFlag(Qt::WindowTransparentForInput)`：整块窗口鼠标
+     * 穿透，"点它等于点底下的窗口"，手感确实最像"贴在桌面上的一张纸"。但那是
+     * **窗口级**的开关 —— 连头上那个锁定按钮也一起穿透了，于是**锁上就再也解
+     * 不开**（用户报的："这个锁定是单向的，只能锁定不能解锁"）。窗口级的穿透
+     * 没法只留一小块给按钮，所以改成"窗口照收事件，交互由界面按 locked 关掉"
+     * （见 StickyNoteWindow.qml 里各处 `enabled: !root.locked`）：
+     *   * 头部（颜色 / 锁定 / ⋯）照常能点 -> 锁定按钮自己就能解锁；
+     *   * 正文 / 拖动 / 改大小 / 标签条 / 链接 全部让开。
+     *
+     * 代价说清楚：锁着的便签现在会**吃掉**落在它身上的点击（不再传给底下的
+     * 窗口）。要"完全穿透、又能解锁"就得再开一块独立小窗专门放解锁按钮，
+     * 那是另一套代价（多一块窗口要跟着便签走），先不这么做。
      */
-    const bool wasVisible = isVisible();
-    const QRect geo = geometry();
-    setWindowFlag(Qt::WindowTransparentForInput, on);
-    setGeometry(geo);
-    if (wasVisible)
-        show();
     emit lockedChanged();
 }
 
@@ -875,11 +881,48 @@ void StickyNoteWindow::setNoteColor(const QString &color) {
         m_note->setColor(value);
 }
 
-QString StickyNoteWindow::pickColor() {
-    QColor current = m_note ? m_note->color() : QColor(QStringLiteral("#ffe9a8"));
-    if (!m_owner)
-        return QString();
-    return m_owner->pickColor(this, current);
+void StickyNoteWindow::raisePopupWindow(const QString &objectName) {
+    QObject *root = qmlRoot();
+    if (!root || objectName.isEmpty())
+        return;
+    QObject *popup = root->findChild<QObject *>(objectName);
+    if (!popup)
+        return;
+
+    /*
+     * popupItem 是 Popup 自己那一项"内容容器"：`Popup.Window` 时它住在**弹窗那块
+     * 独立 QQuickWindow** 里，所以 item->window() 拿到的正是那块原生窗。
+     *
+     * 退一步用 contentItem：它也在弹窗窗口里（老版本 Qt 上 popupItem 这个属性
+     * 名不一定在），两条路哪条先拿得到就用哪条。
+     */
+    auto popupItemWindow = [popup]() -> QQuickWindow * {
+        auto *item = popup->property("popupItem").value<QQuickItem *>();
+        if (!item)
+            item = popup->property("contentItem").value<QQuickItem *>();
+        return item ? item->window() : nullptr;
+    };
+
+    QQuickWindow *popupWindow = popupItemWindow();
+    if (!popupWindow)
+        return;
+
+    /*
+     * 顶到置顶带最上面（QWindow::raise 在 Windows 上就是
+     * SetWindowPos(HWND_TOP, SWP_NOACTIVATE)：只在置顶带里往上挪一格，不抢激活，
+     * 便签该是激活的还是激活的）。
+     */
+    popupWindow->raise();
+
+    /*
+     * 再补一拍：窗口刚 show 出来的一瞬间排序偶尔会被系统重排回去，下一轮事件
+     * 循环再顶一次就稳了（和 NoteMenu 的 raiseLater 同一个做法）。
+     */
+    QPointer<QQuickWindow> guard(popupWindow);
+    QTimer::singleShot(0, popupWindow, [guard]() {
+        if (guard)
+            guard->raise();
+    });
 }
 
 void StickyNoteWindow::copyText() {
@@ -2886,42 +2929,6 @@ bool StickyNotes::arrangeAll() {
     return true;
 }
 
-QString StickyNotes::pickColor(QWidget *parent, const QColor &current) {
-    QColor start = current.isValid() ? current : QColor(QStringLiteral("#ffe9a8"));
-
-    /*
-     * 自己建对话框，而不是 QColorDialog::getColor()。
-     *
-     * 原因：便签默认就摆在屏幕**右上角**，而 QColorDialog 是"居中到父窗口"的
-     * —— 父窗口贴右沿时，取色框有半个跑到屏幕外（实测：窗口落在 +3233+31，
-     * 而屏幕只有 3840 宽，右边那截根本点不到）。这里改成建完自己把它摆到
-     * **便签所在那块屏的中间**，无论便签贴在哪个角都点得到。
-     *
-     * DontUseNativeDialog：只有非原生实现才归 Qt 管几何（原生那个由系统摆，
-     * 我们 move 不动它）。代价是长相是 Qt 那套；对这个"选个背景色"的用途
-     * 够用了，而且和应用其它对话框是一套观感。
-     */
-    QColorDialog dialog(start, nullptr);
-    dialog.setWindowTitle(QStringLiteral("便签背景颜色"));
-    dialog.setOption(QColorDialog::DontUseNativeDialog, true);
-
-    /* 摆到便签所在那块屏的中间（拿不到屏就退回主屏） */
-    QScreen *screen = parent && parent->screen() ? parent->screen()
-                                                 : QGuiApplication::primaryScreen();
-    if (screen) {
-        const QRect area = screen->availableGeometry();
-        dialog.adjustSize();
-        const QSize hint = dialog.sizeHint().expandedTo(dialog.minimumSize());
-        dialog.move(area.x() + (area.width() - hint.width()) / 2,
-                    area.y() + (area.height() - hint.height()) / 2);
-    }
-
-    if (dialog.exec() != QDialog::Accepted)
-        return QString();
-    const QColor picked = dialog.currentColor();
-    return picked.isValid() ? picked.name() : QString();
-}
-
 void StickyNotes::uiTrace(const QString &text) const {
     /* 转成 UTF-8 再打：中文注释 / 中文标签在控制台里不会变成问号 */
     qWarning("UI-TRACE %s", text.toUtf8().constData());
@@ -2956,13 +2963,7 @@ QVariantMap StickyNotes::menuState(const QString &noteId) const {
     state.insert(QStringLiteral("anchorX"), menu->property("anchorX").toDouble());
     state.insert(QStringLiteral("anchorY"), menu->property("anchorY").toDouble());
     state.insert(QStringLiteral("entryCount"), menu->property("entries").toList().size());
-    state.insert(QStringLiteral("swatchCount"), menu->property("swatches").toList().size());
-
-    /* 色板第一格 / 打开那一刻的几条（自检核对色板内容和条目文字） */
-    QVariant first;
-    QMetaObject::invokeMethod(menu, "swatchAt", Q_RETURN_ARG(QVariant, first),
-                              Q_ARG(QVariant, QVariant(0)));
-    state.insert(QStringLiteral("firstSwatch"), first.toString());
+    /* 子面板挂哪边看 flyoutSide（自检拿它验证"右边不够就翻到左边"） */
 
     /*
      * 便签窗口自己的矩形（屏幕坐标）。
@@ -3012,8 +3013,16 @@ bool StickyNotes::openMenuFlyout(const QString &noteId, const QString &kind) {
     QObject *menu = root->findChild<QObject *>(QStringLiteral("noteMenu"));
     if (!menu)
         return false;
-    QMetaObject::invokeMethod(menu, "openFlyoutForTest", Q_ARG(QVariant, QVariant(kind)));
-    return true;
+    /*
+     * 把 QML 那头的返回值**透传出来**：openFlyoutForTest 在"菜单里根本没有挂着
+     * 这个 kind 的条目"时返回 false（比如颜色那条已经不是子面板了，只剩
+     * 透明度 / 组合）。早先这里不看返回值、一律 return true —— 自检就没法用这个
+     * 口子量"这一条到底有没有子面板"（踩过：明明没有子面板，接口却说打开成功）。
+     */
+    QVariant opened;
+    QMetaObject::invokeMethod(menu, "openFlyoutForTest", Q_RETURN_ARG(QVariant, opened),
+                              Q_ARG(QVariant, QVariant(kind)));
+    return opened.toBool();
 }
 
 QObject *StickyNotes::windowForId(const QString &id) const {

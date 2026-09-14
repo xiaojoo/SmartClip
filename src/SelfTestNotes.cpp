@@ -18,9 +18,11 @@
 #include <QImage>
 #include <QMenu>
 #include <QMetaObject>
+#include <QQuickItem>
 #include <QRegularExpression>
 #include <QScreen>
 #include <QThread>
+#include <QTimer>
 #include <QVariant>
 #include <QWindow>
 #include <cstdio>
@@ -294,7 +296,7 @@ int SelfTest::runNotes(ClipboardStore *store, TrayIcon *tray, EditorController *
         noteCheck(state.value(QStringLiteral("headerHeight")).toDouble() > 10,
                   QStringLiteral("窗口：头部（拖动把手）有高度"));
         noteCheck(notes->palette().size() >= 8,
-                  QStringLiteral("窗口：调色板里有多个底色可选（菜单色板用它）"),
+                  QStringLiteral("窗口：调色板里有多个底色可选（便签头上那个颜色弹窗用它）"),
                   QStringLiteral("%1 格").arg(notes->palette().size()));
 
         QObject *root = notes->windowRootForId(probe->id());
@@ -353,7 +355,8 @@ int SelfTest::runNotes(ClipboardStore *store, TrayIcon *tray, EditorController *
     }
 
     /* =====================================================================
-     * 5) 「⋯」菜单：贴着鼠标、颜色在里面、子面板会翻边
+     * 5) 右键菜单：贴着鼠标、子面板会翻边（颜色/锁定已经搬到便签头上，
+     *    「更多颜色」那条色板也删了，见下面那两条）
      * =================================================================== */
     {
         StickyNote *menuNote = probe;
@@ -391,32 +394,125 @@ int SelfTest::runNotes(ClipboardStore *store, TrayIcon *tray, EditorController *
                   QStringLiteral("菜单：弹出来了"));
         noteCheck(open.value(QStringLiteral("flyout")).toString().isEmpty(),
                   QStringLiteral("菜单：刚打开时右边没有子面板"));
-        noteCheck(open.value(QStringLiteral("swatchCount")).toInt() >= 8,
-                  QStringLiteral("菜单：颜色那一条带整份调色板（≥8 格）"),
-                  QStringLiteral("%1 格").arg(open.value(QStringLiteral("swatchCount")).toInt()));
+        /*
+         * 颜色弹窗：便签头上那个**色块按钮**点开的调色板（用户要求"颜色放到外面
+         * 来、做成弹窗的形式"）。这里走的就是按钮那条路（root.openPalette），
+         * 量三件事：弹窗真开了、整份调色板都在里面、第一格就是默认的便签黄。
+         */
+        {
+            QObject *palette = root ? root->findChild<QObject *>(QStringLiteral("notePalette"))
+                                    : nullptr;
+            noteCheck(palette != nullptr,
+                      QStringLiteral("颜色弹窗：便签窗口里找得到它（按名字）"));
+            QVariant openedPalette;
+            QMetaObject::invokeMethod(root, "openPalette", Q_RETURN_ARG(QVariant, openedPalette));
+            settle();
+            QVariant swatch0;
+            QMetaObject::invokeMethod(root, "paletteSwatchAt", Q_RETURN_ARG(QVariant, swatch0),
+                                      Q_ARG(QVariant, QVariant(0)));
+            const int swatchCount = palette ? palette->property("swatches").toList().size() : -1;
+            noteCheck(palette && palette->property("opened").toBool() && swatchCount >= 24,
+                      QStringLiteral("颜色弹窗：点色块按钮弹出的就是整份调色板（≥24 格）"),
+                      QStringLiteral("%1 格 / 第一格 %2").arg(swatchCount).arg(swatch0.toString()));
+            noteCheck(swatch0.toString().startsWith(QLatin1String("#ffe9a8")),
+                      QStringLiteral("颜色弹窗：色板第一格就是默认的便签黄"),
+                      swatch0.toString());
+
+            /* 按一格 = 真的换底色（走的是弹窗里那条 onClicked 同一条路） */
+            noteCheck(root->findChild<QObject *>(QStringLiteral("noteColorButton")) != nullptr,
+                      QStringLiteral("便签头：找得到颜色按钮"));
+            const QString colorBefore =
+                notes->windowState(menuNote->id()).value(QStringLiteral("color")).toString();
+            QVariant pickedOther;
+            QMetaObject::invokeMethod(root, "pickPaletteSwatch", Q_RETURN_ARG(QVariant, pickedOther),
+                                      Q_ARG(QVariant, QVariant(3)));
+            settle();
+            const QString colorAfter =
+                notes->windowState(menuNote->id()).value(QStringLiteral("color")).toString();
+            noteCheck(pickedOther.toBool() && colorAfter != colorBefore,
+                      QStringLiteral("颜色弹窗：按一格真的换了底色"),
+                      QStringLiteral("%1 -> %2").arg(colorBefore, colorAfter));
+            noteCheck(palette && !palette->property("opened").toBool(),
+                      QStringLiteral("颜色弹窗：选完那一格自己收起来"));
+            /* 换回原来的底色，后面的用例不跟着变 */
+            QMetaObject::invokeMethod(root, "setBackground", Q_ARG(QVariant, QVariant(colorBefore)));
+            settle();
+
+            QMetaObject::invokeMethod(root, "closePalette");
+            settle();
+            noteCheck(palette && !palette->property("opened").toBool(),
+                      QStringLiteral("颜色弹窗：收得掉"));
+
+            /*
+             * 按钮那一下是"开 / 收"：判据是弹窗**关的那一刻**光标还在不在按钮里
+             * （见 StickyNoteWindow 的 palettePopup.closedByButton）—— 按在按钮上
+             * 关掉的这一下该算"收"，不该又把它开回来（不然按钮永远关不掉弹窗）。
+             * 界面上 colorHit.onClicked 走的就是 paletteButtonClicked()。
+             */
+            palette->setProperty("closedByButton", true);
+            QVariant clickedAfterButtonClose;
+            QMetaObject::invokeMethod(root, "paletteButtonClicked",
+                                      Q_RETURN_ARG(QVariant, clickedAfterButtonClose));
+            settle();
+            noteCheck(!clickedAfterButtonClose.toBool() && !palette->property("opened").toBool()
+                          && !palette->property("closedByButton").toBool(),
+                      QStringLiteral("颜色弹窗：按在按钮上收掉之后，这一下不会再把它开回来"));
+            /* 标记用掉之后，再点按钮就是"开" */
+            QVariant clickedOpen;
+            QMetaObject::invokeMethod(root, "paletteButtonClicked",
+                                      Q_RETURN_ARG(QVariant, clickedOpen));
+            settle();
+            noteCheck(clickedOpen.toBool() && palette->property("opened").toBool(),
+                      QStringLiteral("颜色弹窗：按钮那一下真的把弹窗开起来"));
+            QMetaObject::invokeMethod(root, "closePalette");
+            settle();
+        }
 
         const QString labels = open.value(QStringLiteral("labels")).toString();
-        for (const QString &want : {QStringLiteral("颜色"), QStringLiteral("透明度"),
+        for (const QString &want : {QStringLiteral("透明度"),
                                     QStringLiteral("新建便签"), QStringLiteral("始终置顶"),
-                                    QStringLiteral("锁定"), QStringLiteral("删除这块便签")}) {
+                                    QStringLiteral("删除这块便签")}) {
             noteCheck(labels.contains(want),
                       QStringLiteral("菜单：有「%1」这一条").arg(want), labels);
         }
+        /* 锁定那条搬到便签头上了，菜单里不该再有它 */
+        noteCheck(!labels.contains(QStringLiteral("锁定")),
+                  QStringLiteral("菜单：锁定已经从菜单里搬走（在便签头上）"), labels);
+        /* 「正文里的链接」那一栏用户也不要了（正文底下的链接卡片照样能点） */
+        noteCheck(!labels.contains(QStringLiteral("正文里的链接")),
+                  QStringLiteral("菜单：没有「正文里的链接」那一栏了"), labels);
+        /*
+         * 「更多颜色」那条也删了（用户要求："取消更多颜色这行，调色板不要了删除"，
+         * 后来又说"一起删干净"）。
+         *
+         * 它原来是鼠标停上去飞出一块色板（8 列 48 格）+ 最下面一条「更多颜色…」
+         * （开 Qt 取色框）。现在**条目、色板、以及 C++ 那侧那套取色框
+         * （pickColor / colorDialogFor / captureColorDialog）全都删了**：换底色的
+         * 入口只剩便签头上那个颜色弹窗（见上面那一节），菜单里不该再留着它。
+         *
+         * 下面那条顺手钉住"再也飞不出来"：openMenuFlyout 会把 QML 的结果透传
+         * 出来，菜单里没有挂着 color 的条目时它返回 false。
+         */
+        noteCheck(!labels.contains(QStringLiteral("更多颜色")),
+                  QStringLiteral("菜单：没有「更多颜色」那一行了"), labels);
+        noteCheck(!notes->openMenuFlyout(menuNote->id(), QStringLiteral("color")),
+                  QStringLiteral("菜单：色板那一栏没了，再也飞不出面板（颜色交给便签头上的弹窗）"));
 
         /* 主栏的宽度（子面板是自己一块窗口，主栏窗口整场菜单就这么宽） */
         const double collapsedWidth = open.value(QStringLiteral("paneWidth")).toDouble();
 
-        /* 展开颜色子面板：位置给得出来、和主栏并排、还在屏幕里 */
-        noteCheck(notes->openMenuFlyout(menuNote->id(), QStringLiteral("color")),
-                  QStringLiteral("菜单：颜色子面板打得开"));
+        /* 展开透明度子面板：位置给得出来、和主栏并排、还在屏幕里
+           （子面板这套机制现在只剩透明度和组合在用） */
+        noteCheck(notes->openMenuFlyout(menuNote->id(), QStringLiteral("opacity")),
+                  QStringLiteral("菜单：透明度子面板打得开"));
         settle();
         const QVariantMap fly = notes->menuState(menuNote->id());
         const QRect menuFly = fly.value(QStringLiteral("screenRect")).toRect();
         const QRect subFly = fly.value(QStringLiteral("flyoutRect")).toRect();
         const QString side = fly.value(QStringLiteral("flyoutSide")).toString();
 
-        noteCheck(fly.value(QStringLiteral("flyout")).toString() == QLatin1String("color"),
-                  QStringLiteral("菜单：当前展开的是颜色面板"));
+        noteCheck(fly.value(QStringLiteral("flyout")).toString() == QLatin1String("opacity"),
+                  QStringLiteral("菜单：当前展开的是透明度面板"));
         /*
          * 主栏那块窗口的几何整场菜单里不许变 —— 这是"不闪、不伸缩"的前提：
          * 子面板翻到左边时，只要主栏窗口跟着挪，Windows 就会把旧画面按新位置
@@ -442,15 +538,11 @@ int SelfTest::runNotes(ClipboardStore *store, TrayIcon *tray, EditorController *
                   QStringLiteral("菜单：子面板和主栏并排（不叠在主栏上）"),
                   QStringLiteral("主栏右缘 %1 / 面板左缘 %2")
                       .arg(menuFly.x() + collapsedWidth).arg(subFly.x()));
-        noteCheck(fly.value(QStringLiteral("firstSwatch")).toString()
-                      .startsWith(QLatin1String("#ffe9a8")),
-                  QStringLiteral("菜单：色板第一格就是默认的便签黄"),
-                  fly.value(QStringLiteral("firstSwatch")).toString());
 
         /*
          * 「子菜单闪一下就消失」那条毛病的钉子。
          *
-         * 主栏和子面板之间有 6px 的缝：鼠标从"颜色"那一条往面板上挪，中途会
+         * 主栏和子面板之间有 6px 的缝：鼠标从"透明度"那一条往面板上挪，中途会
          * 离开那一行，而"进到面板上"那个 hover 事件在窗口刚改过尺寸时并不
          * 可靠 —— 只靠 hover 判断的话，面板会在这条缝上被收掉（用户看到的就是
          * 闪一下）。现在改成按**光标实际位置**判断，这里就把光标放进那条缝里，
@@ -459,6 +551,9 @@ int SelfTest::runNotes(ClipboardStore *store, TrayIcon *tray, EditorController *
         {
             const QRect subFly2 = fly.value(QStringLiteral("flyoutRect")).toRect();
             const QRect menuFly2 = fly.value(QStringLiteral("screenRect")).toRect();
+            noteOut(QStringLiteral("TRACE 缝检查开始 flyout=%1")
+                        .arg(notes->menuState(menuNote->id())
+                                 .value(QStringLiteral("flyout")).toString()));
             noteOut(QStringLiteral("（主栏 %1,%2 / 面板 %3,%4 %5 宽 / side=%6）")
                         .arg(menuFly2.x()).arg(menuFly2.y())
                         .arg(subFly2.x()).arg(subFly2.y()).arg(subFly2.width()).arg(side));
@@ -478,7 +573,7 @@ int SelfTest::runNotes(ClipboardStore *store, TrayIcon *tray, EditorController *
                 }
                 const QVariantMap still = notes->menuState(menuNote->id());
                 noteCheck(still.value(QStringLiteral("flyout")).toString()
-                              == QLatin1String("color"),
+                              == QLatin1String("opacity"),
                           QStringLiteral("菜单：鼠标经过那条缝时子面板不会闪掉"),
                           QStringLiteral("flyout=%1")
                               .arg(still.value(QStringLiteral("flyout")).toString()));
@@ -507,13 +602,13 @@ int SelfTest::runNotes(ClipboardStore *store, TrayIcon *tray, EditorController *
                                       Q_ARG(QVariant, QVariant(area.right() - 2)),
                                       Q_ARG(QVariant, QVariant(area.y() + 300)));
             settle();
-            notes->openMenuFlyout(menuNote->id(), QStringLiteral("color"));
+            notes->openMenuFlyout(menuNote->id(), QStringLiteral("opacity"));
             settle();
 
             const QVariantMap edge = notes->menuState(menuNote->id());
             const bool edgeOpen = edge.value(QStringLiteral("opened")).toBool()
                                   && edge.value(QStringLiteral("flyout")).toString()
-                                         == QLatin1String("color");
+                                         == QLatin1String("opacity");
             const QRect menuEdge = edge.value(QStringLiteral("screenRect")).toRect();
             const QRect subEdge = edge.value(QStringLiteral("flyoutRect")).toRect();
             const QString edgeSide = edge.value(QStringLiteral("flyoutSide")).toString();
@@ -577,7 +672,7 @@ int SelfTest::runNotes(ClipboardStore *store, TrayIcon *tray, EditorController *
         /*
          * 便签贴近屏幕右边时：子面板不能挂在"被便签挡住"的位置上。
          *
-         * 用户报的场景：把便签拖到右边，点「⋯」，右边那块子面板（颜色/透明度）
+         * 用户报的场景：把便签拖到右边，点「⋯」，右边那块子面板（透明度/链接）
          * 要么出屏、要么被便签压住 —— 看着就是"便签把菜单盖住了"。
          * 规矩是：子面板优先挂右边，但右边**被便签挡**或者**出屏**时就挂左边，
          * 而主栏永远贴着鼠标那一点（不许为了塞下自己把主栏搬走、压住便签）。
@@ -603,7 +698,7 @@ int SelfTest::runNotes(ClipboardStore *store, TrayIcon *tray, EditorController *
                                       Q_ARG(QVariant, QVariant(clickX)),
                                       Q_ARG(QVariant, QVariant(clickY)));
             settle();
-            notes->openMenuFlyout(menuNote->id(), QStringLiteral("color"));
+            notes->openMenuFlyout(menuNote->id(), QStringLiteral("opacity"));
             settle();
 
             const QVariantMap near = notes->menuState(menuNote->id());
@@ -681,15 +776,175 @@ int SelfTest::runNotes(ClipboardStore *store, TrayIcon *tray, EditorController *
             noteCheck(probe->opacity() < 1.0,
                       QStringLiteral("菜单：透明度进了数据（会跟着 notes.json 存）"));
 
-            QMetaObject::invokeMethod(root, "handleMenuAct", Q_ARG(QVariant, QVariant("lock")));
+            /*
+             * 锁定：走**便签头上那个锁按钮**那条路（root.toggleLock）。
+             *
+             * 这里钉住用户报的那条："这个锁定是单向的，只能锁定不能解锁" ——
+             * 原来锁定是**窗口级鼠标穿透**（Qt::WindowTransparentForInput），
+             * 连这个按钮自己都一起穿透了，锁上就再也点不着。现在窗口照收事件、
+             * 由界面按 locked 关掉正文/拖动/改大小这些交互，头部那排按钮留着。
+             */
+            QObject *lockBtn = root->findChild<QObject *>(QStringLiteral("noteLockButton"));
+            noteCheck(lockBtn != nullptr, QStringLiteral("便签头：找得到锁定按钮"));
+
+            QVariant lockedByButton;
+            QMetaObject::invokeMethod(root, "toggleLock", Q_RETURN_ARG(QVariant, lockedByButton));
             settle();
             s = notes->windowState(probe->id());
-            noteCheck(s.value(QStringLiteral("locked")).toBool(),
-                      QStringLiteral("菜单：勾上「锁定」之后便签鼠标穿透"));
+            QObject *bodyItem = root->findChild<QObject *>(QStringLiteral("noteBody"));
+            noteCheck(lockedByButton.toBool() && s.value(QStringLiteral("locked")).toBool(),
+                      QStringLiteral("便签头：点锁定按钮就锁上了"));
+            noteCheck(lockBtn && lockBtn->property("on").toBool(),
+                      QStringLiteral("便签头：锁上之后按钮自己也显示成「已锁」"),
+                      QStringLiteral("on=%1").arg(lockBtn && lockBtn->property("on").toBool() ? 1 : 0));
+            noteCheck(bodyItem && !bodyItem->property("enabled").toBool(),
+                      QStringLiteral("便签头：锁上之后正文不再响应鼠标（不是窗口级穿透）"));
+
+            QVariant unlockedByButton;
+            QMetaObject::invokeMethod(root, "toggleLock", Q_RETURN_ARG(QVariant, unlockedByButton));
+            settle();
+            s = notes->windowState(probe->id());
+            noteCheck(unlockedByButton.toBool() && !s.value(QStringLiteral("locked")).toBool(),
+                      QStringLiteral("便签头：再点一次就解锁了（锁是双向的）"));
+            noteCheck(bodyItem && bodyItem->property("enabled").toBool(),
+                      QStringLiteral("便签头：解锁之后正文又能点了"));
+
+            /*
+             * 两个图标一样大（用户要求）。原来头上有三个按钮（颜色 / 锁定 / ⋯），
+             * "⋯ 不要了"之后只剩两个 —— 这里按实际存在的那几个量。
+             */
+            {
+                QObject *colorBtn = root->findChild<QObject *>(QStringLiteral("noteColorButton"));
+                const bool sameW = colorBtn && lockBtn
+                                   && colorBtn->property("implicitWidth").toReal()
+                                          == lockBtn->property("implicitWidth").toReal();
+                const bool sameH = colorBtn && lockBtn
+                                   && colorBtn->property("implicitHeight").toReal()
+                                          == lockBtn->property("implicitHeight").toReal();
+                noteCheck(sameW && sameH,
+                          QStringLiteral("便签头：颜色 / 锁定 两个按钮一样大"),
+                          QStringLiteral("颜色 %1x%2 / 锁定 %3x%4")
+                              .arg(colorBtn ? colorBtn->property("implicitWidth").toReal() : -1)
+                              .arg(colorBtn ? colorBtn->property("implicitHeight").toReal() : -1)
+                              .arg(lockBtn ? lockBtn->property("implicitWidth").toReal() : -1)
+                              .arg(lockBtn ? lockBtn->property("implicitHeight").toReal() : -1));
+                /* 「⋯」那个按钮已经撤了（菜单改成右键弹） */
+                noteCheck(!root->findChild<QObject *>(QStringLiteral("noteMenuButton"))
+                              && !root->findChild<QObject *>(QStringLiteral("noteMenuIcon")),
+                          QStringLiteral("便签头：没有「⋯」按钮了（菜单走右键）"));
+            }
+
+            /*
+             * 两个图标**画出来**也得一样大（用户报的："图标不一样大"）。
+             *
+             * 只比画布尺寸不够：画布本来就都是 14×14，可挂锁只画了 7 个单位宽、
+             * T 恤画了 13.6 —— 摆在旁边就是小一号。所以这里抓一张窗口图，在图标
+             * 的矩形里找和纸色差得多的像素，量出**墨迹包围盒**，比高度（宽度天然
+             * 差得多：挂锁比 T 恤窄）。
+             */
+            {
+                auto *iconWin = qobject_cast<QWidget *>(notes->windowForId(probe->id()));
+                auto *rootItem = qobject_cast<QQuickItem *>(root);
+                const QImage shot = iconWin ? iconWin->grab().toImage() : QImage();
+                const qreal dpr = iconWin ? iconWin->devicePixelRatioF() : 1.0;
+                QStringList inkHeights;
+                bool inkOk = !shot.isNull() && rootItem != nullptr;
+                for (const QString &name : {QStringLiteral("noteColorIcon"),
+                                            QStringLiteral("noteLockIcon")}) {
+                    auto *icon = qobject_cast<QQuickItem *>(
+                        root->findChild<QObject *>(name));
+                    if (!icon) {
+                        inkOk = false;
+                        inkHeights << QStringLiteral("?");
+                        continue;
+                    }
+                    /* 图标在便签里的位置（换算到窗口像素） */
+                    const QPointF at = icon->mapToItem(rootItem, QPointF(0, 0));
+                    const QRect r(qRound(at.x() * dpr), qRound(at.y() * dpr),
+                                  qRound(icon->width() * dpr), qRound(icon->height() * dpr));
+                    const QRect clamped = r.intersected(shot.rect());
+                    if (clamped.isEmpty()) {
+                        inkOk = false;
+                        inkHeights << QStringLiteral("空");
+                        continue;
+                    }
+                    /*
+                     * 这块里**出现最多的那一档亮度**当纸色（图标只占一小块，
+                     * 剩下的都是纸），跟它差 40 以上的算墨迹 —— 便签纸有深有浅
+                     * （浅纸上墨是暗的、深纸上墨是亮的），只看"比纸暗"会在深色
+                     * 便签上把整块都算成墨迹。
+                     */
+                    QHash<int, int> lumHist;
+                    int bestCount = -1;
+                    int paperLum = 0;
+                    for (int y = clamped.top(); y <= clamped.bottom(); ++y) {
+                        for (int x = clamped.left(); x <= clamped.right(); ++x) {
+                            const int bucket = (qGray(shot.pixel(x, y)) / 8) * 8;
+                            const int count = ++lumHist[bucket];
+                            if (count > bestCount) {
+                                bestCount = count;
+                                paperLum = bucket;
+                            }
+                        }
+                    }
+                    QRect ink;
+                    for (int y = clamped.top(); y <= clamped.bottom(); ++y) {
+                        for (int x = clamped.left(); x <= clamped.right(); ++x) {
+                            if (qAbs(qGray(shot.pixel(x, y)) - paperLum) < 40)
+                                continue;
+                            ink = ink.isNull() ? QRect(x, y, 1, 1) : ink.united(QRect(x, y, 1, 1));
+                        }
+                    }
+                    if (ink.isNull()) {
+                        inkOk = false;
+                        inkHeights << QStringLiteral("没画");
+                        continue;
+                    }
+                    inkHeights << QString::number(ink.height());
+                }
+                int minH = 1000;
+                int maxH = 0;
+                for (const QString &h : std::as_const(inkHeights)) {
+                    bool ok = false;
+                    const int v = h.toInt(&ok);
+                    if (!ok) {
+                        inkOk = false;
+                        continue;
+                    }
+                    minH = qMin(minH, v);
+                    maxH = qMax(maxH, v);
+                }
+                /* 两个图标墨迹高度差不超过 2 个像素（画法在 16 的框里，容一点圆角） */
+                noteCheck(inkOk && maxH - minH <= 2 && minH >= 8,
+                          QStringLiteral("便签头：两个图标画出来一样大（量墨迹高度）"),
+                          QStringLiteral("颜色 %1 / 锁定 %2")
+                              .arg(inkHeights.value(0), inkHeights.value(1)));
+            }
+
+            /*
+             * 菜单的入口是**在便签上点右键**（用户要求："右键点便签的任意位置
+             * （正文 / 头部 / 标签条）也弹这个菜单"，并且"⋯ 不要了"）。
+             *
+             * 量的是那个 TapHandler：收哪几个键（Qt.RightButton = 2）、锁定时
+             * 让不让位。真点一下右键是界面上那一下，自检里没法合成完整的
+             * "按下+抬起+没怎么动"，所以这里量它的配置。
+             */
+            if (QObject *rightClick = root->findChild<QObject *>(QStringLiteral("noteRightClick"))) {
+                noteCheck(rightClick->property("acceptedButtons").toInt() == Qt::RightButton,
+                          QStringLiteral("便签：右键那个入口只认右键"),
+                          QStringLiteral("acceptedButtons=%1")
+                              .arg(rightClick->property("acceptedButtons").toInt()));
+            } else {
+                noteCheck(false, QStringLiteral("便签：找得到右键弹菜单的入口"));
+            }
+
+            /* 锁上之后「解锁所有便签」（托盘/菜单那条）照样管用 */
+            QMetaObject::invokeMethod(root, "toggleLock");
+            settle();
             noteCheck(notes->lockedCount() >= 1,
-                      QStringLiteral("菜单：锁定条数报得出来（菜单据此显示解锁）"));
+                      QStringLiteral("锁定：锁定条数报得出来（菜单据此显示解锁）"));
             noteCheck(notes->unlockAll(),
-                      QStringLiteral("菜单：「解锁所有便签」解得开（锁上之后点不到它）"));
+                      QStringLiteral("菜单：「解锁所有便签」解得开"));
             settle();
             s = notes->windowState(probe->id());
             noteCheck(!s.value(QStringLiteral("locked")).toBool(),
@@ -1113,10 +1368,14 @@ int SelfTest::runNotes(ClipboardStore *store, TrayIcon *tray, EditorController *
                       QStringLiteral("菜单：组合着的便签给的是「拆分组合」"), groupedLabels);
             noteCheck(!groupedLabels.contains(QStringLiteral("与…组合")),
                       QStringLiteral("菜单：组合着的便签不再给「与…组合」那一栏"));
-            noteCheck(notes->openMenuFlyout(a->id(), QStringLiteral("group")) == true
+            /*
+             * 那一栏根本没有，所以也**飞不出来**：openMenuFlyout 现在会把 QML
+             * 的结果透传出来（以前它一律 return true，这条量不出来）。
+             */
+            noteCheck(!notes->openMenuFlyout(a->id(), QStringLiteral("group"))
                           && notes->menuState(a->id()).value(QStringLiteral("flyout")).toString()
                                  .isEmpty(),
-                      QStringLiteral("菜单：组合着的便签没有「与…组合」那一栏"));
+                      QStringLiteral("菜单：组合着的便签没有「与…组合」那一栏（面板也飞不出来）"));
             QMetaObject::invokeMethod(root, "closeNoteMenu");
             settle();
         }

@@ -304,8 +304,21 @@ public:
     Q_INVOKABLE void deleteNote();
     /* 换底色 */
     Q_INVOKABLE void setNoteColor(const QString &color);
-    /* 开系统取色框，返回 "#rrggbb"（取消返回空串） */
-    Q_INVOKABLE QString pickColor();
+    /*
+     * 把这块便签里某个 Popup（QML 的 `Popup.Window`，就是头上那个颜色弹窗）的
+     * **原生窗口**顶到置顶带最上面。
+     *
+     * 为什么非要有它：便签自己是"始终置顶"的（Qt::WindowStaysOnTopHint），弹窗
+     * 也是一块独立原生窗 —— 两块都在置顶带里。点颜色按钮那一下被系统激活、抬到
+     * 最上面的是**便签**，于是弹窗被压在下面：用户看到的就是"点一次之后，再点
+     * 弹窗就被卡片盖住了"（弹窗被夹到便签里面时整块都看不见）。
+     *
+     * QML 的 Popup 不是 Window，没有 raise() 可调，所以只能进 C++：按 objectName
+     * 找到那个 Popup，顺着它的 popupItem 摸到它那块 QQuickWindow 再顶一次。
+     * 顶完**下一拍再顶一次**（窗口刚 show 出来的一瞬间排序偶尔会被系统重排回去，
+     * 和 NoteMenu 里那个 raiseLater 是同一个道理）。
+     */
+    Q_INVOKABLE void raisePopupWindow(const QString &objectName);
     /* 复制正文 / 打开链接（转给 StickyNote） */
     Q_INVOKABLE void copyText();
     Q_INVOKABLE bool openLink(int index);
@@ -693,10 +706,13 @@ public:
     void moveGroupByFrameDelta(StickyNoteWindow *reference, const QPoint &delta);
 
     /*
-     * 便签纸的调色板（「⋯」菜单里那个色板按它摆色块）。
+     * 便签纸的调色板（便签头上那个颜色弹窗按它摆色块）。
      *
      * 转发 StickyNote::palette() 那份表 —— 只有一处定义，新建便签的默认色
-     * 和菜单里能挑的颜色才不会各说各话。
+     * 和色板里能挑的颜色才不会各说各话。
+     *
+     * 用它的只有便签头上那个颜色弹窗：右键菜单里原来那条「更多颜色」（Qt 取色框）
+     * 已经删掉了。
      */
     Q_INVOKABLE QStringList palette() const;
 
@@ -710,9 +726,6 @@ public:
     Q_INVOKABLE bool unlockAll();
     /* 锁着几条（菜单显示用） */
     Q_INVOKABLE int lockedCount() const;
-
-    /* 开系统取色框（便签窗口调；父窗口用那块便签，弹窗才不会被压住） */
-    QString pickColor(QWidget *parent, const QColor &current);
 
     /* 便签的正文 / 颜色变了：界面上的条数 / 链接卡片要跟着走（QML 绑定用） */
     StickyNoteStore *store() const { return m_store; }
@@ -730,11 +743,14 @@ public:
     Q_INVOKABLE void uiTrace(const QString &text) const;
 
     /*
-     * 「⋯」菜单的状态（自检用）。
+     * 便签菜单的状态（自检用）。
      *
-     * 菜单是独立原生弹窗（Popup.Window），外面既点不出 hover、也不好量它
-     * 摆在哪 —— 只能进进程去问 QML：开着没、当前展开的是哪一块飞出面板、
-     * 整份弹窗落在屏幕上的矩形、色板里第 0 格是什么颜色。
+     * 菜单是独立原生弹窗（Window），外面既点不出 hover、也不好量它摆在哪 ——
+     * 只能进进程去问 QML：开着没、当前展开的是哪一块飞出面板（现在只剩透明度 /
+     * 组合）、整份弹窗落在屏幕上的矩形。
+     *
+     * 主栏那几条条目的文字一并报出去（labels），自检按它钉"菜单里该有哪几条"、
+     * "哪几条已经搬走 / 删掉"。
      */
     QVariantMap menuState(const QString &noteId) const;
     /* 让菜单展开某一块飞出面板（""=收起）：界面上是鼠标停上去触发的 */
@@ -758,6 +774,7 @@ private:
     StickyNoteWindow *ensureWindow(StickyNote *note);
     /* 把一串便签 id 换成窗口（没建过 / 已经销毁的那几个直接跳过） */
     QList<StickyNoteWindow *> windowsForIds(const QStringList &ids) const;
+
     /*
      * 把一块便签摆到桌面上。
      *

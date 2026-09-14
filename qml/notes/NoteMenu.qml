@@ -35,7 +35,7 @@ import QtQuick.Effects
  * ===========================================================================
  * 菜单左上角就落在"点「⋯」时鼠标那一点"（Windows 便签也是这样）。
  *
- * 子菜单（颜色 / 透明度 / 正文里的链接）是一块**飞出面板**，画在同一个窗口
+ * 子菜单（透明度 / 组合）是一块**飞出面板**，画在同一个窗口
  * 里，位置由 layout() 一次算死：
  *
  *   * 右边装得下就放右边，装不下就翻到**左边**；
@@ -65,8 +65,6 @@ Window {
     /* 菜单开着没（原来用 Popup.opened，换成 Window 之后自己维护） */
     property bool opened: false
 
-    signal customColorRequested()
-
     /* ---- 配色：跟着便签纸走 ---- */
     readonly property color inkColor: paper && paper.inkColor ? paper.inkColor : "#1e2024"
     readonly property color softInkColor: paper && paper.softInkColor
@@ -87,14 +85,17 @@ Window {
     readonly property real screenMargin: 4
     /* 判"光标还在菜单上吗"时往外放宽这么几像素（见 cursorInsideMenu） */
     readonly property real hoverSlack: 6
-    /* 色板那一块：6 列小格子（和 Windows 便签那个一样） */
-    readonly property real swatchSize: 20
-    readonly property real swatchGap: 4
-    readonly property int swatchColumns: 6
 
     /* 主栏条目 */
     property var entries: []
-    /* 子面板里是什么："" 没有 / "color" / "opacity" / "links" */
+    /*
+     * 子面板里是什么："" 没有 / "opacity" / "group"。
+     *
+     * 两条都是**鼠标停上去就飞出面板**（移开就收）。
+     * 原来那两条（「更多颜色」和"正文里的链接"）用户都不要了，一并删掉
+     * —— 换底色的入口只剩便签头上那个颜色弹窗（见 StickyNoteWindow 的
+     * palettePopup）。
+     */
     property string flyoutKind: ""
     /* 面板挂在左边还是右边（layout() 按屏幕空间决定） */
     property string flyoutSide: "right"
@@ -105,12 +106,8 @@ Window {
      */
     property real flyoutItemY: 0
 
-    /* 色板（调色板那一份，见 rebuild） */
-    property var swatches: []
     /* 透明度档位 */
     property var opacities: []
-    /* 正文里的链接 */
-    property var links: []
     /*
      * 组合那一栏：可以叠到这一块身上的便签（"与「便签 3」组合"那一串）。
      * 每条是 { id, label }，点一条走 fireGroupMate（act 形如 "group:<id>"）。
@@ -122,7 +119,6 @@ Window {
     /* 这一块自己在不在某一摞里（决定那一条是"组合成摞"还是"拆分组合"） */
     property bool grouped: false
 
-    property string currentColor: ""
     property int currentOpacity: 100
 
     readonly property bool flyoutOpen: flyoutKind !== ""
@@ -130,23 +126,13 @@ Window {
     /* 主栏 / 子面板各自的尺寸 */
     readonly property real entriesWidth: paneWidth
     readonly property real entriesHeight: paneHeight(entries)
-    readonly property real flyoutWidth: flyoutKind === "color"
-                                        ? 2 * panePadding + swatchColumns * swatchSize
-                                          + (swatchColumns - 1) * swatchGap
-                                        : paneWidth
+    readonly property real flyoutWidth: paneWidth
     readonly property real flyoutHeight: heightForKind(flyoutKind)
-    /* 色板占几行（按列数折算） */
-    readonly property int colorRows: Math.ceil((swatches ? swatches.length : 0) / swatchColumns)
-    readonly property real swatchGridHeight: colorRows * (swatchSize + swatchGap)
 
     /* 某一块子面板多高（flyoutHeight 用它；摆放判断也要用） */
     function heightForKind(kind) {
-        if (kind === "color")
-            return 2 * panePadding + colorRows * (swatchSize + swatchGap) + itemHeight
         if (kind === "opacity")
             return 2 * panePadding + (opacities ? opacities.length : 0) * itemHeight
-        if (kind === "links")
-            return 2 * panePadding + (links ? links.length : 0) * itemHeight
         if (kind === "group")
             return 2 * panePadding + (groupMates ? groupMates.length : 0) * itemHeight
         return 0
@@ -160,10 +146,19 @@ Window {
      *
      * 它是一块独立的窗口（见下面 flyoutWindow 那段说明），所以这里直接给屏幕
      * 坐标，不用再拿"窗口内局部坐标"跟主栏窗口的挪动互相补偿。
+     *
+     * **横向还要夹一次**：子面板和主栏一样宽，主栏又贴着屏幕边时，不管挂哪边都会
+     * 探出去一截 —— 探出去的部分用户点不到。夹的时候只挪面板，主栏一动不动
+     * （见主栏那几条"不闪、不伸缩"的规矩）。
      */
-    readonly property real flyoutScreenX: flyoutSide === "left"
-        ? x - paneGap - flyoutWidth
-        : x + entriesWidth + paneGap
+    readonly property real flyoutScreenX: {
+        const area = screenArea()
+        const want = flyoutSide === "left" ? x - paneGap - flyoutWidth
+                                           : x + entriesWidth + paneGap
+        return Math.round(Math.max(area.x + screenMargin,
+                                  Math.min(want,
+                                           area.x + area.width - screenMargin - flyoutWidth)))
+    }
     readonly property real flyoutScreenY: {
         if (!flyoutOpen)
             return y
@@ -538,37 +533,17 @@ Window {
          * **要从 paper（便签的 QML 根项）上拿**，不能从 node 上拿：node 是
          * C++ 那个 StickyNoteWindow，它身上没有 noteData 这个属性（那是便签
          * QML 根上的属性）—— 写成 node.noteData 会静默拿到 undefined，
-         * 菜单里所有"看这条便签状态"的条目（正文里的链接 / 组合那一栏）就全是
-         * 空的，还不报错。踩过：组合那一栏永远是空的。
+         * 菜单里所有"看这条便签状态"的条目（组合那一栏）就全是空的，还不报错。
+         * 踩过：组合那一栏永远是空的。
          */
         var note = paper && paper.noteData ? paper.noteData
                                            : (node && node.noteData ? node.noteData : null)
-        var linkCount = note ? note.linkCount : 0
         var total = notes ? notes.count : 0
         var shown = notes ? notes.visibleCount : 0
         var lockedTotal = notes ? notes.lockedCount() : 0
 
-        currentColor = note ? String(note.color).toLowerCase() : ""
         currentOpacity = note ? note.opacityPercent : 100
-        /*
-         * 色板 = 便签纸的调色板（C++ 侧那一份，见 StickyNote::palette）。
-         * 注意要**调用**它：palette() 是 Q_INVOKABLE，写成 notes.palette
-         * 拿到的是函数对象本身，绑到 Repeater.model 上会报
-         * "Unable to assign a function to a property of any type other than var"。
-         */
-        swatches = notes ? notes.palette() : []
         opacities = [100, 85, 70, 55, 40]
-
-        links = []
-        if (note && note.links) {
-            for (var i = 0; i < note.links.count; ++i) {
-                var row = note.links.index(i, 0)
-                links.push({
-                    label: String(note.links.data(row, note.links.titleRole) || ""),
-                    url: String(note.links.data(row, note.links.urlRole) || "")
-                })
-            }
-        }
 
         /*
          * 组合那一栏的清单：叠到这一块身上的候选。
@@ -587,16 +562,21 @@ Window {
         out.push({ label: shown > 0 ? "排列所有便签（" + shown + " 块）" : "排列所有便签",
                    act: "arrange", icon: "grid", disabled: shown === 0 })
         out.push({ separator: true })
-        /* 这三条右边带 >，鼠标停上去在右边（装不下就在左边）飞出面板 */
-        out.push({ label: "颜色", act: "color", flyout: "color", icon: "color" })
+        /*
+         * 颜色和锁定**都不在这里**：它们已经搬到便签头上当按钮了（颜色是件 T 恤、
+         * 点开是调色板弹窗；锁定是个挂锁图标）—— 用户要求"放到外面来、颜色做成
+         * 弹窗的形式"。
+         *
+         * 原来这条叫「更多颜色」：鼠标停上去飞出一块色板（8 列 48 格）+ 最下面
+         * 一条「更多颜色…」（开 Qt 取色框）。用户不要了 —— 连同那块色板一起删掉，
+         * 换底色只剩便签头上那个颜色弹窗一个入口。
+         */
+        /* 这条右边带 >，鼠标停上去在右边（装不下就在左边）飞出面板 */
         out.push({ label: "透明度  " + currentOpacity + "%", act: "opacity",
                    flyout: "opacity", icon: "opacity" })
-        out.push({ label: linkCount > 0 ? "正文里的链接（" + linkCount + "）" : "正文里的链接",
-                   act: "links", flyout: "links", icon: "link", disabled: linkCount === 0 })
         out.push({ separator: true })
         out.push({ label: "复制正文", act: "copy", icon: "copy" })
         out.push({ label: "始终置顶", act: "pin", icon: "pin", checked: pinned })
-        out.push({ label: "锁定（鼠标穿透）", act: "lock", icon: "lock", checked: locked })
         out.push({ label: lockedTotal > 0 ? "解锁所有便签（" + lockedTotal + "）" : "解锁所有便签",
                    act: "unlock", icon: "unlock", disabled: lockedTotal === 0 })
         out.push({ separator: true })
@@ -685,10 +665,6 @@ Window {
             target.copyText()
         else if (act === "pin")
             target.toggleStaysOnTop()
-        else if (act === "lock")
-            target.setLocked(!target.locked)
-        else if (act === "pickColor")
-            customColorRequested()
         else if (act === "ungroup")
             notes.ungroup(note)
     }
@@ -744,11 +720,6 @@ Window {
     }
     /* 当前展开的在哪一边（自检用：验证"右边不够就翻到左边"） */
     function flyoutSideNow() { return flyoutSide }
-    function swatchAt(index) {
-        if (!swatches || index < 0 || index >= swatches.length)
-            return ""
-        return String(swatches[index])
-    }
 
     /* ---- 窗口本身 ---- */
     /*
@@ -1003,84 +974,6 @@ Window {
                 onEntered: root.menuHoverSeen = true
             }
 
-            /* ---- 色板 ---- */
-            Item {
-                visible: root.flyoutKind === "color"
-                anchors.fill: parent
-                anchors.margins: root.panePadding
-
-                Grid {
-                    id: swatchGrid
-                    columns: root.swatchColumns
-                    spacing: root.swatchGap
-
-                    Repeater {
-                        model: root.swatches
-
-                        delegate: Rectangle {
-                            id: swatch
-                            required property var modelData
-                            width: root.swatchSize
-                            height: root.swatchSize
-                            radius: 3
-                            color: swatch.modelData
-                            border.width: root.isCurrent(swatch.modelData) ? 2 : 1
-                            border.color: root.isCurrent(swatch.modelData)
-                                      ? root.textColor : Qt.rgba(0, 0, 0, 0.22)
-
-                            MouseArea {
-                                anchors.fill: parent
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: {
-                                    if (root.win)
-                                        root.win.setNoteColor(swatch.modelData)
-                                    root.closeMenu()
-                                }
-                            }
-                        }
-                    }
-                }
-
-                /* 色板下面那条"更多颜色…"（开系统取色框） */
-                Rectangle {
-                    id: moreColor
-                    anchors.top: swatchGrid.bottom
-                    anchors.topMargin: root.swatchGap
-                    width: parent.width
-                    height: root.itemHeight
-                    radius: 4
-                    color: moreHit.containsMouse ? root.hoverColor : "transparent"
-
-                    Row {
-                        anchors.fill: parent
-                        anchors.leftMargin: 4
-                        spacing: 6
-                        NoteMenuIcon {
-                            anchors.verticalCenter: parent.verticalCenter
-                            kind: "color"
-                            tint: root.textColor
-                        }
-                        Label {
-                            anchors.verticalCenter: parent.verticalCenter
-                            text: "更多颜色…"
-                            font.pixelSize: 12
-                            color: root.textColor
-                        }
-                    }
-
-                    MouseArea {
-                        id: moreHit
-                        anchors.fill: parent
-                        hoverEnabled: true
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: {
-                            root.closeMenu()
-                            root.customColorRequested()
-                        }
-                    }
-                }
-            }
-
             /* ---- 透明度 ---- */
             Column {
                 visible: root.flyoutKind === "opacity"
@@ -1135,54 +1028,6 @@ Window {
                 }
             }
 
-            /* ---- 正文里的链接（点一条把光标挪到正文那一行） ---- */
-            Column {
-                visible: root.flyoutKind === "links"
-                anchors.fill: parent
-                anchors.margins: root.panePadding
-                clip: true
-
-                Repeater {
-                    model: root.links
-
-                    delegate: Rectangle {
-                        id: linkRow
-                        required property int index
-                        required property var modelData
-                        width: parent.width
-                        height: root.itemHeight
-                        radius: 4
-                        color: linkHit.containsMouse ? root.hoverColor : "transparent"
-
-                        Label {
-                            anchors.fill: parent
-                            anchors.leftMargin: 8
-                            anchors.rightMargin: 8
-                            verticalAlignment: Text.AlignVCenter
-                            text: linkRow.modelData.label !== "" ? linkRow.modelData.label
-                                                                : linkRow.modelData.url
-                            font.pixelSize: 11
-                            color: root.textColor
-                            elide: Text.ElideMiddle
-                        }
-
-                        MouseArea {
-                            id: linkHit
-                            anchors.fill: parent
-                            hoverEnabled: true
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: {
-                                /* 数据在 paper 上，不在 C++ 那个 win 上（见 fire() 的说明） */
-                                var note = root.paper ? root.paper.noteData : null
-                                var index = linkRow.index
-                                root.closeMenu()
-                                if (note)
-                                    root.notes.revealLink(note, index)
-                            }
-                        }
-                    }
-                }
-            }
             /* ---- 组合：与哪一块组合（一条一块） ---- */
             Column {
                 visible: root.flyoutKind === "group"
@@ -1223,9 +1068,6 @@ Window {
                 }
             }
         }
-    }
-    function isCurrent(hex) {
-        return String(hex).toLowerCase() === root.currentColor
     }
 
     /*

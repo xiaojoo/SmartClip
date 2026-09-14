@@ -128,6 +128,12 @@ Rectangle {
     readonly property bool inGroup: noteWindow ? noteWindow.inGroup : false
     readonly property bool groupActive: noteWindow ? noteWindow.groupActive : false
     readonly property int groupSize: noteWindow ? noteWindow.groupSize : 0
+    /*
+     * 这一块**锁着没**。锁定 = 整块不响应鼠标（正文 / 拖动 / 改大小 / 标签条都
+     * 让开），只剩头部那排按钮还能点 —— 好让用户解锁（见 StickyNotes::setLocked
+     * 里那段"为什么不再用窗口级鼠标穿透"）。
+     */
+    readonly property bool locked: noteWindow ? noteWindow.locked : false
     /* 有没有一块便签正被拖到这一块身上（头部那条会亮，见下面头部里的提示块） */
     readonly property bool dropPreview: noteWindow ? noteWindow.dropPreview : false
     /*
@@ -207,17 +213,8 @@ Rectangle {
     readonly property real chipRight: tabStrip.x + tabColumn.x + tabColumn.width
     /* 正文里链接那一栏是不是展开着（自检看这个 + cardCount） */
     property bool linksExpanded: true
-    /* 头部那个「⋯」菜单开着没（自检看它，见 windowState） */
+    /* 便签菜单开着没（自检看它，见 windowState） */
     readonly property bool menuOpened: noteMenu.opened
-    /* 「⋯」按钮在便签窗口里的位置（自检量"菜单贴着按钮右下角"） */
-    readonly property real menuButtonX: menuButton.mapToItem(null, 0, 0).x
-    readonly property real menuButtonY: menuButton.mapToItem(null, 0, 0).y
-    readonly property real menuButtonW: menuButton.width
-    readonly property real menuButtonH: menuButton.height
-    /* 色板里有几格（自检确认菜单里那个颜色面板真的摆出来了）。菜单还没开过的
-       时候 swatches 是空的，所以这里要判空 —— 直接取 .length 会报
-       "Cannot read property 'length' of undefined"（创建期就求值一次）。 */
-    readonly property int menuSwatchCount: noteMenu.swatches ? noteMenu.swatches.length : 0
 
     /* 正文是否为空（决定要不要显示"随手写点什么…"那句提示） */
     readonly property bool emptyText: !root.noteData || root.noteData.text.length === 0
@@ -241,6 +238,8 @@ Rectangle {
      */
     TapHandler {
         gesturePolicy: TapHandler.DragThreshold
+        /* 锁定之后整块不响应鼠标（只剩头部那排按钮，好解锁，见 setLocked） */
+        enabled: !root.locked
         onTapped: (eventPoint) => {
             /*
              * 点这一块 = 把它抽到最上面（叠着的纸里点了下面那张）。
@@ -253,14 +252,37 @@ Rectangle {
              * 还会再确认一次"这一块是当前活动窗口"（见那里的说明）。
              */
             noteWindow.promoteInGroup()
-            if (!noteMenu.opened)
-                return
-            /* 头部那个「⋯」按钮自己会开/收，交给它，别在这儿抢先收掉 */
-            var local = eventPoint.position
-            var inButton = local.x >= menuButton.x && local.x <= menuButton.x + menuButton.width
-                           && local.y >= menuButton.y && local.y <= menuButton.y + menuButton.height
-            if (!inButton)
+            /* 左键点便签 = 顺手把菜单收掉（右键才是弹菜单，见下面那个 TapHandler） */
+            if (noteMenu.opened)
                 noteMenu.closeMenu()
+        }
+    }
+
+    /*
+     * **便签上任意位置右键 -> 弹便签菜单**（用户要求："右键点便签的任意位置
+     * （正文 / 头部 / 标签条）也弹这个菜单"，并且"⋯ 不要了" —— 头上那个三点
+     * 按钮已经撤掉，右键就是唯一的入口）。
+     *
+     * 还是用 TapHandler，不盖 MouseArea：
+     *   * 旁听，不抢鼠标 —— 正文选字、拖动把手、色块点击、链接卡片全都照旧；
+     *   * 不给光标设形状（MouseArea 的 cursorShape 默认是箭头，盖在正文上会把
+     *     那个 I 型光标弄没）。
+     *
+     * 只认右键，左键那条走上面那个 TapHandler（抽到最上面 + 收菜单）。
+     * 锁定的便签不认鼠标 —— 要解锁点头上那个锁按钮（见 setLocked）。
+     */
+    TapHandler {
+        objectName: "noteRightClick"
+        acceptedButtons: Qt.RightButton
+        enabled: !root.locked
+        onTapped: (eventPoint) => {
+            if (noteMenu.opened) {
+                noteMenu.close()
+                return
+            }
+            /* 菜单要的是**屏幕坐标**（它是一块独立窗口，见 NoteMenu::openAt） */
+            var at = root.mapToGlobal(eventPoint.position.x, eventPoint.position.y)
+            root.openNoteMenu(at.x, at.y)
         }
     }
 
@@ -268,22 +290,22 @@ Rectangle {
         noteWindow.setNoteColor(hex)
     }
 
-    /* 菜单里「更多颜色…」：开系统取色框（取消返回空串，颜色不动） */
-    function pickCustomColor() {
-        var picked = noteWindow.pickColor()
-        if (picked !== "")
-            setBackground(picked)
-    }
+    /*
+     * 注意这里**没有**"开 Qt 取色框"那条路了：原来便签右键菜单里那条「更多颜色」
+     * 连它飞出的色板一起删掉了（用户要求），C++ 那套 pickColor / colorDialogFor
+     * 也一并删了。换底色的入口只剩头上那个颜色弹窗（见下面 palettePopup）。
+     */
 
     /*
-     * 打开头部那个「⋯」菜单（界面上点按钮走这里，自检里也调它 ——
-     * 走的是同一条路，量到的就是用户点出来的那份菜单）。
+     * 打开便签菜单（界面上是**在便签上点右键**走这里，见上面那个 TapHandler；
+     * 自检也调它 —— 走的是同一条路，量到的就是用户点出来的那份菜单）。
      *
      * (screenX, screenY) 是点击那一下鼠标在屏幕上的位置：菜单左上角就落在
-     * 那儿（见 NoteMenu 开头"摆位：贴着鼠标"）。不给就用按钮右下角兜底。
+     * 那儿（见 NoteMenu 开头"摆位：贴着鼠标"）。不给就用便签左上角兜底
+     * （以前兜底是"⋯ 按钮右下角"，那个按钮已经撤了）。
      */
     function openNoteMenu(screenX, screenY) {
-        var at = menuButton.mapToGlobal(menuButton.width, menuButton.height)
+        var at = root.mapToGlobal(0, 0)
         var px = (screenX === undefined || screenX < 0) ? at.x : screenX
         var py = (screenY === undefined || screenY < 0) ? at.y : screenY
         noteMenu.openAt(px, py, noteWindow)
@@ -292,6 +314,56 @@ Rectangle {
 
     /* 收起菜单（自检收尾用；界面上是点别处 / Esc / 选一条命令） */
     function closeNoteMenu() { noteMenu.closeMenu() }
+
+    /*
+     * 颜色弹窗（便签头上那个色块按钮点开的调色板）。
+     *
+     * 用户的要求是"颜色放到外面来、做成弹窗的形式"：不再钻进「⋯」菜单的子面板
+     * 里，而是便在签头上的一个按钮，点开就是一份调色板。
+     *
+     * 窗口本身见下面 palettePopup：Popup.Window（和 AskCard / 下拉菜单同一类，
+     * 只占自己那一小块原生窗），所以弹窗能探到便签外面去 —— 便签只有 330 宽，
+     * 挤在窗口里会被裁掉。
+     *
+     * 开完必须**把弹窗那块原生窗顶到最上面**（见 raisePopupWindow）：便签自己
+     * 是置顶的，点按钮那一下被激活、抬上去的是便签 —— 不顶这一下，第二次点开
+     * 弹窗就压在卡片底下（用户报的"再次点击会被卡片遮挡"，实测弹窗被夹进卡片
+     * 范围里时整块都看不见）。
+     */
+    function openPalette() {
+        palettePopup.openAt(colorButton)
+        noteWindow.raisePopupWindow(palettePopup.objectName)
+        return palettePopup.opened
+    }
+    function closePalette() { palettePopup.close() }
+
+    /*
+     * 颜色按钮那一下该"开"还是该"收"。
+     *
+     * 判据是 palettePopup.closedByButton：弹窗**刚才那一下是不是被这个按钮按关的**
+     * （在弹窗的 onClosed 里当场判，见 palettePopup 里那段说明）。
+     *
+     * 为什么不在这一下现读 palettePopup.opened：弹窗带着 CloseOnPressOutside，按在
+     * 按钮上那一下它先收到事件、先关，之后这次按下才被重放给便签窗口 —— 实测事件
+     * 顺序是 `onClosed -> colorHit.onPressed -> colorHit.onClicked`，等到 onClicked
+     * 再问"开着没"永远是 false，于是这一下永远走"开"，按钮就再也关不掉弹窗
+     * （用户看到的"再次点击"没反应就是这么来的）。
+     */
+    function paletteButtonClicked() {
+        if (palettePopup.closedByButton) {
+            /* 这一下按在按钮上、已经把弹窗收掉了：这个标记用掉，别再开一次 */
+            palettePopup.closedByButton = false
+            return false
+        }
+        return openPalette()
+    }
+
+    /* 自检用：色板有哪几格 / 按第几格换个色（走的都是界面上那条路） */
+    function paletteSwatchAt(index) { return palettePopup.swatchAt(index) }
+    function pickPaletteSwatch(index) { return palettePopup.pickAt(index) }
+
+    /* 锁定按钮：和菜单里那条「锁定（鼠标穿透）」同一条路（handleMenuAct） */
+    function toggleLock() { return handleMenuAct("lock") }
 
     /*
      * 按动作名执行一条菜单命令。
@@ -325,7 +397,6 @@ Rectangle {
         if (act === "hide") { noteWindow.closeNote(); return true }
         if (act === "copy") { noteWindow.copyText(); return true }
         if (act === "delete") { noteWindow.deleteNote(); return true }
-        if (act === "pickColor") { pickCustomColor(); return true }
         return false
     }
 
@@ -422,6 +493,8 @@ Rectangle {
          * 一遍，后面几块的色块会落在前面那块透明的那一条上，斜着叠成一串。
          */
         visible: root.chipStripDrawn
+        /* 锁定之后标签条上的色块也点不着（见 setLocked） */
+        enabled: !root.locked
         /* 抬一层：悬停提示往右压在正文那一带上，别被后声明的 content 盖住（见下面 tabTip） */
         z: 5
         x: 0
@@ -624,11 +697,12 @@ Rectangle {
             Layout.preferredHeight: 22
             Layout.margins: root.noteMargin
 
-            /* 整条都是拖动把手（按住就搬窗口） */
+            /* 整条都是拖动把手（按住就搬窗口）。锁定的那块拖不动（见 setLocked） */
             MouseArea {
                 id: headerDrag
                 anchors.fill: parent
-                cursorShape: Qt.OpenHandCursor
+                enabled: !root.locked
+                cursorShape: root.locked ? Qt.ArrowCursor : Qt.OpenHandCursor
                 acceptedButtons: Qt.LeftButton
                 onPressed: noteWindow.beginDrag()
             }
@@ -673,20 +747,19 @@ Rectangle {
                 Item { Layout.fillWidth: true }
 
                 /*
-                 * 唯一的按钮：「⋯」。
+                 * 颜色按钮：一件 **T 恤**（用户点名的图标），衣身填的就是这块便签
+                 * 现在的底色 —— 既是个图标，也一眼看得出当前是什么色。
                  *
-                 * 原来这里是一排 8 个色块 + 一个"更多颜色" + 排列 / 置顶 / 关闭
-                 * 三个图标（共 12 个可点的小格子），在 330px 宽的便签上撞得
-                 * 很满、也没法再加东西。现在全部收进这一个菜单里
-                 * （见 qml/notes/NoteMenu.qml，照 Windows 便签那套排的）。
+                 * 用户明确要求："颜色放到外面来，做成弹窗的形式" + "颜色用 T 恤"
+                 * —— 原来它藏在「⋯」菜单的子面板里，改一次色要点两下。
                  */
                 Rectangle {
-                    id: menuButton
-                    /* 自检按名字找它（见 StickyNoteWindow 的 menuButtonX/Y） */
-                    objectName: "noteMenuButton"
-                    readonly property bool active: noteMenu.opened
-                    readonly property bool hot: menuHit.containsMouse || active
+                    id: colorButton
+                    /* 自检按名字找它 */
+                    objectName: "noteColorButton"
+                    readonly property bool hot: colorHit.containsMouse || palettePopup.opened
 
+                    /* 和锁定 / ⋯ 一样大（用户要求"三个图标保持一样大小"） */
                     implicitWidth: 22
                     implicitHeight: 18
                     radius: 4
@@ -694,66 +767,173 @@ Rectangle {
                                          root.inkColor.b, 0.16) : "transparent"
                     Layout.alignment: Qt.AlignVCenter
 
-                    /* 三个点：竖排（Windows 便签那个 "…" 就是这个样子） */
                     Canvas {
-                        id: dotsCanvas
+                        id: shirtCanvas
+                        /* 自检按名字找它（量"三个图标画出来一样大"，见 SelfTestNotes） */
+                        objectName: "noteColorIcon"
+                        /* 图标都画在 14×14 里（和锁定 / ⋯ 那两个一样大） */
                         anchors.centerIn: parent
                         width: 14
                         height: 14
                         antialiasing: true
 
-                        onPaint: {
-                            var ctx = getContext("2d")
-                            ctx.reset()
-                            ctx.fillStyle = root.inkColor
-                            for (var i = 0; i < 3; ++i) {
-                                ctx.beginPath()
-                                ctx.arc(7, 3 + i * 4, 1.5, 0, Math.PI * 2)
-                                ctx.fill()
-                            }
-                        }
-
                         Connections {
                             target: root
-                            function onInkColorChanged() { dotsCanvas.requestPaint() }
+                            function onInkColorChanged() { shirtCanvas.requestPaint() }
                         }
-                        Component.onCompleted: dotsCanvas.requestPaint()
+                        Connections {
+                            target: root.noteData
+                            function onColorChanged() { shirtCanvas.requestPaint() }
+                        }
+                        Component.onCompleted: shirtCanvas.requestPaint()
+
+                        onPaint: {
+                            var ctx = getContext("2d")
+                            ctx.clearRect(0, 0, width, height)
+                            ctx.save()
+                            /*
+                             * 按 16×16 的坐标画（和主界面 IconProvider 那套同一个
+                             * 尺度），再整体缩到画布大小。
+                             *
+                             * 三个图标（T 恤 / 挂锁 / ⋯）都画在同一个 16 的框里、
+                             * 都占满大约 10 个单位高、四周留一圈边 —— 用户要的是
+                             * "三个图标一样大"：光把画布定成一样大小不够，**画的
+                             * 形状本身**也得占一样大（早先挂锁只画了 7 个单位宽，
+                             * 摆在 T 恤旁边看着就是小一号）。
+                             */
+                            ctx.scale(width / 16, height / 16)
+                            ctx.lineWidth = 1.5
+                            ctx.lineJoin = "round"
+                            ctx.lineCap = "round"
+                            ctx.beginPath()
+                            ctx.moveTo(6.2, 3.2)                           /* 左肩 */
+                            ctx.quadraticCurveTo(8, 5.2, 9.8, 3.2)          /* 领口 */
+                            ctx.lineTo(13.2, 4.9)                           /* 右肩 */
+                            ctx.lineTo(14.6, 7.6)                           /* 右袖外下角 */
+                            ctx.lineTo(11.6, 9.0)                           /* 右腋 */
+                            ctx.lineTo(11.6, 13.4)                          /* 右腰 */
+                            ctx.lineTo(4.4, 13.4)                           /* 左腰 */
+                            ctx.lineTo(4.4, 9.0)                            /* 左腋 */
+                            ctx.lineTo(1.4, 7.6)                            /* 左袖外下角 */
+                            ctx.lineTo(2.8, 4.9)                            /* 左肩内侧 */
+                            ctx.closePath()
+                            /* 衣身 = 当前底色（深色纸上也看得见），轮廓 = 便签主色 */
+                            ctx.fillStyle = root.noteData ? root.noteData.color : "transparent"
+                            ctx.fill()
+                            ctx.strokeStyle = root.inkColor
+                            ctx.stroke()
+                            /* 下摆那道横条（参考图里就有） */
+                            ctx.beginPath()
+                            ctx.moveTo(4.4, 10.9)
+                            ctx.lineTo(11.6, 10.9)
+                            ctx.stroke()
+                            ctx.restore()
+                        }
                     }
 
                     MouseArea {
-                        id: menuHit
+                        id: colorHit
                         anchors.fill: parent
                         hoverEnabled: true
                         cursorShape: Qt.PointingHandCursor
-                        onClicked: (mouse) => {
-                            if (noteMenu.opened) {
-                                noteMenu.close()
-                                return
-                            }
-                            /* 把鼠标那一点（屏幕坐标）交给菜单：左上角贴鼠标 */
-                            var p = menuHit.mapToGlobal(mouse.x, mouse.y)
-                            root.openNoteMenu(p.x, p.y)
-                        }
+                        onClicked: root.paletteButtonClicked()
                     }
 
                     NoteTip {
-                        hovered: menuHit.containsMouse && !noteMenu.opened
-                        /* 只报这是哪个按钮：里面有什么，点开就看见了（不要多余的说明） */
-                        text: "便签菜单"
+                        hovered: colorHit.containsMouse && !palettePopup.opened
+                        text: "颜色"
+                    }
+                }
+
+                /*
+                 * 锁定按钮（鼠标穿透）：和菜单里那条「锁定（鼠标穿透）」同一条路
+                 * （root.toggleLock -> handleMenuAct("lock")）。锁上时图标实心、
+                 * 底下一块淡底，一眼看得出这块便签现在点不着。
+                 */
+                Rectangle {
+                    id: lockButton
+                    /* 自检按名字找它 */
+                    objectName: "noteLockButton"
+                    readonly property bool on: noteWindow ? noteWindow.locked : false
+                    readonly property bool hot: lockHit.containsMouse || on
+
+                    implicitWidth: 22
+                    implicitHeight: 18
+                    radius: 4
+                    color: hot ? Qt.rgba(root.inkColor.r, root.inkColor.g,
+                                         root.inkColor.b, on ? 0.22 : 0.16) : "transparent"
+                    Layout.alignment: Qt.AlignVCenter
+
+                    Canvas {
+                        id: lockCanvas
+                        /* 自检按名字找它（量图标画出来多大） */
+                        objectName: "noteLockIcon"
+                        anchors.centerIn: parent
+                        width: 14
+                        height: 14
+                        antialiasing: true
+
+                        Connections {
+                            target: lockButton
+                            function onOnChanged() { lockCanvas.requestPaint() }
+                        }
+                        Connections {
+                            target: root
+                            function onInkColorChanged() { lockCanvas.requestPaint() }
+                        }
+
+                        onPaint: {
+                            var ctx = getContext("2d")
+                            ctx.clearRect(0, 0, width, height)
+                            ctx.save()
+                            /* 和 T 恤同一个 16 的框，**占满差不多一样大**（见
+                               colorButton 里那段说明）：锁体 8.8 宽 × 6.8 高，
+                               加上锁梁一共约 9.8 高 */
+                            ctx.scale(width / 16, height / 16)
+                            ctx.strokeStyle = root.inkColor
+                            ctx.fillStyle = root.inkColor
+                            ctx.lineWidth = 1.5
+                            ctx.lineCap = "round"
+                            ctx.lineJoin = "round"
+                            /* 锁体：锁上时填实（"现在是锁着的"），没锁只描边 */
+                            ctx.beginPath()
+                            ctx.rect(3.6, 6.6, 8.8, 6.8)
+                            if (lockButton.on)
+                                ctx.fill()
+                            else
+                                ctx.stroke()
+                            /* 锁梁：上半个圆 */
+                            ctx.beginPath()
+                            ctx.arc(8, 6.6, 3.0, Math.PI, 0)
+                            ctx.stroke()
+                            ctx.restore()
+                        }
+
+                        Component.onCompleted: lockCanvas.requestPaint()
+                    }
+
+                    MouseArea {
+                        id: lockHit
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: root.toggleLock()
+                    }
+
+                    NoteTip {
+                        hovered: lockHit.containsMouse
+                        text: lockButton.on ? "解锁（现在点不到它）" : "锁定（鼠标穿透）"
                     }
                 }
             }
         }
 
         /*
-         * 头部那个「⋯」的菜单。
+         * 便签菜单（**在便签上点右键**弹出来的那份，见上面那个 TapHandler）。
          *
          * 放在便签窗口的 QML 里（不是 C++）：条目都是"这一刻便签的状态"
-         * （颜色、透明度、勾选、链接条数），由菜单自己在 openAt 里现搭，
+         * （透明度、勾选、组合、便签条数），由菜单自己在 openAt 里现搭，
          * 见 NoteMenu.qml 的 rebuild()。
-         *
-         * customColorRequested 那条只有"开系统取色框"要绕回本文件 —— 取色框
-         * 得对着这块便签开（见 root.pickCustomColor）。
          */
         NoteMenu {
             id: noteMenu
@@ -761,15 +941,166 @@ Rectangle {
             objectName: "noteMenu"
             paper: root
             notes: Notes
-            onCustomColorRequested: root.pickCustomColor()
+        }
+
+        /*
+         * 颜色弹窗（便签头上那个色块按钮点开的调色板）。
+         *
+         * Popup.Window：只占自己那一小块**原生窗** —— 便签只有 330 宽，调色板
+         * （6 列 20px 的小格子）塞在便签里会被窗口裁掉一半；做成独立小窗就能
+         * 探到便签外面，和「⋯」菜单 / AskCard 那几块是同一类窗口。
+         *
+         * 长相照搬「⋯」菜单里原来那块颜色子面板（同一套配色和尺寸），只是现在
+         * 由头上的按钮直接点开 —— 菜单里那一条已经撤掉了。
+         */
+        Popup {
+            id: palettePopup
+            /* 自检按名字找它 */
+            objectName: "notePalette"
+
+            popupType: Popup.Window
+            modal: false
+            closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+
+            /*
+             * 这一下"关"是不是颜色按钮按出来的。
+             *
+             * 为什么要在**关的这一刻**判、而不是到按钮的 onClicked 里读 opened：
+             * 弹窗带着 CloseOnPressOutside，按在按钮上那一下它先收到事件、先关，
+             * 之后这次按下才被重放给便签窗口（实测顺序：onClosed -> onPressed ->
+             * onClicked）——等到 onClicked，"开着没"永远是 false，"按钮再点一下就
+             * 收"就判不出来了。
+             *
+             * 判据就是**关的这一刻光标还在不在颜色按钮里**：按在按钮上关的 = 这一下
+             * 该算"收"（见 root.paletteButtonClicked）；点在别处 / 选色格关的，光标
+             * 不在按钮里，标记留着 false，下一次点按钮照样是"开"。
+             */
+            property bool closedByButton: false
+            onClosed: {
+                var at = noteWindow.cursorPos()
+                closedByButton = colorButton.contains(colorButton.mapFromGlobal(at.x, at.y))
+            }
+            padding: palettePopup.panePadding
+            /* 贴着按钮下面 4px；越界由 openAt 里夹回来 */
+            margins: 0
+
+            readonly property color panelColor: "#f7f7f5"
+            readonly property color textColor: "#24262a"
+            readonly property color hoverColor: "#e8e8e4"
+            /* 色板那一块：8 列小格子 */
+            readonly property real swatchSize: 20
+            readonly property real swatchGap: 4
+            readonly property int swatchColumns: 8
+            readonly property real panePadding: 6
+            readonly property var swatches: Notes ? Notes.palette() : []
+
+            readonly property int rows: Math.max(1, Math.ceil(swatches.length / swatchColumns))
+            implicitWidth: panePadding * 2 + swatchColumns * swatchSize
+                           + (swatchColumns - 1) * swatchGap
+            /* 弹窗里只有色板这一块（「更多颜色…」那条已经删了，见下面那段说明） */
+            implicitHeight: panePadding * 2 + rows * swatchSize + (rows - 1) * swatchGap
+
+            /* 这一格就是便签现在的底色（画一圈重边） */
+            function isCurrent(hex) {
+                return root.noteData
+                       && String(hex).toLowerCase() === String(root.noteData.color).toLowerCase()
+            }
+            function swatchAt(index) {
+                return (index >= 0 && index < swatches.length) ? String(swatches[index]) : ""
+            }
+            /* 按第几格 = 换成那个底色（界面上点一格走的就是它） */
+            function pickAt(index) {
+                var hex = swatchAt(index)
+                if (hex === "")
+                    return false
+                root.setBackground(hex)
+                close()
+                return true
+            }
+
+            /*
+             * 摆在 anchor（头上那个色块按钮）下面，并夹进这块屏的可用区。
+             *
+             * 位置换算成**便签窗口内**的坐标（Popup 的 x/y 是相对 parent 的，
+             * 窗口式 popup 由 Qt 再换算到屏幕）——所以先按屏幕坐标夹，再
+             * mapFromGlobal 回来。
+             */
+            function openAt(anchor) {
+                if (!anchor || !noteWindow)
+                    return false
+                var want = anchor.mapToGlobal(0, anchor.height + 4)
+                var area = noteWindow.screenBounds()
+                var px = Math.round(Math.min(Math.max(want.x, area.x + 4),
+                                             area.x + area.width - implicitWidth - 4))
+                var py = Math.round(Math.min(Math.max(want.y, area.y + 4),
+                                             area.y + area.height - implicitHeight - 4))
+                var local = root.mapFromGlobal(px, py)
+                x = local.x
+                y = local.y
+                open()
+                return opened
+            }
+
+            background: Rectangle {
+                color: palettePopup.panelColor
+                radius: 6
+                border.width: 1
+                border.color: Qt.rgba(0, 0, 0, 0.18)
+            }
+
+            contentItem: Column {
+                spacing: palettePopup.swatchGap
+
+                Grid {
+                    columns: palettePopup.swatchColumns
+                    spacing: palettePopup.swatchGap
+
+                    Repeater {
+                        model: palettePopup.swatches
+
+                        delegate: Rectangle {
+                            id: swatch
+                            required property int index
+                            required property var modelData
+                            width: palettePopup.swatchSize
+                            height: palettePopup.swatchSize
+                            radius: 3
+                            color: swatch.modelData
+                            border.width: palettePopup.isCurrent(swatch.modelData) ? 2 : 1
+                            border.color: palettePopup.isCurrent(swatch.modelData)
+                                          ? palettePopup.textColor
+                                          : Qt.rgba(0, 0, 0, 0.22)
+
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: palettePopup.pickAt(swatch.index)
+                            }
+                        }
+                    }
+                }
+
+                /*
+                 * 这里的弹窗**只有色板本身**：常用色点一下就换（8 列 48 格）。
+                 *
+                 * 「更多颜色」（要自己调色的那种、开 Qt 取色框）原来在便签的右键
+                 * 菜单里，用户不要了 —— 那条连同它飞出的色板、以及 C++ 那侧那套
+                 * 取色框（pickColor / colorDialogFor）一起删掉了。换底色就剩这
+                 * 一个入口。
+                 */
+            }
         }
         /* ------------------------------------------------------------------
          * 正文
          * ---------------------------------------------------------------- */
         Item {
             id: body
+            /* 自检按名字找它（量"锁定的便签正文点不动"） */
+            objectName: "noteBody"
             Layout.fillWidth: true
             Layout.fillHeight: true
+            /* 锁定的便签正文点不动（选字、链接、右键都不响应，见 setLocked） */
+            enabled: !root.locked
             /* 正文只占"卡片栏之外"的那部分高度，见 linksStrip 的 preferredHeight */
             Layout.minimumHeight: 40
             /* 左右铺满便签（不再退纸边）：这一整块都是输入区 */
@@ -895,6 +1226,8 @@ Rectangle {
         Rectangle {
             id: linksStrip
             Layout.fillWidth: true
+            /* 锁定的便签链接卡片也点不着（见 setLocked） */
+            enabled: !root.locked
             /* 收起来时只留底下那条细杠（还能再展开） */
             Layout.preferredHeight: root.hasLinks
                                  ? (root.linksExpanded
@@ -1097,6 +1430,8 @@ Rectangle {
         height: 14
         anchors.right: parent.right
         anchors.bottom: parent.bottom
+        /* 锁定的便签改不了大小（见 setLocked） */
+        enabled: !root.locked
         cursorShape: Qt.SizeFDiagCursor
         acceptedButtons: Qt.LeftButton
         onPressed: noteWindow.beginResize()

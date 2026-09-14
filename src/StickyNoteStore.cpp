@@ -24,21 +24,42 @@ constexpr char kNotesFile[] = "notes.json";
 constexpr int kSaveDelayMs = 500;
 
 /*
- * 便签纸的配色。
+ * 便签纸的配色：**48 格**，8 列 × 6 行（面板按这个排）。
  *
- * 前四个是经典便签色（黄 / 粉 / 绿 / 蓝），后四个是深色纸 ——
+ * 前四行是浅色系（经典便签黄 / 粉 / 绿 / 蓝 / 紫 一路铺开），后两行是深色纸 ——
  * 前后景对比度由 StickyNote::textColor() 按亮度自动配（见 .cpp 底部），
  * 所以深纸上写的是浅字，不用为深色单独一套样式。
+ *
+ * 第一格**必须是便签黄**：新建便签的默认底色就是它，自检也钉着这一条。
+ *
+ * 为什么从 8 个扩到 48 个：用户要的是取色框里那种"Basic colors"那么大一片色板
+ * （原来 8 个色排成 6 列，第二行只两格，看着不像块色板）。
  */
 const QStringList kPalette = {
-    QStringLiteral("#ffe9a8"),   /* 便签黄（默认） */
-    QStringLiteral("#ffd3d8"),   /* 浅粉 */
-    QStringLiteral("#c9ebc0"),   /* 浅绿 */
-    QStringLiteral("#bfe0f5"),   /* 浅蓝 */
-    QStringLiteral("#e5d4f7"),   /* 浅紫 */
-    QStringLiteral("#3b4048"),   /* 石墨 */
-    QStringLiteral("#33403a"),   /* 墨绿 */
-    QStringLiteral("#3a3348"),   /* 深紫 */
+    /* 第 1 行：便签黄领头的浅暖色 */
+    QStringLiteral("#ffe9a8"), QStringLiteral("#fff3c4"), QStringLiteral("#ffe0b2"),
+    QStringLiteral("#ffd3d8"), QStringLiteral("#f7c8e0"), QStringLiteral("#e5d4f7"),
+    QStringLiteral("#d9d6f7"), QStringLiteral("#c9b6f7"),
+    /* 第 2 行：浅绿 / 浅蓝 / 浅青 */
+    QStringLiteral("#f0f7c4"), QStringLiteral("#ddf2b8"), QStringLiteral("#c9ebc0"),
+    QStringLiteral("#b8ecd8"), QStringLiteral("#c0eef0"), QStringLiteral("#bfe0f5"),
+    QStringLiteral("#c4d8f7"), QStringLiteral("#cfc4f7"),
+    /* 第 3 行：中等饱和（暖） */
+    QStringLiteral("#ffd166"), QStringLiteral("#ffbe5c"), QStringLiteral("#ffab91"),
+    QStringLiteral("#ff9aa2"), QStringLiteral("#f48fb1"), QStringLiteral("#ce93d8"),
+    QStringLiteral("#b39ddb"), QStringLiteral("#9fa8da"),
+    /* 第 4 行：中等饱和（冷） */
+    QStringLiteral("#b7d34a"), QStringLiteral("#a5d6a7"), QStringLiteral("#80cbc4"),
+    QStringLiteral("#81d4fa"), QStringLiteral("#90caf9"), QStringLiteral("#a5b4fc"),
+    QStringLiteral("#c4b5fd"), QStringLiteral("#e1bee7"),
+    /* 第 5 行：深一档（含中性灰） */
+    QStringLiteral("#6b5b2e"), QStringLiteral("#7a5c3e"), QStringLiteral("#8d6e63"),
+    QStringLiteral("#a1887f"), QStringLiteral("#757575"), QStringLiteral("#616161"),
+    QStringLiteral("#546e7a"), QStringLiteral("#4e6e5d"),
+    /* 第 6 行：石墨 / 墨绿 / 深紫这些"深色纸" */
+    QStringLiteral("#3b4048"), QStringLiteral("#33403a"), QStringLiteral("#3a3348"),
+    QStringLiteral("#2f3b46"), QStringLiteral("#432b2b"), QStringLiteral("#2b2b2b"),
+    QStringLiteral("#1f1f1f"), QStringLiteral("#101010"),
 };
 
 /* 带 alpha 的颜色写进 JSON：QColor::name() 会丢掉透明度，所以自己拼 */
