@@ -124,6 +124,8 @@ Popup {
     function setLocalPath(kind, path) {
         if (kind === "exe")
             exeField.text = path
+        else if (kind === "mmproj")
+            mmprojField.text = path
         else
             modelField.text = path
     }
@@ -1133,6 +1135,12 @@ Popup {
                                         rightPadding: 7
                                         /* 改完（或按回车）就落盘：Llm 的属性 setter 自己写 QSettings */
                                         onEditingFinished: Llm[apiRow.modelData.k] = text
+                                        /*
+                                         * 路径 / 地址是从存档填进来的，光标默认落在末尾 ——
+                                         * 不聚焦时会显示成"…尾巴那一截"。这里把它拨回开头，
+                                         * 看着才是完整的一条（自己敲字时不动它）。
+                                         */
+                                        onTextChanged: if (!activeFocus) cursorPosition = 0
                                         background: Rectangle {
                                             color: "#26282b"
                                             border.color: root.borderColor
@@ -1182,6 +1190,7 @@ Popup {
                                     leftPadding: 7
                                     rightPadding: 7
                                     onEditingFinished: Llm.localExe = text
+                                    onTextChanged: if (!activeFocus) cursorPosition = 0
                                     background: Rectangle {
                                         color: "#26282b"
                                         border.color: root.borderColor
@@ -1235,6 +1244,7 @@ Popup {
                                     leftPadding: 7
                                     rightPadding: 7
                                     onEditingFinished: Llm.localModel = text
+                                    onTextChanged: if (!activeFocus) cursorPosition = 0
                                     background: Rectangle {
                                         color: "#26282b"
                                         border.color: root.borderColor
@@ -1261,6 +1271,60 @@ Popup {
                                         cursorShape: Qt.PointingHandCursor
                                         /* 同上：走 Main.qml，面板先让开 */
                                         onClicked: root.commandRequested("translateChooseModel")
+                                    }
+                                }
+                            }
+
+                            Row {
+                                spacing: 8
+
+                                Text {
+                                    width: 62
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    text: "多模态投影"
+                                    color: root.mutedColor
+                                    font.pixelSize: 12
+                                }
+                                TextField {
+                                    id: mmprojField
+                                    width: 320
+                                    height: 26
+                                    text: Llm.localMmproj
+                                    placeholderText: "mmproj-model-f16.gguf（纯文本模型留空）"
+                                    color: root.textColor
+                                    placeholderTextColor: root.mutedColor
+                                    font.pixelSize: 12
+                                    selectByMouse: true
+                                    leftPadding: 7
+                                    rightPadding: 7
+                                    onEditingFinished: Llm.localMmproj = text
+                                    onTextChanged: if (!activeFocus) cursorPosition = 0
+                                    background: Rectangle {
+                                        color: "#26282b"
+                                        border.color: root.borderColor
+                                        border.width: 1
+                                        radius: 4
+                                    }
+                                }
+                                Rectangle {
+                                    width: 58; height: 26; radius: 4
+                                    anchors.verticalCenter: mmprojField.verticalCenter
+                                    color: mmprojPickHit.containsMouse ? root.rowHover : "transparent"
+                                    border.width: 1
+                                    border.color: root.borderColor
+                                    Text {
+                                        anchors.centerIn: parent
+                                        text: "选择…"
+                                        color: root.textColor
+                                        font.pixelSize: 12
+                                    }
+                                    MouseArea {
+                                        id: mmprojPickHit
+                                        anchors.fill: parent
+                                        hoverEnabled: true
+                                        cursorShape: Qt.PointingHandCursor
+                                        /* 同上：走 Main.qml，面板先让开 */
+                                        onClicked: root.commandRequested("translateChooseMmproj")
                                     }
                                 }
                             }
@@ -1346,6 +1410,36 @@ Popup {
                                 font.pixelSize: 10
                                 font.family: "Consolas"
                                 text: Llm.localLog
+                            }
+
+                            /*
+                             * 真正会执行的那条命令行（和 C++ 拼出来的是同一份）。
+                             * 模型加载不起来时，先把这条复制出去在终端里跑一遍，
+                             * 报错信息比这里的日志全。
+                             */
+                            Text {
+                                width: parent.width
+                                visible: Llm.localCommand !== ""
+                                wrapMode: Text.WrapAnywhere
+                                maximumLineCount: 2
+                                elide: Text.ElideRight
+                                color: root.mutedColor
+                                font.pixelSize: 10
+                                font.family: "Consolas"
+                                text: Llm.localCommand
+                            }
+
+                            /*
+                             * 这句是给用户吃定心丸的：本地模型不用手动点启动
+                             * （点翻译时会自己拉起来，见 LlmClient::post）。
+                             */
+                            Text {
+                                width: parent.width
+                                wrapMode: Text.WordWrap
+                                color: root.mutedColor
+                                font.pixelSize: 11
+                                text: "配好之后不用每次手动启动：翻译卡片上一点「翻译」，"
+                                      + "本地模型会自己起来（加载要几秒到几十秒，卡片上会显示进展）。"
                             }
                         }
 

@@ -79,6 +79,7 @@ LlmClient::LlmClient(QObject *parent) : QObject(parent) {
                              QStringLiteral("deepseek-chat")).toString();
     m_localExe = settings.value(QString::fromLatin1(kKeyBase) + QStringLiteral("localExe")).toString();
     m_localModel = settings.value(QString::fromLatin1(kKeyBase) + QStringLiteral("localModel")).toString();
+    m_localMmproj = settings.value(QString::fromLatin1(kKeyBase) + QStringLiteral("localMmproj")).toString();
     m_localPort = settings.value(QString::fromLatin1(kKeyBase) + QStringLiteral("localPort"), 8080).toInt();
     m_defaultTarget = defaultTargetLanguage();
 }
@@ -148,6 +149,7 @@ void LlmClient::setLocalModel(const QString &value) {
 }
 
 int LlmClient::localPort() const { return m_localPort; }
+
 void LlmClient::setLocalPort(int value) {
     const int clean = qBound(1, value, 65535);
     if (m_localPort == clean)
@@ -155,6 +157,40 @@ void LlmClient::setLocalPort(int value) {
     m_localPort = clean;
     persist(QStringLiteral("localPort"), clean);
     emit settingsChanged();
+}
+
+QString LlmClient::localMmproj() const { return m_localMmproj; }
+
+void LlmClient::setLocalMmproj(const QString &value) {
+    if (m_localMmproj == value)
+        return;
+    m_localMmproj = value;
+    persist(QStringLiteral("localMmproj"), value);
+    emit settingsChanged();
+}
+
+QStringList LlmClient::localServerArgs() const {
+    QStringList args;
+    args << QStringLiteral("-m") << m_localModel.trimmed();
+    /* 纯文本模型没有这一项；填了才加（见头文件里 localMmproj 的说明） */
+    if (!m_localMmproj.trimmed().isEmpty())
+        args << QStringLiteral("--mmproj") << m_localMmproj.trimmed();
+    args << QStringLiteral("--port") << QString::number(m_localPort);
+    return args;
+}
+
+QString LlmClient::localCommand() const {
+    /* 只是给人看的：带空格的路径按命令行习惯加引号 */
+    auto quoted = [](const QString &part) {
+        return part.contains(QLatin1Char(' ')) ? QLatin1Char('"') + part + QLatin1Char('"')
+                                               : part;
+    };
+    QStringList parts;
+    parts << quoted(m_localExe.trimmed());
+    const QStringList args = localServerArgs();
+    for (const QString &arg : args)
+        parts << quoted(arg);
+    return parts.join(QLatin1Char(' ')).trimmed();
 }
 
 QString LlmClient::defaultTarget() const { return m_defaultTarget; }
@@ -256,8 +292,21 @@ void LlmClient::post(const QString &token, const QString &text, const QString &t
         failLater(QStringLiteral("还没填模型名（设置 → 翻译）"));
         return;
     }
+    /*
+     * 本地模式还没启动：**自动把它拉起来**，这条请求排在队里等着。
+     *
+     * 用户要的就是"配好一次，以后不用手点启动"：点翻译那一刻服务自己起来，
+     * 模型加载完（见 pollLocalReady）这条请求原样发出去。模型加载几秒到几十秒，
+     * 界面那边一直是"翻译中…"（busy 已经置上），不是报错。
+     */
     if (m_mode == QLatin1String("local") && !localRunning()) {
-        failLater(QStringLiteral("本地模型还没启动（设置 → 翻译 → 启动本地模型）"));
+        m_pending.append(PendingRequest{token, text, target, source, probe});
+        setBusy(true);
+        setStatus(QStringLiteral("正在启动本地模型…"));
+        if (!startLocal()) {
+            /* 配置不全（程序 / 模型没填）：startLocal 里已经把原因写进 status 了 */
+            failPending(m_status);
+        }
         return;
     }
 
@@ -368,43 +417,84 @@ bool LlmClient::startLocal() {
     m_proc = new QProcess(this);
     m_proc->setProgram(m_localExe.trimmed());
     /*
-     * llama-server 的命令行：-m 模型 --port 端口。
-     * （Ollama / LM Studio 那种自带服务的，直接用 api 模式连它们的地址就行，
-     *   不需要这里启动。）
+     * llama-server 的命令行：-m 模型 [--mmproj 多模态投影] --port 端口
+     * （参数由 localServerArgs() 拼，设置面板显示的那条命令行就是它）。
+     * Ollama / LM Studio 那种自带服务的，直接用 api 模式连它们的地址就行，
+     * 不需要这里启动。
      */
-    m_proc->setArguments({QStringLiteral("-m"), m_localModel.trimmed(),
-                          QStringLiteral("--port"), QString::number(m_localPort)});
+    m_proc->setArguments(localServerArgs());
     m_proc->setProcessChannelMode(QProcess::MergedChannels);
 
     connect(m_proc, &QProcess::readyReadStandardOutput, this, [this]() {
         if (m_proc)
             appendLocalLog(QString::fromLocal8Bit(m_proc->readAllStandardOutput()));
     });
-    connect(m_proc, &QProcess::errorOccurred, this, [this](QProcess::ProcessError) {
-        if (m_proc && m_proc->state() == QProcess::NotRunning)
-            setStatus(QStringLiteral("本地推理程序启动失败：%1").arg(m_proc->errorString()));
+    /*
+     * 启动**不等**（原来这里是 waitForStarted(8000)）：翻译那条路上模型是自动
+     * 拉起来的，阻塞 8 秒等于把界面冻住 8 秒。改成听信号：
+     *   started        -> 报"模型加载中"，开始轮询 /models；
+     *   FailedToStart  -> 把排队等模型的请求按这个原因失败掉；
+     *   finished       -> 服务半路没了，同样把排队的请求失败掉（不然它们一直等）。
+     */
+    connect(m_proc, &QProcess::started, this, [this]() {
+        setStatus(QStringLiteral("本地推理服务已启动，模型加载中…"));
+        emit localRunningChanged();
+        /* 起来之后轮询 /models：模型加载完那个口才通，通了才算就绪 */
+        QTimer::singleShot(1200, this, [this]() { pollLocalReady(0); });
+    });
+    connect(m_proc, &QProcess::errorOccurred, this, [this](QProcess::ProcessError error) {
+        if (error != QProcess::FailedToStart)
+            return;   /* 别的错误（崩了 / 被杀了）由 finished 那条兜底 */
+        const QString reason =
+            QStringLiteral("本地推理程序没能启动：%1").arg(m_proc ? m_proc->errorString()
+                                                                 : QString());
+        setStatus(reason);
+        if (m_proc) {
+            m_proc->deleteLater();
+            m_proc = nullptr;
+        }
+        emit localRunningChanged();
+        failPending(reason);
     });
     connect(m_proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
             [this](int code, QProcess::ExitStatus) {
-                setStatus(QStringLiteral("本地推理服务退出了（退出码 %1），看下面的输出").arg(code));
+                const QString reason =
+                    QStringLiteral("本地推理服务退出了（退出码 %1），看设置里的输出").arg(code);
+                setStatus(reason);
                 emit localRunningChanged();
+                failPending(reason);
             });
 
+    setStatus(QStringLiteral("正在启动本地推理服务…"));
     m_proc->start();
-    if (!m_proc->waitForStarted(8000)) {
-        setStatus(QStringLiteral("本地推理程序没能启动：%1").arg(m_proc->errorString()));
-        m_proc->deleteLater();
-        m_proc = nullptr;
-        emit localRunningChanged();
-        return false;
-    }
-
-    setStatus(QStringLiteral("本地推理服务已启动，模型加载中…"));
     emit localRunningChanged();
-
-    /* 起来之后轮询 /models：模型加载完那个口才通，通了才算就绪 */
-    QTimer::singleShot(1200, this, [this]() { pollLocalReady(0); });
     return true;
+}
+
+void LlmClient::flushPending() {
+    if (m_pending.isEmpty() || !localRunning())
+        return;
+    /* 先摘干净再发：post() 万一又把某条排回队里，也不会在这儿绕圈 */
+    const QList<PendingRequest> waiting = m_pending;
+    m_pending.clear();
+    for (const PendingRequest &request : waiting)
+        post(request.token, request.text, request.target, request.source, request.probe);
+}
+
+void LlmClient::failPending(const QString &reason) {
+    if (m_pending.isEmpty())
+        return;
+    const QList<PendingRequest> waiting = m_pending;
+    m_pending.clear();
+    setBusy(false);
+    for (const PendingRequest &request : waiting) {
+        /* 和别处一样异步回：QML 那边是"先记 token 再等信号" */
+        if (request.probe)
+            continue;
+        QTimer::singleShot(0, this, [this, token = request.token, reason]() {
+            emit failed(token, reason);
+        });
+    }
 }
 
 void LlmClient::pollLocalReady(int attempt) {
@@ -413,7 +503,10 @@ void LlmClient::pollLocalReady(int attempt) {
         return;
     }
     if (attempt > 90) {
-        setStatus(QStringLiteral("本地模型加载超时（模型太大 / 端口被占？看下面的输出）"));
+        const QString reason =
+            QStringLiteral("本地模型加载超时（模型太大 / 端口被占？看设置里的输出）");
+        setStatus(reason);
+        failPending(reason);
         return;
     }
 
@@ -424,6 +517,8 @@ void LlmClient::pollLocalReady(int attempt) {
         reply->deleteLater();
         if (reply->error() == QNetworkReply::NoError) {
             setStatus(QStringLiteral("本地模型已就绪，可以翻译了"));
+            /* 等模型的那条请求（见 post 里的自动启动）：现在可以发了 */
+            flushPending();
             return;
         }
         QTimer::singleShot(1500, this, [this, attempt]() { pollLocalReady(attempt + 1); });
@@ -442,6 +537,7 @@ void LlmClient::stopLocal() {
     proc->deleteLater();
     setStatus(QStringLiteral("本地推理服务已停止"));
     emit localRunningChanged();
+    failPending(m_status);
 }
 
 void LlmClient::shutdown() {

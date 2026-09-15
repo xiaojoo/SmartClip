@@ -490,8 +490,14 @@ Item {
                     anchors.right: parent.right
                     anchors.rightMargin: 10
                     anchors.verticalCenter: parent.verticalCenter
-                    text: root.hint
-                    color: root.hintColor
+                    /*
+                     * 转圈的时候显示 LLM 那边的进展（"正在启动本地模型…" /
+                     * "模型加载中…" / "翻译中…"）—— 本地模型是自动拉起来的，
+                     * 加载要几十秒，用户得看得见它在干活。
+                     */
+                    text: root.busy ? (Llm.status !== "" ? Llm.status : "翻译中…")
+                                    : root.hint
+                    color: root.busy ? root.mutedColor : root.hintColor
                     font.pixelSize: 11
                     elide: Text.ElideRight
                 }

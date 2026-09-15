@@ -508,7 +508,9 @@ Rectangle {
     function chooseTranslateLocalFile(kind) {
         var path = withSettingsPanelAway(function () {
             return Cmd.chooseFileDialog(
-                        kind === "exe" ? "选择推理服务程序" : "选择模型文件",
+                        kind === "exe" ? "选择推理服务程序"
+                                       : (kind === "mmproj" ? "选择多模态投影文件（mmproj）"
+                                                            : "选择模型文件"),
                         kind === "exe" ? "可执行文件 (*.exe);;所有文件 (*.*)"
                                        : "GGUF 模型 (*.gguf);;所有文件 (*.*)")
         })
@@ -516,6 +518,8 @@ Rectangle {
             return
         if (kind === "exe")
             Llm.localExe = path
+        else if (kind === "mmproj")
+            Llm.localMmproj = path
         else
             Llm.localModel = path
         settingsPanel.setLocalPath(kind, path)
@@ -1355,6 +1359,7 @@ Rectangle {
         /* 设置 → 翻译里那两个「选择…」（面板先让开，再开系统文件框） */
         if (act === "translateChooseExe") { chooseTranslateLocalFile("exe"); return }
         if (act === "translateChooseModel") { chooseTranslateLocalFile("model"); return }
+        if (act === "translateChooseMmproj") { chooseTranslateLocalFile("mmproj"); return }
         if (act === "about") { showAbout(); return }
     }
 

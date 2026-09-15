@@ -53,7 +53,18 @@ class LlmClient final : public QObject {
     /* 本地模式：OpenAI 兼容的推理服务程序（如 llama-server.exe）+ 模型文件 */
     Q_PROPERTY(QString localExe READ localExe WRITE setLocalExe NOTIFY settingsChanged)
     Q_PROPERTY(QString localModel READ localModel WRITE setLocalModel NOTIFY settingsChanged)
+    /*
+     * 多模态投影文件（llama.cpp 的 --mmproj，形如 mmproj-model-f16.gguf）。
+     *
+     * 视觉模型（Qwen2-VL / Gemma-3 这类）要它才能把图片那半认起来；纯文本模型
+     * 留空即可 —— 留空就**不加**这个参数。翻译这边现在只发文字，但启动参数
+     * 先给上：模型是 VL 的、不带 mmproj 有时连加载都过不去。
+     */
+    Q_PROPERTY(QString localMmproj READ localMmproj WRITE setLocalMmproj NOTIFY settingsChanged)
     Q_PROPERTY(int localPort READ localPort WRITE setLocalPort NOTIFY settingsChanged)
+
+    /* 启动本地服务用的那条完整命令行（设置面板显示出来给人核对） */
+    Q_PROPERTY(QString localCommand READ localCommand NOTIFY settingsChanged)
 
     /* 新建卡片时的默认目标语言（语言名见 languages()） */
     Q_PROPERTY(QString defaultTarget READ defaultTarget WRITE setDefaultTarget
@@ -98,8 +109,18 @@ public:
     QString localModel() const;
     void setLocalModel(const QString &value);
 
+    QString localMmproj() const;
+    void setLocalMmproj(const QString &value);
+
     int localPort() const;
     void setLocalPort(int value);
+
+    QString localCommand() const;
+    /*
+     * 启动本地服务要用的参数（-m <模型> [--mmproj <投影>] --port <端口>）。
+     * 单独一个函数是为了让"显示出来的命令行"和"真正启动时传的"永远是同一份。
+     */
+    QStringList localServerArgs() const;
 
     QString defaultTarget() const;
     void setDefaultTarget(const QString &value);
@@ -157,6 +178,26 @@ private:
     /* 真正发请求；probe 为真时不发 finished，只更新 status */
     void post(const QString &token, const QString &text, const QString &target,
               const QString &source, bool probe);
+
+    /*
+     * 等本地模型启动的那些请求（一般只有一条）。
+     *
+     * 本地模式下"还没启动"不再是错误：post() 会先把请求排在这儿、顺手把服务
+     * 拉起来，等服务报"已就绪"（见 pollLocalReady）再原样发出去。模型加载要几秒
+     * 到几十秒，用户点一下翻译就该等着，而不是先被要求去设置里点一下启动。
+     */
+    struct PendingRequest {
+        QString token;
+        QString text;
+        QString target;
+        QString source;
+        bool probe = false;
+    };
+    /* 模型就绪了：把排在最前面的那条发出去 */
+    void flushPending();
+    /* 启动失败 / 超时 / 被停掉：把排队的都按这个原因失败掉 */
+    void failPending(const QString &reason);
+
     void setStatus(const QString &text);
     void setBusy(bool on);
     void persist(const QString &key, const QVariant &value);
@@ -176,8 +217,12 @@ private:
     QString m_model;
     QString m_localExe;
     QString m_localModel;
+    QString m_localMmproj;
     int m_localPort = 8080;
     QString m_defaultTarget;
+
+    /* 等本地模型启动的那几条请求（见 PendingRequest） */
+    QList<PendingRequest> m_pending;
 
     bool m_busy = false;
     QString m_status;

@@ -209,6 +209,9 @@ int SelfTest::runTranslate(TranslateCards *cards, LlmClient *llm, TrayIcon *tray
         cardPrefix + QStringLiteral("sourceLang"), cardPrefix + QStringLiteral("targetLang"),
         cardPrefix + QStringLiteral("pinned"),     cardPrefix + QStringLiteral("geometry"),
         cardPrefix + QStringLiteral("visible"),
+        /* 本地模型那几项：下面"本地模型"那一节会动它们（见那一段的说明） */
+        QStringLiteral("translate/localExe"),    QStringLiteral("translate/localModel"),
+        QStringLiteral("translate/localMmproj"), QStringLiteral("translate/localPort"),
     };
     QHash<QString, QVariant> saved;
     for (const QString &key : savedKeys)
@@ -423,7 +426,79 @@ int SelfTest::runTranslate(TranslateCards *cards, LlmClient *llm, TrayIcon *tray
     }
 
     /* =====================================================================
-     * 7) 收起来 / 再叫出来 / 落盘
+     * 7) 本地模型：mmproj 参数 + "用到的时候自己启动"
+     * =================================================================== */
+    {
+        const QString oldExe = llm->localExe();
+        const QString oldModel = llm->localModel();
+        const QString oldMmproj = llm->localMmproj();
+        const int oldPort = llm->localPort();
+        const QString oldMode = llm->mode();
+
+        llm->setLocalExe(QStringLiteral("C:/tools/llama-server.exe"));
+        llm->setLocalModel(QStringLiteral("C:/models/qwen2-vl-2b.gguf"));
+        llm->setLocalPort(8080);
+
+        /* 纯文本模型：不该带 --mmproj */
+        llm->setLocalMmproj(QString());
+        const QStringList plain = llm->localServerArgs();
+        trCheck(plain.contains(QStringLiteral("C:/models/qwen2-vl-2b.gguf"))
+                    && plain.contains(QStringLiteral("8080")),
+                QStringLiteral("本地模型：启动参数里有模型文件和端口"),
+                plain.join(QLatin1Char(' ')));
+        trCheck(!plain.contains(QStringLiteral("--mmproj")),
+                QStringLiteral("本地模型：没填 mmproj 时**不**加这个参数"));
+
+        /* 多模态：填了就要带 --mmproj <文件> */
+        llm->setLocalMmproj(QStringLiteral("C:/models/mmproj-model-f16.gguf"));
+        const QStringList vision = llm->localServerArgs();
+        const int mmAt = vision.indexOf(QStringLiteral("--mmproj"));
+        trCheck(mmAt >= 0 && vision.value(mmAt + 1) == QStringLiteral("C:/models/mmproj-model-f16.gguf"),
+                QStringLiteral("本地模型：填了 mmproj 就带 --mmproj 和那个文件"),
+                vision.join(QLatin1Char(' ')));
+        trCheck(llm->localCommand().contains(QStringLiteral("--mmproj")),
+                QStringLiteral("本地模型：设置里显示的命令行和真启动的是同一份"),
+                llm->localCommand());
+
+        /*
+         * 自动启动：本地模式 + 还没起来时点翻译，**不该**回"还没启动"，
+         * 而是自己去拉起服务（这里故意给一个不存在的程序，看它报的是"启动失败"）。
+         */
+        llm->setMode(QStringLiteral("local"));
+        llm->setLocalExe(QStringLiteral("C:/__self_test__/not-there/llama-server.exe"));
+
+        QString gotError;
+        QString gotToken;
+        QObject probe;
+        QObject::connect(llm, &LlmClient::failed, &probe,
+                         [&](const QString &token, const QString &error) {
+                             gotToken = token;
+                             gotError = error;
+                         });
+
+        const QString token = llm->translate(QStringLiteral("你好"), QStringLiteral("英语"));
+        QEventLoop loop;
+        QTimer::singleShot(6000, &loop, &QEventLoop::quit);
+        QObject::connect(llm, &LlmClient::failed, &loop, &QEventLoop::quit);
+        loop.exec();
+        settle();
+
+        trCheck(gotToken == token && gotError.contains(QStringLiteral("启动")),
+                QStringLiteral("本地模型：没启动时点翻译会自己去启动（报的是启动失败）"),
+                gotToken + QStringLiteral(" / ") + gotError);
+        trCheck(!gotError.contains(QStringLiteral("还没启动")),
+                QStringLiteral("本地模型：不再要求用户先去设置里手动点启动"), gotError);
+
+        /* 还原（配置由最后那段统一写回） */
+        llm->setMode(oldMode);
+        llm->setLocalExe(oldExe);
+        llm->setLocalModel(oldModel);
+        llm->setLocalMmproj(oldMmproj);
+        llm->setLocalPort(oldPort);
+    }
+
+    /* =====================================================================
+     * 8) 收起来 / 再叫出来 / 落盘
      * =================================================================== */
     card->setTextIn(QStringLiteral("自检写的正文"));
     card->setTargetLang(QStringLiteral("英语"));
@@ -451,7 +526,7 @@ int SelfTest::runTranslate(TranslateCards *cards, LlmClient *llm, TrayIcon *tray
             QStringLiteral("再叫出来：正文还是刚才那份（不是白纸）"), card->textIn());
 
     /* =====================================================================
-     * 8) 托盘里那条入口（自检从外面点不到托盘图标，只能看菜单）
+     * 9) 托盘里那条入口（自检从外面点不到托盘图标，只能看菜单）
      * =================================================================== */
     if (tray) {
         bool found = false;
