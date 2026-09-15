@@ -1,10 +1,10 @@
 #include "Screenshot.h"
-#include "LightMenu.h"
+#include "PinWindow.h"
 
 #include <QAction>
 #include <QApplication>
+#include <QBuffer>
 #include <QClipboard>
-#include <QColorDialog>
 #include <QCoreApplication>
 #include <QCursor>
 #include <QDateTime>
@@ -13,13 +13,19 @@
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QFont>
 #include <QGuiApplication>
+#include <QImage>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QKeyEvent>
 #include <QMenu>
 #include <QMessageBox>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QPainterPath>
 #include <QPixmap>
+#include <QQmlEngine>
 #include <QQmlError>
 #include <QQuickImageProvider>
 #include <QQuickItem>
@@ -30,8 +36,10 @@
 #include <QTimer>
 #include <QUrl>
 #include <QVBoxLayout>
+#include <QVariantMap>
 #include <QWheelEvent>
 #include <QWidget>
+#include <QWindow>
 #include <cmath>
 
 #if defined(Q_OS_WIN)
@@ -41,156 +49,27 @@
 namespace {
 
 /*
- * 固定到桌面的那个小窗（"贴图"）。
+ * 一张图 -> png 的 data URL（"data:image/png;base64,…"）。
  *
- * 就是一块画着图的置顶无边框窗口：拖动移动、滚轮缩放、双击 / Esc 关掉、
- * 右键出菜单（复制 / 另存为 / 原始大小 / 关闭）。
- *
- * 用 QWidget 而不是 QML 的 Window：置顶、无边框、不进任务栏（Qt::Tool）
- * 都是窗口标志位的事，C++ 这边一行一个；而且它要长期挂在桌面上，
- * 没必要为了一张静态图再养一个 QML 窗口和一份引擎上下文。
- *
- * 注意这里没有 Q_OBJECT：它不发信号、不需要 qobject_cast，
- * 认它靠的是 Screenshot::m_pins 这份清单。
+ * 选区识别（Screenshot::selectionImage）和贴图识别（PinWindow::composedImageUrl）
+ * 都走这一份 —— 发给模型的必须是同一种东西（见 LlmClient::recognize）。
+ * 太大就返回空串：base64 之后还要再涨三分之一，几十 MB 的请求体多半会被服务端
+ * 直接掐掉，报出来还是一句看不懂的 HTTP 错，界面上回一句人话更省事。
  */
-class PinWindow final : public QWidget {
-public:
-    PinWindow(const QImage &image, const QPoint &pos)
-        : QWidget(nullptr, Qt::Tool | Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint),
-          m_image(image) {
-        /* 关掉就删：贴图窗口是"用完即弃"的东西，留一堆隐藏窗口没意义 */
-        setAttribute(Qt::WA_DeleteOnClose);
-        /* 别把焦点从主窗口抢走：贴上去的图只是看，不参与打字 */
-        setAttribute(Qt::WA_ShowWithoutActivating);
-        setCursor(Qt::OpenHandCursor);
-        setWindowTitle(QStringLiteral("SmartClip 贴图"));
-
-        /*
-         * 图的尺寸是设备像素，窗口尺寸要的是逻辑像素 ——
-         * 高 DPI 下直接拿 image.size() 会大一倍。
-         */
-        const qreal dpr = m_image.devicePixelRatio() > 0 ? m_image.devicePixelRatio() : 1.0;
-        m_base = QSizeF(m_image.size()) / dpr;
-        resize(m_base.toSize());
-        move(pos);
-    }
-
-protected:
-    void paintEvent(QPaintEvent *) override {
-        QPainter painter(this);
-        painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
-        /*
-         * 铺满整个窗口：窗口按逻辑尺寸，图是设备尺寸，比例正好是 DPR，
-         * 缩放之后一个图像像素对一个物理像素（不糊也不失真）。
-         */
-        painter.drawImage(rect(), m_image);
-        painter.setPen(QColor(0x4b, 0x4d, 0x4f));
-        painter.drawRect(rect().adjusted(0, 0, -1, -1));
-    }
-
-    void mousePressEvent(QMouseEvent *event) override {
-        if (event->button() == Qt::RightButton) {
-            showMenu(event->globalPosition().toPoint());
-            event->accept();
-            return;
-        }
-        if (event->button() != Qt::LeftButton) {
-            QWidget::mousePressEvent(event);
-            return;
-        }
-
-        /*
-         * 拖动交给窗口管理器（和主窗口顶栏拖动同一个理由：贴边吸附、
-         * 多屏 DPI 切换都归它管）。它不支持时退回自己搬。
-         */
-        m_grabOffset = event->globalPosition().toPoint() - frameGeometry().topLeft();
-        m_manualDrag = !windowHandle() || !windowHandle()->startSystemMove();
-        event->accept();
-    }
-
-    void mouseMoveEvent(QMouseEvent *event) override {
-        if (m_manualDrag && (event->buttons() & Qt::LeftButton))
-            move(event->globalPosition().toPoint() - m_grabOffset);
-        QWidget::mouseMoveEvent(event);
-    }
-
-    void mouseReleaseEvent(QMouseEvent *event) override {
-        m_manualDrag = false;
-        QWidget::mouseReleaseEvent(event);
-    }
-
-    void mouseDoubleClickEvent(QMouseEvent *event) override {
-        if (event->button() == Qt::LeftButton)
-            close();
-    }
-
-    void wheelEvent(QWheelEvent *event) override {
-        setZoom(m_scale * (event->angleDelta().y() > 0 ? 1.1 : 1.0 / 1.1));
-        event->accept();
-    }
-
-    void keyPressEvent(QKeyEvent *event) override {
-        if (event->key() == Qt::Key_Escape)
-            close();
-        else
-            QWidget::keyPressEvent(event);
-    }
-
-private:
-    void setZoom(qreal scale) {
-        m_scale = qBound(0.1, scale, 8.0);
-        resize((m_base * m_scale).toSize());
-    }
-
-    void showMenu(const QPoint &global) {
-        QMenu menu(this);
-        QAction *copyAct = menu.addAction(QStringLiteral("复制到剪贴板"));
-        QAction *saveAct = menu.addAction(QStringLiteral("另存为…"));
-        menu.addSeparator();
-        QAction *resetAct = menu.addAction(QStringLiteral("原始大小"));
-        menu.addSeparator();
-        QAction *closeAct = menu.addAction(QStringLiteral("关闭贴图"));
-
-        /*
-         * 白底。全局调色板是深色那套，QMenu 默认跟着走 —— 这个菜单是"贴图小窗"
-         * 自己的操作菜单，和托盘那个一样要浅色。样式表和托盘菜单共用一份，
-         * 见 src/LightMenu.h。
-         */
-        applyLightMenuStyle(&menu);
-
-        QAction *picked = menu.exec(global);
-        if (picked == copyAct) {
-            QGuiApplication::clipboard()->setImage(m_image);
-        } else if (picked == saveAct) {
-            saveAs();
-        } else if (picked == resetAct) {
-            setZoom(1.0);
-        } else if (picked == closeAct) {
-            close();
-        }
-    }
-
-    void saveAs() {
-        const QString dir =
-            QStandardPaths::writableLocation(QStandardPaths::PicturesLocation);
-        const QString suggested =
-            dir + QDir::separator()
-            + QStringLiteral("贴图_%1.png")
-                  .arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd_HHmmss")));
-        const QString path = QFileDialog::getSaveFileName(
-            this, QStringLiteral("保存截图"), suggested,
-            QStringLiteral("PNG 图片 (*.png);;JPEG 图片 (*.jpg);;所有文件 (*.*)"));
-        if (!path.isEmpty() && !m_image.save(path))
-            QMessageBox::warning(this, QStringLiteral("截图"),
-                                 QStringLiteral("写文件失败：\n") + path);
-    }
-
-    QImage m_image;
-    QSizeF m_base;
-    QPoint m_grabOffset;
-    qreal m_scale = 1.0;
-    bool m_manualDrag = false;
-};
+QString imageToDataUrl(const QImage &image) {
+    if (image.isNull())
+        return QString();
+    QByteArray png;
+    QBuffer buffer(&png);
+    buffer.open(QIODevice::WriteOnly);
+    if (!image.save(&buffer, "PNG"))
+        return QString();
+    buffer.close();
+    constexpr int kMaxRawBytes = 8 * 1024 * 1024;
+    if (png.size() > kMaxRawBytes)
+        return QString();
+    return QStringLiteral("data:image/png;base64,") + QString::fromLatin1(png.toBase64());
+}
 
 /*
  * image://shot/… 的取图口。
@@ -312,8 +191,15 @@ bool Screenshot::eventFilter(QObject *watched, QEvent *event) {
 
 void Screenshot::setEngine(QQmlEngine *engine) {
     m_engine = engine;
-    if (m_engine)
-        m_engine->addImageProvider(QStringLiteral("shot"), new ShotImageProvider(this));
+    if (!m_engine)
+        return;
+    m_engine->addImageProvider(QStringLiteral("shot"), new ShotImageProvider(this));
+    /*
+     * 贴图窗口的底图也走这个引擎（image://pin/<id>）。
+     * 提供者在 PinWindow.cpp 里（见 renderPin 的说明）：它自己去找窗口 ——
+     * 贴图用完即弃，没法在这里挂一份清单。
+     */
+    m_engine->addImageProvider(QStringLiteral("pin"), renderPin());
 }
 
 void Screenshot::beginCapture() {
@@ -820,7 +706,7 @@ bool Screenshot::setHostCaptureExcluded(bool on) {
 #endif
 }
 
-QImage Screenshot::compose(const QRectF &sel, const QVariantList &texts) const {
+QImage Screenshot::cropSelection(const QRectF &sel) const {
     if (m_shot.isNull())
         return QImage();
 
@@ -836,130 +722,65 @@ QImage Screenshot::compose(const QRectF &sel, const QVariantList &texts) const {
     device = device.intersected(m_shot.rect());
     if (device.isEmpty())
         return QImage();
+    return m_shot.copy(device);
+}
 
-    QImage out = m_shot.copy(device);
+/*
+ * 识别时选区最小要多大（**逻辑像素**）。
+ *
+ * 为什么单设一道门槛：合成 / 复制那两条路对选区大小无所谓（用户真框了 2×2
+ * 也就出 2×2 的图），但识别不一样 —— 那么小一块交给模型纯属浪费一次请求，
+ * 回来的一定是"没认出文字"，用户还得等几十秒才知道白点了。
+ * 8 是这个界面上"手一抖点一下"的尺度（见 CaptureOverlay 的 selReady）。
+ */
+constexpr qreal kMinRecognizeSize = 8.0;
+
+bool Screenshot::selectionReady(const QRectF &sel) const {
+    const QRectF clipped = sel.normalized();
+    if (clipped.width() < kMinRecognizeSize || clipped.height() < kMinRecognizeSize)
+        return false;
+    /* 光看宽高不够：还没抓到图（m_shot 空）时一样是"没东西可认" */
+    return !cropSelection(sel).isNull();
+}
+
+QString Screenshot::selectionImage(const QRectF &sel) const {
+    if (!selectionReady(sel))
+        return QString();
+    /* 编码只留一份（见 imageToDataUrl）：选区识别和贴图识别发的是同一种东西 */
+    return imageToDataUrl(cropSelection(sel));
+}
+
+void Screenshot::copyText(const QString &text) const {
+    if (!text.isEmpty())
+        QGuiApplication::clipboard()->setText(text);
+}
+
+QImage Screenshot::compose(const QRectF &sel, const QVariantList &texts) const {
+    QImage out = cropSelection(sel);
+    if (out.isNull())
+        return QImage();
+
+    /* 选区夹回屏幕范围的那一份（标注坐标要按它平移，见 paintAnnotations） */
+    const QRectF bounds(QPointF(0, 0), QSizeF(m_screenRect.size()));
+    const QRectF clipped = sel.normalized().intersected(bounds);
+
     /*
-     * 画之前把 DPR 抹成 1。
+     * 画之前把 DPR 抹成 1，再把画笔按 dpr 缩放。
      *
-     * 下面每个坐标和字号都自己乘过 dpr 了；QPainter 打在 QImage 上到底会不会
-     * 再按 DPR 缩一次，各版本行为不一致（赌错了就是"字和位置都大一倍"），
-     * 索性在这里把话说死：合成期间这张图就是"一像素是一像素"的。
+     * 标注的坐标是**屏幕坐标（逻辑像素）**，而这张图是设备像素 —— 两者差一个
+     * dpr。逐个坐标乘 dpr 和缩放画笔效果一样，这里选后者：坐标平移交给共用的
+     * paintAnnotations，线宽 / 字号由 QPainter 统一放大，不会出现"哪一处忘了乘"。
+     *
+     * 抹掉 DPR 之后这张图就是"一像素是一像素"的（各 Qt 版本对 QImage 上的 DPR
+     * 行为不一致，赌错了就是"字和位置都大一倍"）。
      */
     out.setDevicePixelRatio(1.0);
 
     QPainter painter(&out);
+    painter.setRenderHint(QPainter::Antialiasing, true);
     painter.setRenderHint(QPainter::TextAntialiasing, true);
-
-    for (const QVariant &entry : texts) {
-        const QVariantMap item = entry.toMap();
-        const QString kind = item.value(QStringLiteral("kind")).toString();
-        const qreal stroke = qMax(1.0, item.value(QStringLiteral("stroke"), 3.0).toDouble()) * m_dpr;
-
-        /*
-         * 箭头 / 铅笔：两种都用"屏幕坐标 -> 裁剪切块坐标"这同一套换算。
-         * 线宽、箭头头部尺寸都乘 dpr（和字号一样，高 DPI 下才不会细成一条线）。
-         */
-        if (kind == QLatin1String("arrow") || kind == QLatin1String("pencil")
-            || kind == QLatin1String("rect")) {
-            QColor color(item.value(QStringLiteral("color")).toString());
-            if (!color.isValid())
-                color = QColor(0xff, 0x3b, 0x30);
-            QPen pen(color);
-            pen.setWidthF(stroke);
-            pen.setCapStyle(Qt::RoundCap);
-            pen.setJoinStyle(Qt::RoundJoin);
-            painter.setPen(pen);
-            painter.setBrush(color);
-
-            auto toLocal = [&](double sx, double sy) {
-                return QPointF((sx - clipped.x()) * m_dpr, (sy - clipped.y()) * m_dpr);
-            };
-
-            if (kind == QLatin1String("rect")) {
-                /*
-                 * 方框：只有描边（不填充 —— 填了就把底下的内容挡住了）。
-                 * 两个角点可能哪个大哪个小，normalized() 抹平。
-                 */
-                const QPointF a = toLocal(item.value(QStringLiteral("x1")).toDouble(),
-                                          item.value(QStringLiteral("y1")).toDouble());
-                const QPointF b = toLocal(item.value(QStringLiteral("x2")).toDouble(),
-                                          item.value(QStringLiteral("y2")).toDouble());
-                painter.setBrush(Qt::NoBrush);
-                painter.drawRect(QRectF(a, b).normalized());
-            } else if (kind == QLatin1String("arrow")) {
-                const QPointF a = toLocal(item.value(QStringLiteral("x1")).toDouble(),
-                                          item.value(QStringLiteral("y1")).toDouble());
-                const QPointF b = toLocal(item.value(QStringLiteral("x2")).toDouble(),
-                                          item.value(QStringLiteral("y2")).toDouble());
-                painter.drawLine(a, b);
-
-                /*
-                 * 箭头头：和 QML 画布那边同一套数（张角 ±25.7°、头长
-                 * max(8px, 3×线宽)），两边才长得一样。
-                 */
-                constexpr double kPi = 3.14159265358979323846;
-                const double angle = std::atan2(b.y() - a.y(), b.x() - a.x());
-                const double head = qMax(8.0 * m_dpr, pen.widthF() * 3.0);
-                QPolygonF head3;
-                head3 << b
-                      << b - QPointF(std::cos(angle - kPi / 7.0), std::sin(angle - kPi / 7.0)) * head
-                      << b - QPointF(std::cos(angle + kPi / 7.0), std::sin(angle + kPi / 7.0)) * head;
-                painter.drawPolygon(head3);
-            } else {
-                /* 铅笔：按点连成折线（点存在 [x,y,x,y,…] 的扁平数组里） */
-                const QVariantList pts = item.value(QStringLiteral("pts")).toList();
-                if (pts.size() >= 4) {
-                    QPolygonF poly;
-                    for (int i = 0; i + 1 < pts.size(); i += 2)
-                        poly << toLocal(pts.at(i).toDouble(), pts.at(i + 1).toDouble());
-                    painter.drawPolyline(poly);
-                }
-            }
-            continue;
-        }
-
-        const QString text = item.value(QStringLiteral("text")).toString();
-        if (text.isEmpty())
-            continue;
-
-        QFont font = QApplication::font();
-        font.setPixelSize(
-            qBound(8, qRound(item.value(QStringLiteral("size"), 16).toDouble() * m_dpr), 400));
-        painter.setFont(font);
-
-        QColor color(item.value(QStringLiteral("color")).toString());
-        if (!color.isValid())
-            color = QColor(0xff, 0x3b, 0x30);
-        painter.setPen(color);
-
-        /*
-         * 标注是个**能折行、能转的文本框**（见 CaptureOverlay.qml），所以这里
-         * 要把 QML 那边算好的框宽 / 框高接过来：
-         *
-         *   w   折行宽。QML 按字号和内容量出来的宽度，这边用同一个值配
-         *       Qt::TextWordWrap，折行位置才和预览一致；没定过宽（w 就是
-         *       内容宽）时也不会多折出一行。
-         *   h   框高。旋转原点是**框中心**，两边 h 不一样就会转出两个位置 ——
-         *       所以必须用 QML 那份（同一种 TextEdit 排版算出来的），
-         *       不能在这边用 QFontMetrics 自己估。
-         *   rot 顺时针角度，和 QML 的 Rotation 同向（QPainter 默认坐标 y 向下，
-         *       rotate() 也是顺时针）。
-         */
-        const qreal x = (item.value(QStringLiteral("x")).toDouble() - clipped.x()) * m_dpr;
-        const qreal y = (item.value(QStringLiteral("y")).toDouble() - clipped.y()) * m_dpr;
-        const qreal w = item.value(QStringLiteral("w")).toDouble() * m_dpr;
-        const qreal h = item.value(QStringLiteral("h")).toDouble() * m_dpr;
-        const qreal rot = item.value(QStringLiteral("rot")).toDouble();
-
-        painter.save();
-        painter.translate(x + w / 2.0, y + h / 2.0);
-        if (!qFuzzyIsNull(rot))
-            painter.rotate(rot);
-        painter.translate(-w / 2.0, -h / 2.0);
-        painter.drawText(QRectF(0, 0, w, h),
-                         Qt::TextWordWrap | Qt::AlignLeft | Qt::AlignTop, text);
-        painter.restore();
-    }
+    painter.scale(m_dpr, m_dpr);
+    paintAnnotations(painter, texts, clipped);
     painter.end();
 
     /* 交出去（剪贴板 / 保存 / 贴图）时按逻辑尺寸算 */
@@ -1018,26 +839,6 @@ bool Screenshot::saveResultAs(const QRectF &sel, const QVariantList &texts) {
     return true;
 }
 
-QString Screenshot::pickColor(const QString &current) {
-    /*
-     * "更多颜色 -> 自定义…"：开系统取色框。
-     *
-     * 父窗口用选区窗口：它铺满整屏又是置顶的，取色框挂在它上面才不会被盖住
-     * （和保存对话框同一个道理，实测那边是好的）。取消返回空串，QML 那边
-     * 保持原色不动。
-     */
-    QColor start(current);
-    if (!start.isValid())
-        start = QColor(0xff, 0x3b, 0x30);
-
-    /* 嵌套事件循环期间不许关选区窗口，见 endCapture 的说明 */
-    m_modalOpen = true;
-    const QColor picked = QColorDialog::getColor(start, m_overlay ? m_overlay : m_host,
-                                                 QStringLiteral("选择标注颜色"));
-    m_modalOpen = false;
-    return picked.isValid() ? picked.name() : QString();
-}
-
 void Screenshot::pinResult(const QRectF &sel, const QVariantList &texts) {
     const QImage image = compose(sel, texts);
     if (image.isNull())
@@ -1046,10 +847,14 @@ void Screenshot::pinResult(const QRectF &sel, const QVariantList &texts) {
     /*
      * 就钉在选区原来的位置上（截图时选的是哪儿，贴出来就在哪儿），
      * 这样"固定桌面"看起来像是把刚框住的那块画面留在了桌面上。
+     *
+     * 贴图窗口现在是个**能接着改**的窗口（划重点 / 写字 / 翻译），
+     * 所以它要拿主引擎建自己的 QML（见 PinWindow 的说明）——
+     * 引擎还没挂上时（理论上不会发生：贴图是用户按出来的，那会儿界面早起来了）
+     * 就只贴一张静态图，至少不比原来差。
      */
     const QPoint pos(m_screenRect.topLeft() + QPoint(qRound(sel.x()), qRound(sel.y())));
-
-    auto *pin = new PinWindow(image, pos);
+    auto *pin = new PinWindow(image, pos, m_engine, this);
     m_pins.append(pin);
     pin->show();
 }
@@ -1067,6 +872,28 @@ void Screenshot::closeAllPins() {
         if (!pin.isNull())
             pin->close();
     m_pins.clear();
+}
+
+/*
+ * 一块贴图自己没了（用户关的、或者窗口被拆）：把它从清单里划掉。
+ *
+ * 为什么要这一下：m_pins 里存的是 QPointer，本来就会自己变空，但那份清单会
+ * 一直长（贴一百次就有一百个空条目）。窗口析构时回头喊一声最省事 ——
+ * 反正它手里就有 this。
+ */
+void Screenshot::forgetPin(QWidget *pin) {
+    for (int i = m_pins.size() - 1; i >= 0; --i) {
+        if (m_pins.at(i).isNull() || m_pins.at(i).data() == pin)
+            m_pins.removeAt(i);
+    }
+}
+
+QWidget *Screenshot::lastPinned() const {
+    for (int i = m_pins.size() - 1; i >= 0; --i) {
+        if (!m_pins.at(i).isNull())
+            return m_pins.at(i).data();
+    }
+    return nullptr;
 }
 
 QObject *Screenshot::overlayRoot() const {

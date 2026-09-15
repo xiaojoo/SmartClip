@@ -14,7 +14,7 @@ class QScreen;
 class QWidget;
 
 /*
- * 截图（选区 -> 加文字 -> 复制 / 保存 / 固定到桌面）。
+ * 截图（选区 -> 加文字 -> 复制 / 保存 / 固定到桌面 -> 还能接着改）。
  *
  * 为什么整件事要绕 C++ 一圈，而不是全写在 QML 里：
  *
@@ -23,9 +23,9 @@ class QWidget;
  *  2) 最终产物有三条出口（剪贴板 / png / 贴图窗口），三条必须是**同一张**
  *     合成图：标注在 QML 里是文本项，落到图上要 QPainter 画一遍。
  *     只在 C++ 里有一份 compose()，三处共用。
- *  3) "固定到桌面"就是再开一个**置顶无边框窗口**（见 Screenshot.cpp 里的
- *     PinWindow）。这类窗口用 QWidget 最省事：置顶、无边框、不进任务栏
- *     都是现成的标志位，QML 的 Window 还得自己接一层。
+ *  3) "固定到桌面"是一块**还能接着改**的置顶窗口（见 src/PinWindow.h：
+ *     划重点 / 写字 / 翻译都在上面做），置顶、无边框、不进任务栏都是现成的
+ *     窗口标志位，用 QWidget 最省事。
  *
  * 界面（选区框 / 浮动工具条 / 内联编辑文字）在 qml/screenshot/CaptureOverlay.qml，
  * 由这里用 QQuickWidget 装进一个覆盖整块屏的置顶无边框窗口里 —— 和主窗口
@@ -141,16 +141,49 @@ public:
     Q_INVOKABLE bool saveResultAs(const QRectF &sel, const QVariantList &texts);
 
     /*
-     * "更多颜色 -> 自定义…"：开系统取色框，返回 #rrggbb；取消返回空串。
-     * current 是打开时停在哪个颜色上。
+     * 选区那块图，编码成 png 的 data URL（"data:image/png;base64,…"）。
+     *
+     * 这是"框选之后用大模型认内容"那件事的**入口数据**：选区窗口
+     * （qml/screenshot/CaptureOverlay.qml）点"识别"时调它拿到这一串，再交给
+     * LlmClient::recognize() 发出去。走 data URL 而不是临时文件，是因为
+     * llama.cpp / OpenAI / 通义那套接口本来就吃内联图，少一次落盘、也少一处
+     * "临时文件没删干净"的麻烦。
+     *
+     * 选区太小 / 还没抓到图，返回空串（界面据此回一句人话，别发空请求出去）。
      */
-    Q_INVOKABLE QString pickColor(const QString &current);
+    Q_INVOKABLE QString selectionImage(const QRectF &sel) const;
 
-    /* 固定到桌面：在选区原来的位置上开一个置顶窗口 */
+    /*
+     * 选区里有没有东西可以认（自检和界面按钮的亮灭都看它）。
+     * 和 selectionImage 同一套判据：太小就当没有。
+     */
+    Q_INVOKABLE bool selectionReady(const QRectF &sel) const;
+
+    /*
+     * 把一段文字放进系统剪贴板（识别结果卡片上那个"复制"）。
+     *
+     * 单开一个入口只是因为 QML 里没有剪贴板类型：合成图那条复制走的是
+     * copyResult()，文字这条没有对应的东西。
+     */
+    Q_INVOKABLE void copyText(const QString &text) const;
+
+    /* 固定到桌面：在选区原来的位置上开一块**可编辑**的贴图窗口（见 PinWindow） */
     Q_INVOKABLE void pinResult(const QRectF &sel, const QVariantList &texts);
 
     Q_INVOKABLE int pinnedCount() const;
     Q_INVOKABLE void closeAllPins();
+
+    /*
+     * 一块贴图自己没了（用户按关闭 / Esc / 双击）就回头喊一声，从清单里划掉。
+     * 由 PinWindow 的析构调 —— 它手里就有 this，不用逐块去比对。
+     */
+    void forgetPin(QWidget *pin);
+
+    /*
+     * 最后贴上去的那一块（自检用，见 src/SelfTest.cpp）。
+     * 没贴过 / 已经关掉了返回 nullptr。
+     */
+    QWidget *lastPinned() const;
 
     /* ---- 下面两个给自检用（见 src/SelfTest.cpp），界面不走 ---- */
 
@@ -199,6 +232,15 @@ private:
     /* 选区（屏幕坐标）+ 标注 -> 一张图。三条出口共用这一份 */
     QImage compose(const QRectF &sel, const QVariantList &texts) const;
 
+    /*
+     * 选区（屏幕坐标，逻辑像素）-> 冻结图上那一块（设备像素）。
+     *
+     * compose() 开头那一套换算抽出来单独用：识别（selectionImage）和合成必须
+     * 取**同一块**像素 —— 两份各算一遍的话，哪边少乘一个 dpr，用户看到的
+     * 就是"识别出来的内容跟框的那块对不上"（高 DPI 下最明显）。
+     */
+    QImage cropSelection(const QRectF &sel) const;
+
     static QString defaultFileName();
 
     QQmlEngine *m_engine = nullptr;
@@ -215,7 +257,11 @@ private:
     QRect m_screenRect;
     qreal m_dpr = 1.0;
 
-    /* 贴图窗口（置顶无边框小窗，见 Screenshot.cpp 的 PinWindow）；关掉自己变空 */
+    /*
+     * 贴图窗口（置顶无边框小窗，见 src/PinWindow.h）；关掉自己变空。
+     * 存 QWidget* 而不是 PinWindow*：这个头文件不用认识那个类（自检那边
+     * 要量贴图，自己 include PinWindow.h 再 qobject_cast 过去）。
+     */
     QList<QPointer<QWidget>> m_pins;
 
     /* 上次保存截图的目录（给对话框当起点） */

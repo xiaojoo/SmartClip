@@ -4,10 +4,12 @@
 #include "TrayIcon.h"
 
 #include <QAction>
+#include <QBuffer>
 #include <QCoreApplication>
 #include <QEventLoop>
 #include <QHash>
 #include <QHostAddress>
+#include <QImage>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -36,7 +38,9 @@
  *   * 语言表两份对得上；
  *   * 发请求那套的 token 契约：失败也是**异步**回来的，而且带对 token
  *     （QML 那边是"先拿到 token 记下来、再等信号"，同步回就等于丢结果）；
- *   * 收起来 / 再叫出来 / 落盘。
+ *   * 收起来 / 再叫出来 / 落盘；
+ *   * 截图识别：识别用哪个模型（留空退回主模型）、图片按多模态格式发出去、
+ *     回来的"原文 ---- 译文"拆得开（见第 10 节）。
  *
  * 自检会动 QSettings 里 translate/card/* 和 translate/apiBase 这几个键（要试
  * 状态和失败路径），跑完**按原样写回** —— 用户自己的配置不会被自检改掉。
@@ -83,6 +87,26 @@ void settle() {
 /* 从 QML 根对象上找一个具名子项（界面上的关键控件都带 objectName） */
 QObject *qmlChild(QObject *root, const char *name) {
     return root ? root->findChild<QObject *>(QString::fromLatin1(name)) : nullptr;
+}
+
+/*
+ * 一张图 -> png 的 data URL。
+ *
+ * 和 Screenshot::selectionImage 编出来的**必须是同一种东西**（那边真的去裁
+ * 屏幕上那块选区，自检没有真截图，只能自己造一张）。所以这里也走
+ * QImage::save(&buffer, "PNG") + toBase64 —— 格式对不上的话，这一节测出来的
+ * "请求里带了图"就是假的。
+ */
+QString imageToDataUrl(const QImage &image) {
+    if (image.isNull())
+        return QString();
+    QByteArray png;
+    QBuffer buffer(&png);
+    buffer.open(QIODevice::WriteOnly);
+    if (!image.save(&buffer, "PNG"))
+        return QString();
+    buffer.close();
+    return QStringLiteral("data:image/png;base64,") + QString::fromLatin1(png.toBase64());
 }
 
 /*
@@ -212,6 +236,8 @@ int SelfTest::runTranslate(TranslateCards *cards, LlmClient *llm, TrayIcon *tray
         /* 本地模型那几项：下面"本地模型"那一节会动它们（见那一段的说明） */
         QStringLiteral("translate/localExe"),    QStringLiteral("translate/localModel"),
         QStringLiteral("translate/localMmproj"), QStringLiteral("translate/localPort"),
+        /* 识别模型：下面"截图识别"那一节会动它（见那一段的说明） */
+        QStringLiteral("translate/ocrModel"),
     };
     QHash<QString, QVariant> saved;
     for (const QString &key : savedKeys)
@@ -536,6 +562,169 @@ int SelfTest::runTranslate(TranslateCards *cards, LlmClient *llm, TrayIcon *tray
                 found = true;
         }
         trCheck(found, QStringLiteral("托盘：菜单里有「翻译卡片」那一条"));
+    }
+
+    /* =====================================================================
+     * 10) 截图识别：把框选那块图交给视觉模型，回来的文字摆进卡片
+     *
+     * 这一节和上面那几节一样**不发真请求**（真识别要一台配好的视觉模型）：用
+     * 本地回环上的假服务把"请求长什么样 / 回来的东西认不认得出来"钉住。
+     * 这条链路里最容易悄悄坏掉的正是这两头 —— 图片没按多模态格式发出去
+     * （模型回一句"我没有收到图片"）、模型名还是那个纯文本的、回来的
+     * "原文 ---- 译文"没拆开，都不会崩，只是"识别结果不对"。
+     * =================================================================== */
+    {
+        /* ---- 10.1 识别用哪个模型：留空退回主模型 ---- */
+        llm->setModel(QStringLiteral("自检文本模型"));
+        llm->setOcrModel(QString());
+        trCheck(llm->visionModel() == QStringLiteral("自检文本模型"),
+                QStringLiteral("识别：识别模型留空时用主模型（只配了一个视觉模型不用填两遍）"),
+                llm->visionModel());
+
+        llm->setOcrModel(QStringLiteral("自检视觉模型"));
+        trCheck(llm->visionModel() == QStringLiteral("自检视觉模型"),
+                QStringLiteral("识别：填了识别模型就用它（翻译仍走上面那个主模型）"),
+                llm->visionModel());
+        trCheck(llm->model() == QStringLiteral("自检文本模型"),
+                QStringLiteral("识别：填识别模型不会把翻译那个模型也改掉"), llm->model());
+
+        /* ---- 10.2 空图 / 没配模型：异步回失败，token 对得上 ---- */
+        {
+            QString gotToken;
+            QString gotError;
+            bool arrivedInsideCall = false;
+            bool inCall = true;
+            QObject probe;
+            QObject::connect(llm, &LlmClient::failed, &probe,
+                             [&](const QString &token, const QString &error) {
+                                 if (inCall)
+                                     arrivedInsideCall = true;
+                                 gotToken = token;
+                                 gotError = error;
+                             });
+
+            const QString token = llm->recognize(QString());
+            trCheck(!token.isEmpty(), QStringLiteral("识别：recognize() 给了一个 token"), token);
+            inCall = false;
+            trCheck(!arrivedInsideCall,
+                    QStringLiteral("识别：空图的失败也不能同步回（界面要先记下 token）"));
+
+            QEventLoop loop;
+            QTimer::singleShot(3000, &loop, &QEventLoop::quit);
+            QObject::connect(llm, &LlmClient::failed, &loop, &QEventLoop::quit);
+            loop.exec();
+            settle();
+            trCheck(gotToken == token && gotError.contains(QStringLiteral("图像")),
+                    QStringLiteral("识别：没拿到图时异步回一句人话（不发空请求出去）"),
+                    gotToken + QStringLiteral(" / ") + gotError);
+        }
+
+        /* ---- 10.3 真发一次：对着一台假视觉服务 ---- */
+        MockLlmServer mock;
+        mock.replyContent = QStringLiteral("Hello world\n----\n你好，世界");
+        const bool listening = mock.listen(QHostAddress::LocalHost, 0);
+        trCheck(listening, QStringLiteral("识别：假视觉服务起得来（本地回环随机端口）"));
+
+        if (listening) {
+            llm->setMode(QStringLiteral("api"));
+            llm->setApiBase(QStringLiteral("http://127.0.0.1:%1/v1").arg(mock.serverPort()));
+            llm->setModel(QStringLiteral("自检文本模型"));
+            llm->setOcrModel(QStringLiteral("自检视觉模型"));
+            llm->setApiKey(QStringLiteral("自检密钥"));
+
+            /* 一张真图（png 的 data URL 就是界面那边真正会发的东西） */
+            QImage image(80, 40, QImage::Format_ARGB32);
+            image.fill(QColor(0x2b, 0x2d, 0x30));
+            const QString imageUrl = imageToDataUrl(image);
+            trCheck(imageUrl.startsWith(QStringLiteral("data:image/png;base64,")),
+                    QStringLiteral("识别：选区那块图编码成了 png 的 data URL"),
+                    imageUrl.left(32));
+
+            QString gotToken;
+            QString gotText;
+            QString gotError;
+            QObject probe;
+            QObject::connect(llm, &LlmClient::finished, &probe,
+                             [&](const QString &token, const QString &text) {
+                                 gotToken = token;
+                                 gotText = text;
+                             });
+            QObject::connect(llm, &LlmClient::failed, &probe,
+                             [&](const QString &, const QString &error) { gotError = error; });
+
+            const QString target = QStringLiteral("中文（简体）");
+            const QString token = llm->recognize(imageUrl, target, QStringLiteral("自动检测"));
+
+            QEventLoop loop;
+            QTimer::singleShot(5000, &loop, &QEventLoop::quit);
+            QObject::connect(llm, &LlmClient::finished, &loop, &QEventLoop::quit);
+            QObject::connect(llm, &LlmClient::failed, &loop, &QEventLoop::quit);
+            loop.exec();
+            settle();
+
+            trCheck(gotText == mock.replyContent && gotToken == token,
+                    QStringLiteral("识别：模型回的文字原样回来了，token 也对得上"),
+                    (gotError.isEmpty() ? gotToken + QStringLiteral(" / ") + gotText : gotError)
+                        + QStringLiteral("  [answered=%1 req=%2]")
+                              .arg(mock.request.contains(QStringLiteral("__answered")))
+                              .arg(mock.request.size()));
+
+            const QString sent = mock.request;
+            trCheck(sent.contains(QStringLiteral("自检视觉模型")),
+                    QStringLiteral("识别：请求里带的是**识别模型**的名字"));
+            trCheck(sent.contains(imageUrl),
+                    QStringLiteral("识别：图片按 data URL 内联发出去了（不是只发了句提示词）"));
+            trCheck(sent.contains(QStringLiteral("image_url")),
+                    QStringLiteral("识别：用的是 OpenAI 兼容的多模态消息体（content 数组）"));
+            trCheck(sent.contains(QStringLiteral("原文")) && sent.contains(target),
+                    QStringLiteral("识别：提示词里写明了要「原文 + 译文」两段和翻成哪个语言"));
+            trCheck(!sent.contains(QStringLiteral("没有收到图片")),
+                    QStringLiteral("识别：请求里没有把图片漏掉（模型不会回「我没收到图」）"));
+
+            /* 回来的"原文 ---- 译文"要拆得开（界面上是上下两栏） */
+            const QString original = llm->ocrOriginal(mock.replyContent);
+            trCheck(original == QStringLiteral("Hello world"),
+                    QStringLiteral("识别：结果里的原文能单独抠出来（界面上下两栏就靠它）"),
+                    original);
+            trCheck(original != mock.replyContent,
+                    QStringLiteral("识别：抠出来的原文不是整段（分隔行真的起作用了）"));
+
+            /* 模型不按格式回（只说了一句话）时不能把内容吞掉 */
+            const QString loose = QStringLiteral("图上写着：你好");
+            trCheck(llm->ocrOriginal(loose) == loose,
+                    QStringLiteral("识别：模型不按格式回时，整段当原文（不吞内容）"),
+                    llm->ocrOriginal(loose));
+        }
+
+        /* ---- 10.4 没配模型 / 接口：回的是能看懂的一句话 ---- */
+        {
+            const QString goodBase = llm->apiBase();
+            const QString goodOcr = llm->ocrModel();
+            llm->setOcrModel(QString());
+            llm->setModel(QString());
+            llm->setMode(QStringLiteral("api"));
+
+            QString gotError;
+            QObject probe;
+            QObject::connect(llm, &LlmClient::failed, &probe,
+                             [&](const QString &, const QString &error) { gotError = error; });
+
+            QImage image(24, 24, QImage::Format_ARGB32);
+            image.fill(Qt::black);
+            llm->recognize(imageToDataUrl(image), QStringLiteral("英语"));
+
+            QEventLoop loop;
+            QTimer::singleShot(3000, &loop, &QEventLoop::quit);
+            QObject::connect(llm, &LlmClient::failed, &loop, &QEventLoop::quit);
+            loop.exec();
+            settle();
+            trCheck(gotError.contains(QStringLiteral("模型名")),
+                    QStringLiteral("识别：没填识别模型时报的是「缺模型名」（而不是「缺接口地址」）"),
+                    gotError);
+
+            llm->setApiBase(goodBase);
+            llm->setOcrModel(goodOcr);
+        }
     }
 
     /* =====================================================================

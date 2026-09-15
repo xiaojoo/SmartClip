@@ -2,8 +2,14 @@
 
 #include "ClipboardStore.h"
 #include "EditorViewItem.h"
+#include "PinOcr.h"
+#include "PinWindow.h"
 #include "Screenshot.h"
+#include "Translate.h"
 #include <QMessageBox>
+#include <QMouseEvent>
+#include <QHoverEvent>
+#include <QPointingDevice>
 #include <QPointer>
 #include <QQmlEngine>
 #include <QQuickItem>
@@ -29,14 +35,20 @@
 #include <QImage>
 #include <QPalette>
 #include <QPoint>
+#include <QStandardPaths>
 #include <QCoreApplication>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QFont>
 #include <QMetaObject>
+#include <QPainter>
 #include <QRegularExpression>
+#include <QSettings>
+#include <QTemporaryDir>
 #include <QTextStream>
 #include <QThread>
+#include <thread>
 #include <QVariant>
 #include <QWidget>
 #include <QWindow>
@@ -96,6 +108,90 @@ bool writeFile(const QString &path, const QByteArray &bytes) {
     const bool ok = file.write(bytes) == bytes.size();
     file.close();
     return ok;
+}
+
+/*
+ * 往一个 QML 场景里送一次**真的**鼠标左键点击（按下 + 抬起，走 Qt 那条投递链：
+ * 命中测试 -> 抢到鼠标的那个 MouseArea -> onClicked）。
+ *
+ * 为什么要真事件：直接调 QML 函数只能验到"我们自己的逻辑对不对"，验不到
+ * **"点到底落没落到那个控件上"** —— 用户报的"菜单里那两行点了没反应"就是后者
+ * （上面盖着一层、命中测试没到它、MouseArea 拿不到事件，都会长得一样）。
+ *
+ * 为什么直接送给 QQuickWindow、而不是那个 QQuickWidget：贴图那个 QQuickWidget 在
+ * 自检里没被"暴露"（进程内 qWarning 量到 offscreenWindow 的 isVisible()==0），
+ * 送给控件的事件会被它按"窗口不可见"丢掉 —— 谁都点不着，那这个检查就白量了。
+ * 送给场景窗口是同一个投递链（命中测试 / 抓取 / onClicked 都在场景这一层），
+ * 只少了"操作系统把事件送进 Qt"那一步。
+ *
+ * 先送一次不带键的移动：命中测试得先知道鼠标在哪儿（真实使用里鼠标总会先划过去）。
+ */
+void clickScene(QQuickWindow *window, const QPoint &pos) {
+    if (!window)
+        return;
+    const QPointingDevice *device = QPointingDevice::primaryPointingDevice();
+    const QPointF local(pos);
+    const QPointF global = window->mapToGlobal(pos);
+    QMouseEvent move(QEvent::MouseMove, local, local, global, Qt::NoButton, Qt::NoButton,
+                     Qt::NoModifier, device);
+    QMouseEvent press(QEvent::MouseButtonPress, local, local, global, Qt::LeftButton,
+                      Qt::LeftButton, Qt::NoModifier, device);
+    QMouseEvent release(QEvent::MouseButtonRelease, local, local, global, Qt::LeftButton,
+                        Qt::NoButton, Qt::NoModifier, device);
+    QCoreApplication::sendEvent(window, &move);
+    QCoreApplication::sendEvent(window, &press);
+    QCoreApplication::sendEvent(window, &release);
+}
+
+/*
+ * 往一个 QML 场景里送一次**真的**鼠标悬停（HoverMove）或"离开"（HoverLeave）。
+ *
+ * 为什么要真事件：工具条现在"鼠标进来才露、一离开就收"，而这套是靠贴图窗口根上的
+ * HoverHandler 喂的 —— 直接改 root.hovered 只能验到"我改了它会跟着变"，验不到
+ * "鼠标真进来/真离开时它变不变"（一个条件写反，界面上就是"工具条永远不出现"）。
+ *
+ * 和 clickScene 一样送给场景窗口（QQuickWidget 在自检里没被暴露，事件会被控件
+ * 按"窗口不可见"丢掉）。
+ */
+void hoverScene(QQuickWindow *window, const QPoint &pos, bool inside) {
+    if (!window)
+        return;
+    const QPointF local(pos);
+    if (!inside) {
+        /*
+         * "鼠标走了"要送两下：HoverLeave 是一般的悬停离开，Leave 是窗口级的
+         * "指针不在这块上了"。只送前者实测不生效（HoverHandler 还是 hovered=true，
+         * 工具条就不收）—— 真实鼠标移出窗口时平台两下都会来。
+         */
+        QHoverEvent leave(QEvent::HoverLeave, local, window->mapToGlobal(pos), local);
+        QCoreApplication::sendEvent(window, &leave);
+        QEvent gone(QEvent::Leave);
+        QCoreApplication::sendEvent(window, &gone);
+        return;
+    }
+    QHoverEvent move(QEvent::HoverMove, local, window->mapToGlobal(pos), local);
+    QCoreApplication::sendEvent(window, &move);
+}
+
+/*
+ * 只送"按下 + 抬起"，**不带**前面那一下移动。
+ *
+ * 用来量"这个键这会儿到底吃不吃这一下"：clickScene 会先送一次不带键的移动，而那一下
+ * 会把 HoverHandler 的 hovered 变成 true（工具条于是露出来、又变成可点的），
+ * 想量"收起来的时候吃不吃"就量不出来了。
+ */
+void clickSceneNoHover(QQuickWindow *window, const QPoint &pos) {
+    if (!window)
+        return;
+    const QPointingDevice *device = QPointingDevice::primaryPointingDevice();
+    const QPointF local(pos);
+    const QPointF global = window->mapToGlobal(pos);
+    QMouseEvent press(QEvent::MouseButtonPress, local, local, global, Qt::LeftButton,
+                      Qt::LeftButton, Qt::NoModifier, device);
+    QMouseEvent release(QEvent::MouseButtonRelease, local, local, global, Qt::LeftButton,
+                        Qt::NoButton, Qt::NoModifier, device);
+    QCoreApplication::sendEvent(window, &press);
+    QCoreApplication::sendEvent(window, &release);
 }
 
 }  // namespace
@@ -2291,6 +2387,20 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
         QMetaObject::invokeMethod(qmlRoot, "closeSettings");
         settle();
 
+        /*
+         * 先把面板**归一化成"摆着"**再开始量。
+         *
+         * 收起 / 展开这个状态是**记在设置里**的（Cmd.remember("treeHidden")，重启
+         * 会照上次的样子回来，见 Main.qml 的 toggleFolderTree）。所以上一次自检
+         * 如果正好停在"收起来"，下一次进来它一开始就是收着的 —— 这里再 dispatch
+         * 一次反而把它展开了，三条断言全反着来（读出 hidden=false、宽度 276）。
+         * 自检不该依赖上一次跑剩什么，先摆正。
+         */
+        if (treeState().value(QStringLiteral("hidden")).toBool()) {
+            dispatch(QStringLiteral("treeHide"));
+            settle();
+        }
+
         dispatch(QStringLiteral("treeHide"));
         settle();
         {
@@ -2877,6 +2987,15 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
                           .arg(bw).arg(bh));
                 check(bs.value(QStringLiteral("atScreensRight")).toBool(),
                       QStringLiteral("截图：还没框选时工具条按整屏选区定位（右上角）"));
+                /*
+                 * 工具条里只剩按钮那一行：底下那句"T 文字 / A 箭头 / …"的快捷键
+                 * 提示撤了（用户要求）。这条量的是"板块数"—— 谁再往 barRow 里塞
+                 * 一行（那句提示、或者别的说明文字）就红。
+                 */
+                check(bs.value(QStringLiteral("rows")).toInt() == 1,
+                      QStringLiteral("截图：工具条里就按钮那一行（底下那句提示撤了）"),
+                      QStringLiteral("板块数 %1（期望 1）")
+                          .arg(bs.value(QStringLiteral("rows")).toInt()));
 
                 /*
                  * 复位之后**不许**马上画选区边框（见 CaptureOverlay.qml 的
@@ -3356,6 +3475,1301 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
             }
             shot->closeAllPins();
             check(shot->pinnedCount() == 0, QStringLiteral("截图：贴图窗口关得掉"));
+        }
+
+        /*
+         * ============ 贴图窗口：贴上去之后还能接着改 ============
+         *
+         * 用户要的是"固定到桌面那块图能划重点、能写字、能把上面的字翻出来"。
+         * 所以这一节验的是：贴图窗口换成了 QML 那套界面（工具条在、标注层在）、
+         * 划一笔真的进了数据、文字真的能编辑、撤销真的是撤销、**成品图**里
+         * 真的画进去了（复制 / 保存 / 识别交出去的都靠它）。
+         */
+        {
+            /* 选区和缩放比：这一块在 if (overlay) 外面，那边那两个变量在里面，
+               所以从根对象 / 冻结图上读（值就是那边同一份） */
+            const QRectF pinSel = shot->overlayRoot()
+                                      ? shot->overlayRoot()->property("sel").toRectF()
+                                      : QRectF();
+            const QImage pinFrozen =
+                shot->imageForId(QStringLiteral("full%1").arg(shot->serial()));
+            const double pinDpr = pinFrozen.devicePixelRatio() > 0
+                                      ? pinFrozen.devicePixelRatio() : 1.0;
+
+            shot->pinResult(pinSel, QVariantList());
+            QWidget *pinWidget = shot->lastPinned();
+            auto *pin = qobject_cast<PinWindow *>(pinWidget);
+            check(pin != nullptr, QStringLiteral("贴图：贴上去的那块是新的可编辑窗口"));
+            if (pin) {
+                /*
+                 * 先把"认字"这条锁定成空 —— 贴图一建出来 QML 就会自动认一次字
+                 * （真的跑一遍 Windows OCR），而认出来的行会决定"按在字上拖 = 选字
+                 * 还是挪窗口"。这块屏上认不认得出字、什么时候回来，不该影响下面
+                 * "拖动 / 点一下"那些检查（见 PinWindow::setOcrLinesForTest）。
+                 * 选字那几条自己会摆假的行进去。
+                 */
+                pin->setOcrLinesForTest(QVariantList());
+                settle();
+                settle();
+                QQuickItem *pinRoot = pin->qmlRoot();
+                check(pinRoot != nullptr, QStringLiteral("贴图：界面（PinOverlay.qml）加载起来了"));
+                if (pinRoot) {
+                /* 用户点的那几个键 + 选中，都要真的在（「文字」那个撤了，见下一条） */
+                const QStringList wantedKeys{ QStringLiteral("pinCopy"),
+                                              QStringLiteral("pinToolHighlight"),
+                                              QStringLiteral("pinToolWavy"),
+                                              QStringLiteral("pinToolLine"),
+                                              QStringLiteral("pinToolStrike"),
+                                              QStringLiteral("pinToolSelect"),
+                                              QStringLiteral("pinTranslate"),
+                                              QStringLiteral("pinClose") };
+                int found = 0;
+                for (const QString &key : wantedKeys) {
+                    if (pinRoot->findChild<QObject *>(key))
+                        ++found;
+                }
+                check(found == wantedKeys.size(),
+                      QStringLiteral("贴图：工具条上那几个键都在（复制 / 荧光笔 / 波浪线 / 直线 / 删除线 / 选中 / 翻译 / 关闭）"),
+                      QStringLiteral("%1 / %2").arg(found).arg(wantedKeys.size()));
+                /*
+                 * 「文字」那个键**撤了**（用户说不要这个功能），别哪天又被加回来：
+                 * 文字标注本身还认（识别卡片「加到图上」落下来的就是它），所以只量
+                 * "工具条上没这个键"，不量"文字那套代码没了"（见下面 testAddText 那条）。
+                 */
+                check(pinRoot->findChild<QObject *>(QStringLiteral("pinToolText")) == nullptr,
+                      QStringLiteral("贴图：工具条上不再有「文字」那个键（这个功能撤了）"));
+
+                /*
+                 * 提示条上那句"用法说明"（图上拖 = 选字 / Ctrl+拖 = 挪贴图 …）撤了
+                 * （用户要求）：这块现在只写"认字那条路的话"（ocrStatus）。
+                 * 量两件事：写的字和 ocrStatus 一字不差，且里头不再有那句的特征词
+                 * —— 这么量不挑时机（那一刻 ocrStatus 是空的还是报错都成立）。
+                 */
+                {
+                    auto hintState = [pinRoot]() {
+                        QVariant value;
+                        QMetaObject::invokeMethod(pinRoot, "testState",
+                                                  Q_RETURN_ARG(QVariant, value));
+                        return value.toMap();
+                    };
+                    const QVariantMap hintMap = hintState();
+                    const QString hintText = hintMap.value(QStringLiteral("hintText")).toString();
+                    const QString status =
+                        hintMap.value(QStringLiteral("ocrStatus")).toString();
+                    check(hintText == status && !hintText.contains(QStringLiteral("挪贴图"))
+                              && !hintText.contains(QStringLiteral("Ctrl+拖")),
+                          QStringLiteral("贴图：提示条上不再有那句用法说明（只写认字的话）"),
+                          QStringLiteral("提示条「%1」/ ocrStatus「%2」").arg(hintText, status));
+                }
+
+                /* 底图取得到（QML 那个 Image 走的是 image://pin/…） */
+                const QImage base = pin->imageForId(pin->imageId());
+                check(base.width() == qRound(pinSel.width() * pinDpr)
+                          && base.height() == qRound(pinSel.height() * pinDpr),
+                      QStringLiteral("贴图：底图取得到（image://pin/<id>），就是选区那块"),
+                      QStringLiteral("%1x%2 / 期望 %3x%4")
+                          .arg(base.width()).arg(base.height())
+                          .arg(qRound(pinSel.width() * pinDpr)).arg(qRound(pinSel.height() * pinDpr)));
+                check(pin->imageForId(QStringLiteral("不是这个号")).isNull(),
+                      QStringLiteral("贴图：别的 id 取不到图（不会串到别的贴图上）"));
+
+                /*
+                 * 划一笔荧光笔：走 QML 里和界面同一个 testDraw（pointerDown ->
+                 * pointerMove -> pointerUp 那条路），然后看两件事 ——
+                 * 数据进没进、**成品图**里那一道真的画上去了没有。
+                 */
+                const QImage beforeDraw = pin->composedImage();
+
+                /*
+                 * 鼠标**只是从图上划过**（没按任何键）不该动 —— 用户报的
+                 * "鼠标在固定的图上移动，图就胡乱移动"。
+                 *
+                 * 这条走的就是 hand 那个 MouseArea 在 hoverEnabled 下发出来的
+                 * 那串 positionChanged：以前 pointerMove 只看"挪了几像素"，鼠标
+                 * 一移动就被当成"在拖整张贴图"。现在它只认"左键按着"。
+                 */
+                {
+                    const QPoint beforeHover = pin->pos();
+                    QVariant hoverPanned;
+                    QMetaObject::invokeMethod(pinRoot, "testHoverMove",
+                                              Q_RETURN_ARG(QVariant, hoverPanned),
+                                              Q_ARG(QVariant, QVariant(60.0)),
+                                              Q_ARG(QVariant, QVariant(30.0)));
+                    settle();
+                    const QPoint hoverMoved = pin->pos() - beforeHover;
+                    check(!hoverPanned.toBool() && hoverMoved.isNull(),
+                          QStringLiteral("贴图：鼠标从图上划过（没按左键）什么也不动，默认不跟着鼠标跑"),
+                          QStringLiteral("当成拖动=%1 / 窗口挪了 %2,%3")
+                              .arg(hoverPanned.toBool() ? 1 : 0)
+                              .arg(hoverMoved.x()).arg(hoverMoved.y()));
+                }
+
+                /*
+                 * 固定的图片**能拖动**（用户报的"固定的图片不能拖动"）。
+                 *
+                 * 走的是界面上那条路：没拿工具时按住拖 -> pointerMove 里认定
+                 * "这是拖窗口" -> 叫 PinWindow::beginDrag（交给窗口管理器搬）。
+                 * 这里量的是判定本身；真搬窗口那一下归系统，进程内量不到。
+                 */
+                QVariant tap;
+                QMetaObject::invokeMethod(pinRoot, "testTap", Q_RETURN_ARG(QVariant, tap),
+                                          Q_ARG(QVariant, QVariant(40.0)),
+                                          Q_ARG(QVariant, QVariant(25.0)));
+                check(tap.toString() == QStringLiteral("pan"),
+                      QStringLiteral("贴图：在图上按住拖 = 拖整张贴图（固定的图片能拖动）"),
+                      tap.toString());
+
+                /*
+                 * 光"判定是在拖"不够 —— 得看**窗口真的挪了没有**。
+                 *
+                 * 这条是用户报回来的："还是不能拖动"。当时 pointerMove 里确实认定了
+                 * "在拖"，也叫了 PinWindow::beginDrag()，可那边只有一句
+                 * startSystemMove()，它在这个环境里不接手，窗口就一直不动。
+                 * 所以这里喂一遍按下 -> 拖 -> 松开，然后量窗口的位置。
+                 */
+                {
+                    const QPoint beforePos = pin->pos();
+                    /*
+                     * 先把"自己搬窗口"那一步单独量了：这条路是自检唯一量得到的
+                     * （窗口管理器接手那条归系统，进程内看不见）。它要是好的，
+                     * 说明 C++ 那头没问题，剩下的就只是"什么时候叫它"。
+                     */
+                    QMetaObject::invokeMethod(pinRoot, "testManualDragOnly",
+                                              Q_ARG(QVariant, QVariant(30.0)),
+                                              Q_ARG(QVariant, QVariant(20.0)));
+                    settle();
+                    const QPoint moved = pin->pos() - beforePos;
+                    check(qAbs(moved.x() - 30) <= 6 && qAbs(moved.y() - 20) <= 6,
+                          QStringLiteral("贴图：鼠标挪多少窗口就挪多少（自己搬窗口那条路）"),
+                          QStringLiteral("移动了 %1,%2 / 期望 30,20（自己搬=%3）")
+                              .arg(moved.x()).arg(moved.y())
+                              .arg(pin->draggingManually() ? 1 : 0));
+                    /* 量完摆回去，免得影响后面的检查 */
+                    pin->move(beforePos);
+                    settle();
+                }
+
+                /*
+                 * 工具条真的铺得开。
+                 *
+                 * 这条是**实测踩出来的**：bar.width 绑 barFlow.implicitWidth、而
+                 * Flow.width 又绑 bar.width，两边成环 —— 量出来是 59×492（所有键
+                 * 竖成一列、整条工具条还跑到窗口外，"关闭"根本点不到）。光看"键在
+                 * 不在"（上面那条）是看不出来的，必须量几何。
+                 */
+                QVariant barState;
+                QMetaObject::invokeMethod(pinRoot, "barState", Q_RETURN_ARG(QVariant, barState));
+                const QVariantMap barMap = barState.toMap();
+                const double barW = barMap.value(QStringLiteral("width")).toDouble();
+                const double barH = barMap.value(QStringLiteral("height")).toDouble();
+                const double barY = barMap.value(QStringLiteral("y")).toDouble();
+                check(barW > 300 && barH < 150 && barY + barH <= pin->height() + 1,
+                      QStringLiteral("贴图：工具条铺得开、摆在窗口里（不是竖成一列 / 跑出窗口）"),
+                      QStringLiteral("%1x%2 @y=%3 / 窗口 %4x%5")
+                          .arg(barW).arg(barH).arg(barY).arg(pin->width()).arg(pin->height()));
+
+                /*
+                 * 工具条宽度**跟着内容走**：窗口够宽时贴着键收窄，不再一路撑满
+                 * （贴图宽到一千多时，两边各留一大片空，键挤在中间一小段里）。
+                 *
+                 * 上面那个窗口（462）本来就摆不下这一串键，只能撑满 + 折行，量不出
+                 * "收窄"，所以这里先把窗口拉宽量一次，量完立刻摆回去。
+                 */
+                {
+                    const QSize keepSize = pin->size();
+                    pin->resize(1000, 700);
+                    settle();
+                    QVariant wideState;
+                    QMetaObject::invokeMethod(pinRoot, "barState",
+                                              Q_RETURN_ARG(QVariant, wideState));
+                    const QVariantMap wideMap = wideState.toMap();
+                    const double wideW = wideMap.value(QStringLiteral("width")).toDouble();
+                    const double wantW = wideMap.value(QStringLiteral("singleRowWidth")).toDouble();
+                    check(wideW < pin->width() - 40 && wantW > 300
+                              && qAbs(wideW - (wantW + 18)) <= 2.0,
+                          QStringLiteral("贴图：工具条宽度跟着内容走（窗口宽的时候不撑满）"),
+                          QStringLiteral("条宽 %1 / 键串 %2 / 窗口 %3")
+                              .arg(wideW, 0, 'f', 1).arg(wantW, 0, 'f', 1)
+                              .arg(pin->width()));
+                    /* 摆不下的时候（窄窗口）：撑满 + 折行，不能把键挤到窗口外 */
+                    QVariant narrowState;
+                    pin->resize(keepSize);
+                    settle();
+                    QMetaObject::invokeMethod(pinRoot, "barState",
+                                              Q_RETURN_ARG(QVariant, narrowState));
+                    const QVariantMap narrowMap = narrowState.toMap();
+                    const double narrowW = narrowMap.value(QStringLiteral("width")).toDouble();
+                    const double narrowFlowW =
+                        narrowMap.value(QStringLiteral("flowWidth")).toDouble();
+                    check(narrowW <= pin->width() - 15
+                              && narrowFlowW <= narrowW - 15
+                              && narrowMap.value(QStringLiteral("singleRowWidth")).toDouble()
+                                     > narrowW,
+                          QStringLiteral("贴图：窄窗口时工具条撑满并折行（键串比条宽还长）"),
+                          QStringLiteral("条宽 %1 / Flow %2 / 键串 %3 / 窗口 %4")
+                              .arg(narrowW, 0, 'f', 1).arg(narrowFlowW, 0, 'f', 1)
+                              .arg(narrowMap.value(QStringLiteral("singleRowWidth")).toDouble(),
+                                   0, 'f', 1)
+                              .arg(pin->width()));
+                }
+
+                /*
+                 * 工具条"鼠标进来才露、一离开就收"（用户要求）。
+                 *
+                 * 走真鼠标事件（HoverLeave / HoverMove / 真点击），量三件事：
+                 *   ① 鼠标离开 -> 收起来（透明度归零，**命中也一并关掉**）
+                 *   ② 这时点在它原来的位置上不能误按到那一排键
+                 *   ③ 鼠标再进来 -> 又露出来，而且点得动了
+                 *
+                 * ②挑「认字」来点，不挑「关闭」：判据是同一条（父项 enabled=false
+                 * 会把子项那些 MouseArea 一起关掉），而「关闭」真被点到就把这块贴图
+                 * 关了 —— 万一哪天判据坏了，这条要红得能看懂，不该把后面全带崩。
+                 */
+                {
+                    auto barNow = [pinRoot]() {
+                        QVariant value;
+                        QMetaObject::invokeMethod(pinRoot, "barState",
+                                                  Q_RETURN_ARG(QVariant, value));
+                        return value.toMap();
+                    };
+                    /*
+                     * 露 / 收都带 150ms 淡入淡出，而 settle() 一轮差不多就 150ms ——
+                     * 只等一轮会量到"淡到一半"（实测 0.72），得等它淡完再读数。
+                     */
+                    auto settleOpacity = [&](bool shown) {
+                        double o = barNow().value(QStringLiteral("opacity")).toDouble();
+                        for (int i = 0; i < 12; ++i) {
+                            if (shown ? (o >= 0.99) : (o <= 0.01))
+                                break;
+                            settle();
+                            o = barNow().value(QStringLiteral("opacity")).toDouble();
+                        }
+                        return o;
+                    };
+                    QQuickWindow *scene = pinRoot->window();
+                    /* 鼠标离开：收起来 */
+                    hoverScene(scene, QPoint(qRound(pin->width() / 2.0),
+                                             qRound(pin->height() / 2.0)), false);
+                    settle();
+                    const double hiddenOpacity = settleOpacity(false);
+                    const QVariantMap hidden = barNow();
+                    check(!hidden.value(QStringLiteral("hovered")).toBool()
+                              && !hidden.value(QStringLiteral("shown")).toBool()
+                              && hiddenOpacity <= 0.01
+                              && !hidden.value(QStringLiteral("enabled")).toBool(),
+                          QStringLiteral("贴图：鼠标一离开就把工具条收起来（连命中一起关）"),
+                          QStringLiteral("hovered=%1 shown=%2 透明度=%3 enabled=%4")
+                              .arg(hidden.value(QStringLiteral("hovered")).toBool())
+                              .arg(hidden.value(QStringLiteral("shown")).toBool())
+                              .arg(hiddenOpacity, 0, 'f', 2)
+                              .arg(hidden.value(QStringLiteral("enabled")).toBool()));
+
+                    /*
+                     * ② 收起来的时候这一下**吃不吃**：拿同一个键、同一种事件
+                     * （按下+抬起，不带那一下移动）在两种状态下各点一次 ——
+                     * 收着的时候不该有反应，露出来的时候必须有反应。一正一反
+                     * 才算量到，不然"事件根本没送到"会假装通过。
+                     *
+                     * 挑「认字」不挑「关闭」：判据是同一条（父项 enabled=false 把
+                     * 子项那些 MouseArea 一起关掉），而「关闭」真被点到就把这块贴图
+                     * 关了 —— 万一哪天判据坏了，这条要红得能看懂，不该把后面全带崩。
+                     */
+                    QQuickItem *ocrButton = pinRoot->findChild<QQuickItem *>(QStringLiteral("pinOcr"));
+                    check(ocrButton != nullptr,
+                          QStringLiteral("贴图：收起来也要问得出「认字」在哪儿（自检按它点）"));
+                    if (ocrButton) {
+                        QMetaObject::invokeMethod(pinRoot, "testOcrMenu",
+                                                  Q_ARG(QVariant, QVariant(false)));
+                        settle();
+                        const QPoint at = ocrButton
+                                              ->mapToScene(QPointF(ocrButton->width() / 2.0,
+                                                                   ocrButton->height() / 2.0))
+                                              .toPoint();
+                        clickSceneNoHover(scene, at);      /* 收着 */
+                        settle();
+                        check(!pinRoot->property("ocrMenuOpen").toBool(),
+                              QStringLiteral("贴图：收起来的时候那个键不吃点击"),
+                              QStringLiteral("点在 %1,%2（「认字」的位置）/ 菜单 %3")
+                                  .arg(at.x()).arg(at.y())
+                                  .arg(pinRoot->property("ocrMenuOpen").toBool()));
+                    }
+
+                    /* ③ 鼠标再进来：露出来、点得动（同一下点击这回必须有反应） */
+                    hoverScene(scene, QPoint(qRound(pin->width() / 2.0),
+                                             qRound(pin->height() / 2.0)), true);
+                    settle();
+                    const double shownOpacity = settleOpacity(true);
+                    const QVariantMap shown = barNow();
+                    check(shown.value(QStringLiteral("hovered")).toBool()
+                              && shown.value(QStringLiteral("shown")).toBool()
+                              && shownOpacity >= 0.99
+                              && shown.value(QStringLiteral("enabled")).toBool(),
+                          QStringLiteral("贴图：鼠标一进来工具条又露出来（还是可点的）"),
+                          QStringLiteral("hovered=%1 shown=%2 透明度=%3 enabled=%4")
+                              .arg(shown.value(QStringLiteral("hovered")).toBool())
+                              .arg(shown.value(QStringLiteral("shown")).toBool())
+                              .arg(shownOpacity, 0, 'f', 2)
+                              .arg(shown.value(QStringLiteral("enabled")).toBool()));
+                    if (ocrButton) {
+                        const QPoint at = ocrButton
+                                              ->mapToScene(QPointF(ocrButton->width() / 2.0,
+                                                                   ocrButton->height() / 2.0))
+                                              .toPoint();
+                        clickSceneNoHover(scene, at);      /* 露着 */
+                        settle();
+                        check(pinRoot->property("ocrMenuOpen").toBool(),
+                              QStringLiteral("贴图：露出来之后同一个键就吃了（菜单叫得出来）"),
+                              QStringLiteral("点在 %1,%2 / 菜单 %3")
+                                  .arg(at.x()).arg(at.y())
+                                  .arg(pinRoot->property("ocrMenuOpen").toBool()));
+                        QMetaObject::invokeMethod(pinRoot, "testOcrMenu",
+                                                  Q_ARG(QVariant, QVariant(false)));
+                        settle();
+                    }
+                }
+
+                QVariant drawn;
+                QMetaObject::invokeMethod(pinRoot, "testDraw", Q_RETURN_ARG(QVariant, drawn),
+                                          Q_ARG(QVariant, QVariant(QStringLiteral("highlight"))),
+                                          Q_ARG(QVariant, QVariant(20.0)),
+                                          Q_ARG(QVariant, QVariant(20.0)),
+                                          Q_ARG(QVariant, QVariant(140.0)),
+                                          Q_ARG(QVariant, QVariant(24.0)));
+                settle();
+                check(drawn.toBool() && pin->annotationCount() == 1,
+                      QStringLiteral("贴图：在图上划一下就多一条标注（荧光笔）"),
+                      QStringLiteral("标注 %1 条").arg(pin->annotationCount()));
+
+                const QImage afterDraw = pin->composedImage();
+                check(afterDraw.size() == beforeDraw.size() && afterDraw != beforeDraw,
+                      QStringLiteral("贴图：划的那一道真的进了成品图（不是只有预览里有）"));
+
+                /* 文字：落一条 -> 改它的字（"内容可以编辑"） -> 成品图跟着变 */
+                QVariant added;
+                QMetaObject::invokeMethod(pinRoot, "testAddText", Q_RETURN_ARG(QVariant, added),
+                                          Q_ARG(QVariant, QVariant(30.0)),
+                                          Q_ARG(QVariant, QVariant(60.0)),
+                                          Q_ARG(QVariant, QVariant(QStringLiteral("第一版"))));
+                settle();
+                const int textIndex = added.toInt();
+                QVariant edited;
+                QMetaObject::invokeMethod(pinRoot, "testEditText", Q_RETURN_ARG(QVariant, edited),
+                                          Q_ARG(QVariant, QVariant(textIndex)),
+                                          Q_ARG(QVariant, QVariant(QStringLiteral("改过的字"))));
+                settle();
+                QVariant state;
+                QMetaObject::invokeMethod(pinRoot, "testState", Q_RETURN_ARG(QVariant, state));
+                check(state.toMap().value(QStringLiteral("text0")).toString()
+                          == QStringLiteral("改过的字"),
+                      QStringLiteral("贴图：文字标注的内容改得动（内容可以编辑）"),
+                      state.toMap().value(QStringLiteral("text0")).toString());
+
+                /* 撤销：把刚加的那条退掉 */
+                QMetaObject::invokeMethod(pinRoot, "undo");
+                settle();
+                check(pin->annotationCount() == 1,
+                      QStringLiteral("贴图：撤销退掉最后那条标注"),
+                      QStringLiteral("还剩 %1 条").arg(pin->annotationCount()));
+
+                /* 缩放：窗口跟着图一起变（不然图会溢出窗口） */
+                const qreal zoom0 = pin->zoom();
+                pin->zoomBy(1.1);
+                settle();
+                check(pin->zoom() > zoom0
+                          && qAbs(pin->width() - qRound(pinSel.width() * pin->zoom())) <= 2,
+                      QStringLiteral("贴图：放大之后窗口跟着图一起变大"),
+                      QStringLiteral("zoom %1 -> %2 / 窗口 %3")
+                          .arg(zoom0).arg(pin->zoom()).arg(pin->width()));
+
+                /* 识别那条路要的那份图：和截图识别一样是 png 的 data URL */
+                check(pin->composedImageUrl().startsWith(QStringLiteral("data:image/png;base64,")),
+                      QStringLiteral("贴图：交给模型识别的图编得出来（png 的 data URL）"),
+                      pin->composedImageUrl().left(32));
+
+                /* 复制：进剪贴板的是**成品图**（带上刚划的那道） */
+                const QImage composedNow = pin->composedImage();
+                pin->copyResult();
+                const QImage clip = QGuiApplication::clipboard()->image();
+                check(!clip.isNull() && clip.size() == composedNow.size(),
+                      QStringLiteral("贴图：复制到剪贴板的是合成之后那张图"),
+                      QStringLiteral("剪贴板 %1x%2 / 成品 %3x%4")
+                          .arg(clip.width()).arg(clip.height())
+                          .arg(composedNow.width()).arg(composedNow.height()));
+
+                /*
+                 * ============ 图上选字（两个引擎） ============
+                 *
+                 * 分三截量，**故意分开**：
+                 *   ① 引擎这一层：菜单里那两项在不在、能不能用怎么判、点一行真的
+                 *      能不能换（含一次真鼠标点击）、PP-OCR 那条命令的"能不能跑"怎么判；
+                 *   ② PP-OCR 的**进程 + 解析**：用一个假的 runner（批处理把一份写好
+                 *      的 JSON 拷到结果路径），不依赖这台机器装没装 Python ——
+                 *      顺带把"结果 JSON 解析得够宽容"也量了（两种坐标 / 套层 / 代码块）。
+                 *   ③ 界面那一层：摆一批**假的行**进去，量"按在字上拖能不能选出
+                 *      那一段、跨行会不会连着选、空白处拖动有没有被吃掉"。
+                 *
+                 * 真认字那条路（Windows 自带 OCR）在②后面单独量。
+                 */
+                {
+                    /* ---- ① 菜单里两个选项 + 可用性判据 ---- */
+                    QVariant engineList;
+                    QMetaObject::invokeMethod(pinRoot, "testOcrEngines",
+                                              Q_RETURN_ARG(QVariant, engineList));
+                    const QVariantList engineItems = engineList.toList();
+                    QString engineText;
+                    bool keysOk = engineItems.size() == 2;
+                    for (int i = 0; i < engineItems.size(); ++i) {
+                        const QVariantMap item = engineItems.at(i).toMap();
+                        const QString key = item.value(QStringLiteral("key")).toString();
+                        if (key != QStringLiteral("windows") && key != QStringLiteral("ppocr"))
+                            keysOk = false;
+                        engineText += QStringLiteral("%1(%2)%3 ")
+                                          .arg(key, item.value(QStringLiteral("label")).toString(),
+                                               item.value(QStringLiteral("problem")).toString());
+                    }
+                    check(keysOk,
+                          QStringLiteral("选字：认字菜单里两个引擎都在（Windows 自带 / PP-OCRv6）"),
+                          engineText);
+
+                    QVariant menuRows;
+                    QMetaObject::invokeMethod(pinRoot, "testOcrMenuRows",
+                                              Q_RETURN_ARG(QVariant, menuRows));
+                    check(menuRows.toInt() >= 3,
+                          QStringLiteral("选字：菜单里真把两行画出来了（标题 + 两项）"),
+                          QStringLiteral("子项 %1 / 期望 ≥3").arg(menuRows.toInt()));
+
+                    /*
+                     * **真点一下**：先点工具条上的「认字」（对照），再点菜单里那一行。
+                     *
+                     * 为什么非要真事件：直接调 QML 函数只能验到"我们自己的逻辑对不对"，
+                     * 验不到"点到底落没落到那个控件上"——用户报的"菜单里那两行点了没反应"
+                     * 正是后者，而它长得和"逻辑错了"一模一样。这里往窗口里送真的
+                     * 按下 + 抬起（走 QQuickWidget 那条投递链：命中测试 -> MouseArea
+                     * 抢到 -> onClicked），先拿一个**已知点得着**的按钮当对照：
+                     * 对照要是也点不动，那就是自检这套送事件的办法有问题，不是界面的事。
+                     */
+                    if (pin) {
+                        QQuickWindow *pinScene = pinRoot->window();
+                        QQuickItem *ocrButton = pinRoot->findChild<QQuickItem *>(QStringLiteral("pinOcr"));
+                        check(ocrButton != nullptr,
+                              QStringLiteral("选字：工具条上那个「认字」按钮找得到（对照用）"));
+                        QMetaObject::invokeMethod(pinRoot, "testOcrMenu",
+                                                  Q_ARG(QVariant, QVariant(false)));
+                        settle();
+                        if (ocrButton) {
+                            const QPoint buttonPos =
+                                ocrButton->mapToScene(QPointF(ocrButton->width() / 2.0,
+                                                              ocrButton->height() / 2.0))
+                                    .toPoint();
+                            clickScene(pinScene, buttonPos);
+                            settle();
+                            check(pinRoot->property("ocrMenuOpen").toBool(),
+                                  QStringLiteral("选字：真拿鼠标点「认字」能把菜单叫出来（对照）"),
+                                  QStringLiteral("点在 %1,%2 / 现在菜单 %3")
+                                      .arg(buttonPos.x()).arg(buttonPos.y())
+                                      .arg(pinRoot->property("ocrMenuOpen").toBool()));
+                        }
+                        /* 对完照把菜单打开，接着点菜单里那一行 */
+                        QMetaObject::invokeMethod(pinRoot, "testOcrMenu",
+                                                  Q_ARG(QVariant, QVariant(true)));
+                        settle();
+                    }
+
+                    /*
+                     * **真点一下菜单里那一行**。
+                     *
+                     * 这一段和下面那段是两件事：下面那段直接调 QML 函数（量"选择记没记住"），
+                     * 这一段往「PP-OCRv6」那一行的正中送一次**真的按下 + 抬起**（走
+                     * QQuickWidget 那条投递链：命中测试 -> MouseArea 抢到 -> onClicked）——
+                     * 量的是"点到底落没落到那一行上"。用户报的"这两行点了没反应"就是这一层，
+                     * 直接调函数永远量不到它。
+                     *
+                     * 点之前把命令换成一个跑不通的程序：PP-OCR 那条路会立刻报错返回，
+                     * 不会真去跑十几秒的 OCR（这一条量的是"点到了、换了引擎"）。
+                     */
+                    if (llm && pin) {
+                        /* 那一行在哪儿：问 QML（Repeater 自己那份数据） */
+                        QVariant centerInfo;
+                        QMetaObject::invokeMethod(pinRoot, "testOcrRowCenter",
+                                                  Q_RETURN_ARG(QVariant, centerInfo),
+                                                  Q_ARG(QVariant,
+                                                        QVariant(QStringLiteral("ppocr"))));
+                        const QVariantMap center = centerInfo.toMap();
+                        check(center.value(QStringLiteral("found")).toBool()
+                                  && center.value(QStringLiteral("menuOpen")).toBool(),
+                              QStringLiteral("选字：菜单里那一行的位置问得出来（自检要按它点）"),
+                              QStringLiteral("found=%1 menuOpen=%2 %3x%4")
+                                  .arg(center.value(QStringLiteral("found")).toBool())
+                                  .arg(center.value(QStringLiteral("menuOpen")).toBool())
+                                  .arg(center.value(QStringLiteral("w")).toInt())
+                                  .arg(center.value(QStringLiteral("h")).toInt()));
+                        const QString savedEngine = llm->pinOcrEngine();
+                        const QString savedRunner = llm->pinOcrRunner();
+                        /*
+                         * 要能点得动，那一行得是**可用**的（命令跑不通时它是灰的，
+                         * 点了当然没反应 —— 那是设计如此，不是毛病）。
+                         * 命令指到 `cmd.exe /c exit`：程序在（所以可用）、立刻返回、
+                         * 不写结果文件 —— 既验了"点得到"，又不用真跑十几秒的 PP-OCR。
+                         */
+                        const QString fastRunner = QStandardPaths::findExecutable(
+                                                       QStringLiteral("cmd"))
+                                                   + QStringLiteral(" /c exit");
+                        llm->setPinOcrRunner(fastRunner);
+                        llm->setPinOcrEngine(QStringLiteral("windows"));
+                        settle();
+                        QVariant rowProblem;
+                        QMetaObject::invokeMethod(pinRoot, "testEngineProblem",
+                                                  Q_RETURN_ARG(QVariant, rowProblem),
+                                                  Q_ARG(QVariant, QVariant(QStringLiteral("ppocr"))));
+                        check(rowProblem.toString().isEmpty(),
+                              QStringLiteral("选字：命令能跑时 PP-OCR 那一行是可点的（不是灰的）"),
+                              QStringLiteral("判据「%1」/ 命令 %2")
+                                  .arg(rowProblem.toString(), fastRunner));
+                        if (center.value(QStringLiteral("found")).toBool()) {
+                            /* 场景坐标就是点击坐标（QQuickWidget 里根对象的原点 = 控件原点） */
+                            const QPoint rowPos(center.value(QStringLiteral("x")).toDouble(),
+                                                center.value(QStringLiteral("y")).toDouble());
+                            clickScene(pinRoot->window(), rowPos);
+                            settle();
+                            check(llm->pinOcrEngine() == QStringLiteral("ppocr"),
+                                  QStringLiteral("选字：真拿鼠标点菜单里那一行 = 换成它（点得到、也换了）"),
+                                  QStringLiteral("点在 %1,%2 -> 现在记下的是 %3")
+                                      .arg(rowPos.x()).arg(rowPos.y())
+                                      .arg(llm->pinOcrEngine()));
+                        }
+                        llm->setPinOcrEngine(savedEngine);
+                        llm->setPinOcrRunner(savedRunner);
+                        QMetaObject::invokeMethod(pinRoot, "testOcrMenu",
+                                                  Q_ARG(QVariant, QVariant(false)));
+                        settle();
+                    }
+
+                    /*
+                     * 换完的选择要**记下来**（不只是拿它跑一遍）。
+                     *
+                     * 踩过：runOcr 只 startOcr(新引擎) 却不写 Llm.pinOcrEngine ——
+                     * 勾号不动、下次开贴图又回老引擎。
+                     */
+                    if (llm) {
+                        const QString savedEngine = llm->pinOcrEngine();
+                        const QString savedRunner = llm->pinOcrRunner();
+                        /* 命令指到一个跑不通的程序：这条路会立刻报错、不真起进程 */
+                        llm->setPinOcrRunner(QStringLiteral("绝对不存在的程序.exe --x"));
+                        llm->setPinOcrEngine(QStringLiteral("windows"));
+                        QMetaObject::invokeMethod(pinRoot, "runOcr",
+                                                  Q_ARG(QVariant, QVariant(QStringLiteral("ppocr"))));
+                        settle();
+                        check(llm->pinOcrEngine() == QStringLiteral("ppocr"),
+                              QStringLiteral("选字：换过的引擎记下来了（勾号跟着动）"),
+                              QStringLiteral("换完记下的是 %1").arg(llm->pinOcrEngine()));
+                        QMetaObject::invokeMethod(pinRoot, "runOcr",
+                                                  Q_ARG(QVariant, QVariant(QStringLiteral("windows"))));
+                        settle();
+                        check(llm->pinOcrEngine() == QStringLiteral("windows"),
+                              QStringLiteral("选字：两行能来回换（换回 Windows 自带）"),
+                              QStringLiteral("换回来记下的是 %1").arg(llm->pinOcrEngine()));
+                        llm->setPinOcrEngine(savedEngine);
+                        llm->setPinOcrRunner(savedRunner);
+                    }
+
+                    /* "为什么不能用"要说得出来：临时把命令换成一个跑不通的，问一次 */
+                    if (llm) {
+                        const QString savedRunner = llm->pinOcrRunner();
+                        llm->setPinOcrRunner(QStringLiteral("绝对不存在的程序.exe --x"));
+                        QVariant badProblem;
+                        QMetaObject::invokeMethod(pinRoot, "testEngineProblem",
+                                                  Q_RETURN_ARG(QVariant, badProblem),
+                                                  Q_ARG(QVariant, QVariant(QStringLiteral("ppocr"))));
+                        check(!badProblem.toString().isEmpty(),
+                              QStringLiteral("选字：PP-OCR 命令跑不通时，菜单里说得出为什么"),
+                              badProblem.toString());
+                        llm->setPinOcrRunner(savedRunner);
+                    }
+                    check(!PinOcr::runnerProblem(QStringLiteral("绝对不存在的程序.exe --x")).isEmpty(),
+                          QStringLiteral("选字：找不到程序时说得出「找不到」"));
+                    check(PinOcr::defaultRunnerCommand().contains(QStringLiteral("ppocr_runner.py")),
+                          QStringLiteral("选字：默认那条命令指的是随包脚本"),
+                          PinOcr::defaultRunnerCommand());
+
+                    /* ---- ② PP-OCR 的进程 + 解析（假 runner，不依赖 Python）---- */
+                    QTemporaryDir runnerDir;
+                    check(runnerDir.isValid(), QStringLiteral("选字：临时目录建得出来"));
+                    if (runnerDir.isValid()) {
+                        /* 写一份"runner 应该吐出来"的结果（像素坐标 + 中文） */
+                        const QString prepared = runnerDir.filePath(QStringLiteral("prepared.json"));
+                        {
+                            QFile file(prepared);
+                            file.open(QIODevice::WriteOnly | QIODevice::Truncate);
+                            file.write(QStringLiteral(
+                                           "[{\"text\":\"第一行 RUNNER\",\"box\":[10,20,200,30]},"
+                                           "{\"text\":\"第二行 中文\",\"box\":[12,60,160,28]}]")
+                                           .toUtf8());
+                        }
+                        /* 假 runner：把准备好的那份拷到"结果路径"（argv[2]）。
+                           路径都写成反斜杠：cmd 不认 C:/… 那种（会报"找不到文件"） */
+                        const QString fake = QDir::toNativeSeparators(
+                            runnerDir.filePath(QStringLiteral("fake_runner.bat")));
+                        {
+                            QFile file(fake);
+                            file.open(QIODevice::WriteOnly | QIODevice::Truncate);
+                            file.write(QStringLiteral("@echo off\r\ncopy /y \"%1\" \"%~2\" >nul\r\n")
+                                           .arg(QDir::toNativeSeparators(prepared))
+                                           .toUtf8());
+                        }
+                        /* 命令按"程序 + 参数"的写法给（和设置里那栏一样） */
+                        QString command = QStringLiteral("cmd /c ") + fake;
+
+                        QImage paper(640, 360, QImage::Format_ARGB32);
+                        paper.fill(Qt::white);
+                        QString runnerError;
+                        const QVariantList runnerLines =
+                            PinOcr::recognizeWithProgram(paper, command, &runnerError);
+                        check(runnerLines.size() == 2
+                                  && runnerLines.first().toMap().value(QStringLiteral("text"))
+                                         .toString() == QStringLiteral("第一行 RUNNER"),
+                              QStringLiteral("选字：PP-OCR 那条命令跑得通，结果解析得出两行"),
+                              QStringLiteral("%1 行 / err=%2 / 目录 %3 / bat %4 / 结果 %5")
+                                  .arg(runnerLines.size()).arg(runnerError)
+                                  .arg(runnerDir.path())
+                                  .arg(QFileInfo::exists(fake) ? 1 : 0)
+                                  .arg(QFileInfo::exists(prepared) ? 1 : 0));
+                        if (runnerLines.size() == 2) {
+                            /* 像素坐标要按图片尺寸归一化（10/640=0.0156，30/360=0.0833） */
+                            const QVariantMap first = runnerLines.first().toMap();
+                            const double x = first.value(QStringLiteral("x")).toDouble();
+                            const double h = first.value(QStringLiteral("h")).toDouble();
+                            check(qAbs(x - 10.0 / 640.0) < 0.002 && qAbs(h - 30.0 / 360.0) < 0.002,
+                                  QStringLiteral("选字：结果里的像素坐标按图片尺寸归一化了（0~1）"),
+                                  QStringLiteral("x=%1（期望 %2） h=%3（期望 %4）")
+                                      .arg(x, 0, 'f', 4).arg(10.0 / 640.0, 0, 'f', 4)
+                                      .arg(h, 0, 'f', 4).arg(30.0 / 360.0, 0, 'f', 4));
+                        }
+
+                        /* 解析够宽容：外面裹着 ```json、还套了一层 lines、坐标两种写法 */
+                        const QString modelReply = QStringLiteral(
+                            "```json\n{\"lines\":[{\"text\":\"第一行\",\"box\":[0.1,0.2,0.3,0.1]},"
+                            "{\"text\":\"第二行\",\"x\":0.1,\"y\":0.4,\"w\":0.5,\"h\":0.1}]}\n```");
+                        QString modelError;
+                        const QVariantList modelLines =
+                            PinOcr::parseLinesJson(modelReply, QSize(640, 360), &modelError);
+                        check(modelLines.size() == 2
+                                  && modelLines.first().toMap().value(QStringLiteral("x")).toDouble()
+                                         == 0.1,
+                              QStringLiteral("选字：结果 JSON 解析得够宽容（```json 代码块 / lines 套层 / 两种坐标）"),
+                              QStringLiteral("%1 行 / err=%2").arg(modelLines.size()).arg(modelError));
+
+                        /*
+                         * 认字这条路出错时，界面上要说得出话（不是"什么都没发生"）：
+                         * 跑一条跑不通的命令，错误文本得写明白 —— 界面把这句话显示在
+                         * 提示条上（PinOverlay 的 ocrStatus 绑的就是它）。
+                         * 这里不走 startOcr：自检早把认字锁住了（为了下面拖鼠标那几条
+                         * 的确定性，见 setOcrLinesForTest）。
+                         */
+                        QString badError;
+                        PinOcr::recognizeWithProgram(paper,
+                                                     QStringLiteral("绝对不存在的程序.exe --x"),
+                                                     &badError);
+                        check(!badError.isEmpty(),
+                              QStringLiteral("选字：认字出错时给得出原因（界面显示在提示条上）"),
+                              badError);
+                    }
+                }
+
+                /*
+                 * ============ 图上选字：界面那一层 ============
+                 *
+                 * 摆一批**假的行**进去，量"按在字上拖能不能选出那一段、跨行会不会
+                 * 连着选、空白处拖动有没有被吃掉"。这截不依赖这台机器装没装 OCR。
+                 */
+                {
+                    const double vw = double(pin->width());
+                    const double vh = double(pin->height());
+                    const QString line1 = QStringLiteral("第一行 HELLO WORLD");
+                    const QString line2 = QStringLiteral("第二行 你好世界");
+
+                    QVariantList fake;
+                    fake.append(QVariantMap{ { QStringLiteral("text"), line1 },
+                                             { QStringLiteral("x"), 0.05 },
+                                             { QStringLiteral("y"), 0.10 },
+                                             { QStringLiteral("w"), 0.80 },
+                                             { QStringLiteral("h"), 0.12 } });
+                    fake.append(QVariantMap{ { QStringLiteral("text"), line2 },
+                                             { QStringLiteral("x"), 0.05 },
+                                             { QStringLiteral("y"), 0.30 },
+                                             { QStringLiteral("w"), 0.60 },
+                                             { QStringLiteral("h"), 0.12 } });
+                    pin->setOcrLinesForTest(fake);
+                    settle();
+
+                    auto uiState = [pinRoot]() {
+                        QVariant value;
+                        QMetaObject::invokeMethod(pinRoot, "testState",
+                                                  Q_RETURN_ARG(QVariant, value));
+                        return value.toMap();
+                    };
+                    auto dragTo = [pinRoot](double x1, double y1, double x2, double y2) {
+                        QVariant value;
+                        QMetaObject::invokeMethod(pinRoot, "testOcrDrag",
+                                                  Q_RETURN_ARG(QVariant, value),
+                                                  Q_ARG(QVariant, QVariant(x1)),
+                                                  Q_ARG(QVariant, QVariant(y1)),
+                                                  Q_ARG(QVariant, QVariant(x2)),
+                                                  Q_ARG(QVariant, QVariant(y2)));
+                        return value.toString();
+                    };
+
+                    const QVariantMap withLines = uiState();
+                    check(withLines.value(QStringLiteral("ocrLines")).toInt() == 2,
+                          QStringLiteral("选字：认出来的行摆进了文字层（两条）"),
+                          QStringLiteral("行数 %1")
+                              .arg(withLines.value(QStringLiteral("ocrLines")).toInt()));
+
+                    /* ① 在第一行上从左往右拖半行：选出来的该是这行的**前半段** */
+                    const QPoint posBefore = pin->pos();
+                    const QString half = dragTo(0.05 * vw, 0.16 * vh, 0.45 * vw, 0.16 * vh);
+                    const QPoint posAfter = pin->pos();
+                    check(!half.isEmpty() && line1.startsWith(half) && half.length() < line1.length(),
+                          QStringLiteral("选字：在字上拖 = 选中那一段（前半行）"),
+                          QStringLiteral("选到「%1」").arg(half));
+                    check(posAfter == posBefore,
+                          QStringLiteral("选字：在字上拖不挪窗口（选字优先于拖窗口）"),
+                          QStringLiteral("窗口 %1,%2 -> %3,%4")
+                              .arg(posBefore.x()).arg(posBefore.y())
+                              .arg(posAfter.x()).arg(posAfter.y()));
+
+                    /* 选中的就是「翻这段」/ Ctrl+C 用的那段（两路合一个口子） */
+                    const QVariantMap picked = uiState();
+                    check(picked.value(QStringLiteral("picked")).toString() == half,
+                          QStringLiteral("选字：选中的那段就是「翻这段」/ Ctrl+C 要用的那段"),
+                          QStringLiteral("picked=%1")
+                              .arg(picked.value(QStringLiteral("picked")).toString()));
+
+                    /* 高亮：选中那段该画出来的矩形（根坐标），一行一个 */
+                    QVariant ranges;
+                    QMetaObject::invokeMethod(pinRoot, "testOcrRanges",
+                                              Q_RETURN_ARG(QVariant, ranges));
+                    const QVariantList rangeList = ranges.toList();
+                    QString rangeText;
+                    for (const QVariant &entry : rangeList) {
+                        const QVariantMap r = entry.toMap();
+                        rangeText += QStringLiteral("[%1,%2 %3x%4]")
+                                         .arg(r.value(QStringLiteral("x0")).toDouble(), 0, 'f', 1)
+                                         .arg(r.value(QStringLiteral("y0")).toDouble(), 0, 'f', 1)
+                                         .arg(r.value(QStringLiteral("x1")).toDouble(), 0, 'f', 1)
+                                         .arg(r.value(QStringLiteral("y1")).toDouble(), 0, 'f', 1);
+                    }
+                    check(rangeList.size() == 1,
+                          QStringLiteral("选字：拖完之后高亮矩形算得出来（一行一个）"),
+                          QStringLiteral("%1 个：%2").arg(rangeList.size()).arg(rangeText));
+
+                    /* ② 从第一行拖到第二行：两行连着选，中间一个换行 */
+                    const QString both = dragTo(0.06 * vw, 0.16 * vh, 0.35 * vw, 0.36 * vh);
+                    QString bothShown = both;
+                    bothShown.replace(QLatin1Char('\n'), QStringLiteral("\\n"));
+                    check(both.contains(QLatin1Char('\n')) && both.contains(QStringLiteral("第二行")),
+                          QStringLiteral("选字：跨行拖 = 两行连着选（行与行之间是换行）"),
+                          QStringLiteral("选到「%1」").arg(bothShown));
+
+                    /* ③ 空白处（两行的右边、没字的地方）拖：不该选字，该走"挪贴图" */
+                    const QPoint blankBefore = pin->pos();
+                    const QString blank = dragTo(0.90 * vw, 0.16 * vh, 0.95 * vw, 0.20 * vh);
+                    check(blank.isEmpty(),
+                          QStringLiteral("选字：空白处拖不选字（拖窗口那条路没被吃掉）"),
+                          QStringLiteral("选到「%1」").arg(blank));
+                    pin->move(blankBefore);      /* 这一下把窗口挪了，摆回去 */
+                    settle();
+
+                    /*
+                     * ④ 选着字的时候点工具按钮 = **把这种标注贴到选中的那几段上**
+                     *    （"划词即标注"）：不用自己去拖，位置按行框来 ——
+                     *      荧光笔        行框那么高的色带，居中盖住字
+                     *      波浪线 / 直线  贴行框底边（下划线）
+                     *      删除线        穿行框中间
+                     *
+                     * 期望值自己按注入的那两行算：第一行 y=0.10 h=0.12（中心 0.16、
+                     * 底边 0.22），第二行 y=0.30 h=0.12（中心 0.36、底边 0.42）。
+                     * 行是归一化的、乘以 view 尺寸就是根坐标，标注存的是**图坐标**，
+                     * 所以要再除以缩放（跟着 tool 那套换算来，别自己另算一套）。
+                     */
+                    {
+                        const double zoomNow = pin->zoom();
+                        auto lastShape = [pinRoot]() {
+                            QVariant value;
+                            QMetaObject::invokeMethod(pinRoot, "testLastShape",
+                                                      Q_RETURN_ARG(QVariant, value));
+                            return value.toMap();
+                        };
+                        auto pickTool = [pinRoot](const QString &name) {
+                            QMetaObject::invokeMethod(pinRoot, "pickTool",
+                                                      Q_ARG(QVariant, QVariant(name)));
+                        };
+                        auto shapeField = [&lastShape](const QString &key) {
+                            return lastShape().value(key).toDouble();
+                        };
+
+                        const int countBefore = uiState().value(QStringLiteral("count")).toInt();
+
+                        /* 荧光笔：选中第一行的前半段 -> 色带该正好盖住这一行的行框 */
+                        dragTo(0.05 * vw, 0.16 * vh, 0.45 * vw, 0.16 * vh);
+                        pickTool(QStringLiteral("highlight"));
+                        settle();
+                        const int afterHighlight = uiState().value(QStringLiteral("count")).toInt();
+                        const double hlCenter = (shapeField(QStringLiteral("y1"))
+                                                 + shapeField(QStringLiteral("y2"))) / 2 * zoomNow;
+                        const double hlBand = shapeField(QStringLiteral("stroke")) * 2.4 * zoomNow;
+                        check(afterHighlight == countBefore + 1
+                                  && lastShape().value(QStringLiteral("kind")).toString()
+                                         == QStringLiteral("highlight")
+                                  && qAbs(hlCenter - 0.16 * vh) <= 1.5
+                                  && qAbs(hlBand - 0.12 * vh) <= 2.0,
+                              QStringLiteral("标注：选中字后点「荧光笔」= 色带正好盖住那一行"),
+                              QStringLiteral("条数 %1->%2 / 中心 %3（行中心 %4）/ 带高 %5（行高 %6）")
+                                  .arg(countBefore).arg(afterHighlight)
+                                  .arg(hlCenter, 0, 'f', 1).arg(0.16 * vh, 0, 'f', 1)
+                                  .arg(hlBand, 0, 'f', 1).arg(0.12 * vh, 0, 'f', 1));
+                        /* 左右到选中的两端（拖的是 0.05~0.45） */
+                        check(qAbs(shapeField(QStringLiteral("x1")) * zoomNow - 0.05 * vw) <= 2.0
+                                  && qAbs(shapeField(QStringLiteral("x2")) * zoomNow - 0.45 * vw) <= 2.0,
+                              QStringLiteral("标注：贴上去的那条左右就到选中的两端"),
+                              QStringLiteral("x %1~%2 / 选中 %3~%4")
+                                  .arg(shapeField(QStringLiteral("x1")) * zoomNow, 0, 'f', 1)
+                                  .arg(shapeField(QStringLiteral("x2")) * zoomNow, 0, 'f', 1)
+                                  .arg(0.05 * vw, 0, 'f', 1).arg(0.45 * vw, 0, 'f', 1));
+                        /* 贴完选中该收掉（蓝色那层高亮别和刚贴的叠在一起） */
+                        check(uiState().value(QStringLiteral("picked")).toString().isEmpty()
+                                  && uiState().value(QStringLiteral("tool")).toString().isEmpty(),
+                              QStringLiteral("标注：贴完把选中收掉、也没把工具切走"),
+                              QStringLiteral("picked「%1」/ tool「%2」")
+                                  .arg(uiState().value(QStringLiteral("picked")).toString(),
+                                       uiState().value(QStringLiteral("tool")).toString()));
+                        /*
+                         * 荧光笔那条**不能**跟着变细：它是"涂一层"，线宽就是 stroke
+                         * （带高 = ×2.4）—— 上面量过带高正好等于行高，这里钉住"没被
+                         * 0.6 那个系数碰到"（不然按行高算出来的带子就白算了）。
+                         */
+                        check(qAbs(lastShape().value(QStringLiteral("width")).toDouble()
+                                   - shapeField(QStringLiteral("stroke"))) < 0.01
+                                  && shapeField(QStringLiteral("stroke")) >= 3.0,
+                              QStringLiteral("标注：荧光笔没被「细一点」碰到（还是带子那么高）"),
+                              QStringLiteral("画出来的宽 %1 / stroke %2")
+                                  .arg(lastShape().value(QStringLiteral("width")).toDouble(),
+                                       0, 'f', 2)
+                                  .arg(shapeField(QStringLiteral("stroke")), 0, 'f', 2));
+
+                        /* 波浪线 / 直线：贴行框底边（第二行底边 0.42）**并且要细** */
+                        const QStringList underTools{ QStringLiteral("wavy"), QStringLiteral("line") };
+                        for (const QString &name : underTools) {
+                            dragTo(0.05 * vw, 0.36 * vh, 0.60 * vw, 0.36 * vh);
+                            pickTool(name);
+                            settle();
+                            const QVariantMap shape = lastShape();
+                            const double y = shape.value(QStringLiteral("y1")).toDouble() * zoomNow;
+                            const double width = shape.value(QStringLiteral("width")).toDouble();
+                            const double amp = shape.value(QStringLiteral("amp")).toDouble();
+                            check(shape.value(QStringLiteral("kind")).toString() == name
+                                      && qAbs(y - 0.42 * vh) <= 1.5,
+                                  QStringLiteral("标注：%1 贴在行框底边（当下划线用）")
+                                      .arg(name == QStringLiteral("wavy") ? QStringLiteral("波浪线")
+                                                                          : QStringLiteral("直线")),
+                                  QStringLiteral("y %1（行底边 %2）")
+                                      .arg(y, 0, 'f', 1).arg(0.42 * vh, 0, 'f', 1));
+                            /* 用户嫌 3px 太粗：0.6 倍 -> 1.8，且波浪振幅跟着细下来 */
+                            check(width >= 1.2 && width <= 2.0 && amp <= width * 1.2 + 0.01,
+                                  QStringLiteral("标注：%1 是细的（0.6 倍，振幅跟着收）")
+                                      .arg(name == QStringLiteral("wavy") ? QStringLiteral("波浪线")
+                                                                          : QStringLiteral("直线")),
+                                  QStringLiteral("线宽 %1 / 振幅 %2（原来 3 / 3.6）")
+                                      .arg(width, 0, 'f', 2).arg(amp, 0, 'f', 2));
+                        }
+
+                        /* 删除线：穿行框中间（第二行中心 0.36），也是细的 */
+                        dragTo(0.05 * vw, 0.36 * vh, 0.60 * vw, 0.36 * vh);
+                        pickTool(QStringLiteral("strike"));
+                        settle();
+                        const double strikeY = shapeField(QStringLiteral("y1")) * zoomNow;
+                        check(lastShape().value(QStringLiteral("kind")).toString()
+                                      == QStringLiteral("strike")
+                                  && qAbs(strikeY - 0.36 * vh) <= 1.5,
+                              QStringLiteral("标注：删除线穿过行框中间"),
+                              QStringLiteral("y %1（行中间 %2）")
+                                  .arg(strikeY, 0, 'f', 1).arg(0.36 * vh, 0, 'f', 1));
+                        const double strikeW =
+                            lastShape().value(QStringLiteral("width")).toDouble();
+                        check(strikeW >= 1.2 && strikeW <= 2.0,
+                              QStringLiteral("标注：删除线也是细的（0.6 倍）"),
+                              QStringLiteral("线宽 %1（原来 3）").arg(strikeW, 0, 'f', 2));
+
+                        /*
+                         * 成品图（复制 / 存盘 / 交给模型的那张）是 **C++ 另一份画法**，
+                         * 两份靠注释对齐 —— 注释拦不住走样，所以在这里真量一次粗细：
+                         * 画一条直线，数成品图上"变了的那一列"里有几个像素。
+                         */
+                        {
+                            const QImage beforeImg = pin->composedImage();
+                            QVariant drewLine;
+                            QMetaObject::invokeMethod(pinRoot, "testDraw",
+                                                      Q_RETURN_ARG(QVariant, drewLine),
+                                                      Q_ARG(QVariant, QVariant(QStringLiteral("line"))),
+                                                      Q_ARG(QVariant, QVariant(40.0)),
+                                                      Q_ARG(QVariant, QVariant(0.5 * vh)),
+                                                      Q_ARG(QVariant, QVariant(200.0)),
+                                                      Q_ARG(QVariant, QVariant(0.5 * vh)));
+                            const QImage afterImg = pin->composedImage();
+                            const double dpr = afterImg.devicePixelRatio() > 0
+                                                   ? afterImg.devicePixelRatio() : 1.0;
+                            const int col = qBound(0, qRound(120.0 / zoomNow * dpr),
+                                                   afterImg.width() - 1);
+                            int thick = 0;
+                            for (int y = 0; y < afterImg.height() && y < beforeImg.height(); ++y) {
+                                const QRgb a = beforeImg.pixel(col, y);
+                                const QRgb b = afterImg.pixel(col, y);
+                                if (qAbs(qRed(a) - qRed(b)) + qAbs(qGreen(a) - qGreen(b))
+                                        + qAbs(qBlue(a) - qBlue(b)) > 40)
+                                    ++thick;
+                            }
+                            check(drewLine.toBool() && thick >= 1
+                                      && thick <= qRound(2.6 * dpr),
+                                  QStringLiteral("标注：成品图上那条线也是细的（C++ 那份画法）"),
+                                  QStringLiteral("那一列变了 %1 个像素（原来 ~%2）")
+                                      .arg(thick).arg(qRound(3.6 * dpr)));
+                            QMetaObject::invokeMethod(pinRoot, "undo");   /* 量完撤掉 */
+                            settle();
+                        }
+
+                        /* 没选中字的时候：点工具还是"选好工具准备拖"，不加东西 */
+                        const int beforeNoSelect = uiState().value(QStringLiteral("count")).toInt();
+                        pickTool(QStringLiteral("wavy"));
+                        settle();
+                        check(uiState().value(QStringLiteral("count")).toInt() == beforeNoSelect
+                                  && uiState().value(QStringLiteral("tool")).toString()
+                                         == QStringLiteral("wavy"),
+                              QStringLiteral("标注：没选中字时点工具 = 只是把工具选上（没乱加）"),
+                              QStringLiteral("条数 %1 / tool「%2」")
+                                  .arg(uiState().value(QStringLiteral("count")).toInt())
+                                  .arg(uiState().value(QStringLiteral("tool")).toString()));
+
+                        /* 量完收摊：工具收掉、刚加的这几条撤掉（后面的检查不认它们） */
+                        pickTool(QString());
+                        const int added = uiState().value(QStringLiteral("count")).toInt()
+                                          - countBefore;
+                        for (int i = 0; i < added; ++i)
+                            QMetaObject::invokeMethod(pinRoot, "undo");
+                        settle();
+                        check(uiState().value(QStringLiteral("count")).toInt() == countBefore,
+                              QStringLiteral("标注：量完能收干净（刚加的那几条撤销掉）"),
+                              QStringLiteral("条数 %1（期望回到 %2）")
+                                  .arg(uiState().value(QStringLiteral("count")).toInt())
+                                  .arg(countBefore));
+                    }
+
+                    /* 量完把行清掉，免得影响后面"点一下"那些检查 */
+                    pin->setOcrLinesForTest(QVariantList());
+                    settle();
+                }
+
+                /*
+                 * 真认字那条路：自己画一张有字的图，交给 Windows 自带 OCR 认一遍。
+                 * 没有语言包（或 SDK 里没有 cppwinrt）就跳过 —— 那是环境没有，
+                 * 不是这次改动坏了。
+                 */
+                if (PinOcr::available()) {
+                    QImage paper(560, 170, QImage::Format_ARGB32);
+                    paper.fill(Qt::white);
+                    {
+                        QPainter painter(&paper);
+                        painter.setPen(Qt::black);
+                        painter.setFont(QFont(QStringLiteral("Microsoft YaHei"), 30));
+                        painter.drawText(QRect(20, 15, 520, 60), Qt::AlignLeft | Qt::AlignVCenter,
+                                         QStringLiteral("HELLO 12345"));
+                        painter.drawText(QRect(20, 95, 520, 60), Qt::AlignLeft | Qt::AlignVCenter,
+                                         QStringLiteral("图上选字"));
+                    }
+                    /* 先确认这张图真画上字了（不然量的是"画图失败"） */
+                    int ink = 0;
+                    for (int y = 0; y < paper.height(); y += 2) {
+                        const QRgb *row = reinterpret_cast<const QRgb *>(paper.constScanLine(y));
+                        for (int x = 0; x < paper.width(); x += 2)
+                            if (qGray(row[x]) < 128)
+                                ++ink;
+                    }
+                    /*
+                     * 和真跑那条路一样，在**工作线程**里认：GUI 主线程是 STA 单元，
+                     * WinRT 的异步回调要靠它自己抽消息，在那儿 .get() 干等容易出怪
+                     * 结果（真跑时是 QThreadPool 的线程，见 PinWindow::startOcr）。
+                     */
+                    QVariantList lines;
+                    QString ocrError;
+                    std::thread worker([&lines, &ocrError, &paper]() {
+                        lines = PinOcr::recognize(paper, &ocrError);
+                    });
+                    worker.join();
+                    QString joined;
+                    for (const QVariant &entry : lines)
+                        joined += entry.toMap().value(QStringLiteral("text")).toString()
+                                  + QStringLiteral("|");
+                    check(ink > 100 && !lines.isEmpty()
+                              && joined.contains(QStringLiteral("HELLO"), Qt::CaseInsensitive),
+                          QStringLiteral("选字：Windows 自带 OCR 认得出画上去的字（%1）")
+                              .arg(PinOcr::language()),
+                          QStringLiteral("认出 %1 行：%2 / 墨点 %3 / err=%4")
+                              .arg(lines.size()).arg(joined).arg(ink).arg(ocrError));
+                    if (!lines.isEmpty()) {
+                        const QVariantMap firstLine = lines.first().toMap();
+                        const double lw = firstLine.value(QStringLiteral("w")).toDouble();
+                        const double lx = firstLine.value(QStringLiteral("x")).toDouble();
+                        const double ly = firstLine.value(QStringLiteral("y")).toDouble();
+                        /* 行框得落在图上、且是"一行"那么大（不是整张图、也不是一个点）*/
+                        check(lx >= 0.0 && ly >= 0.0 && lw > 0.10 && lw < 0.98,
+                              QStringLiteral("选字：给出来的行框落在图上合理的位置（0~1 的归一化值）"),
+                              QStringLiteral("x=%1 y=%2 w=%3")
+                                  .arg(lx, 0, 'f', 3).arg(ly, 0, 'f', 3).arg(lw, 0, 'f', 3));
+                    }
+                } else {
+                    out() << "  --    跳过：这台机器上没有 Windows OCR 语言包（选字用不了）"
+                          << Qt::endl;
+                }
+
+                /*
+                 * 「翻译」（认整张图那个键）在贴图上到底响不响 —— 用户报的
+                 * "点了「翻译」什么都没发生"。
+                 *
+                 * 病根不在 QML 那边：PinWindow::composedImageUrl() 忘了写
+                 * Q_INVOKABLE，QML 里 `root.pinWin.composedImageUrl()` 直接抛
+                 *     TypeError: Property 'composedImageUrl' … is not a function
+                 * translateAll() 第一行就断了 —— 界面上什么都不发生，连卡片都不摆
+                 * （那句话只进 qWarning，GUI 程序的 stderr 抓不到，所以特别像"死"
+                 * 了一样）。这条量的就是"界面这层走通了没有"。
+                 *
+                 * 这里**不发真请求**：接口地址留空，`chatUrl()` 就是空串，
+                 * LlmClient::postVision 当场回一句"还没配置接口地址" —— 摆出来
+                 * （status 非空）就算响。不留空、指一个没人听的端口也行，但
+                 * Windows 上那个连接会一直挂着（实测 6 秒还没出错），自检不值得
+                 * 等它。
+                 */
+                if (llm) {
+                    QSettings settings;
+                    const QString savedBase = llm->apiBase();
+                    const QString savedMode = llm->mode();
+                    const QString savedOcr = llm->ocrModel();
+                    const bool hadBase = settings.contains(QStringLiteral("translate/apiBase"));
+                    const bool hadOcr = settings.contains(QStringLiteral("translate/ocrModel"));
+
+                    llm->setMode(QStringLiteral("api"));
+                    llm->setApiBase(QString());
+                    llm->setOcrModel(QStringLiteral("自检视觉模型"));
+
+                    auto cardState = [pinRoot]() {
+                        QVariant value;
+                        QMetaObject::invokeMethod(pinRoot, "testCardState",
+                                                  Q_RETURN_ARG(QVariant, value));
+                        return value.toMap();
+                    };
+                    auto clickTranslate = [pinRoot, &settle]() {
+                        QMetaObject::invokeMethod(pinRoot, "translateAll");
+                        settle();
+                    };
+                    /* 等到请求收尾（连不上那个端口时很快就出错）：忙的时候
+                       「翻译」这个键是灰的，"能不能再点"要等这一下结束再量 */
+                    auto waitNotBusy = [&cardState, &settle]() {
+                        for (int i = 0; i < 40; ++i) {
+                            settle();
+                            if (!cardState().value(QStringLiteral("ocrBusy")).toBool())
+                                return;
+                        }
+                    };
+                    auto describe = [](const QVariantMap &state) {
+                        return QStringLiteral("visible=%1 status=%2")
+                            .arg(state.value(QStringLiteral("visible")).toBool() ? 1 : 0)
+                            .arg(state.value(QStringLiteral("status")).toString());
+                    };
+
+                    clickTranslate();
+                    waitNotBusy();
+                    const QVariantMap first = cardState();
+                    check(first.value(QStringLiteral("visible")).toBool()
+                              && !first.value(QStringLiteral("status")).toString().isEmpty(),
+                          QStringLiteral("贴图：点「翻译」之后识别卡片摆得出来（界面这条链走通了）"),
+                          describe(first));
+                    /* 卡在"忙"上的话，「翻译」这个键就永远是灰的、点不动 */
+                    check(!first.value(QStringLiteral("ocrBusy")).toBool(),
+                          QStringLiteral("贴图：这一下之后没卡在「忙」上（「翻译」还能再点）"));
+
+                    /*
+                     * 关掉卡片再点一次。
+                     *
+                     * 卡片里的 ✕ 以前直接写 card.visible = false，把外面
+                     * `visible: hasResult` 那条绑定打断了 —— 关过一次之后 hasResult
+                     * 再变真也摆不出来（用户报的"点了没反应"的第二个成因）。
+                     * 现在 ✕ 只发 closeRequested，外面清 hasResult。
+                     */
+                    QMetaObject::invokeMethod(pinRoot, "testCardClose");
+                    settle();
+                    clickTranslate();
+                    waitNotBusy();
+                    const QVariantMap second = cardState();
+                    check(second.value(QStringLiteral("visible")).toBool(),
+                          QStringLiteral("贴图：卡片关掉之后再点「翻译」，卡片还摆得出来"),
+                          describe(second));
+
+                    llm->setMode(savedMode);
+                    if (hadBase)
+                        llm->setApiBase(savedBase);
+                    else
+                        settings.remove(QStringLiteral("translate/apiBase"));
+                    if (hadOcr)
+                        llm->setOcrModel(savedOcr);
+                    else
+                        settings.remove(QStringLiteral("translate/ocrModel"));
+                    settings.sync();
+                }
+
+                /*
+                 * 在图上单击（不拖）**不关**这张贴图 —— 左键 / 右键都一样。
+                 *
+                 * 用户报的"怎么左键、右键点一下就关掉了"：原来 pointerUp 里有一条
+                 * "随手点一下就收工"（这类贴图工具的老习惯），而且它没分左右键。
+                 * 现在单击只当"摸一下这张图"，关掉走工具条上的「关闭」/ Esc。
+                 */
+                QMetaObject::invokeMethod(pinRoot, "testTap", Q_RETURN_ARG(QVariant, tap),
+                                          Q_ARG(QVariant, QVariant(0.0)),
+                                          Q_ARG(QVariant, QVariant(0.0)));
+                QMetaObject::invokeMethod(pinRoot, "testRightTap");
+                settle();
+                check(tap.toString() == QStringLiteral("idle") && pin->isVisible()
+                          && shot->pinnedCount() == 1,
+                      QStringLiteral("贴图：在图上单击（左键 / 右键，不拖）不关掉它"),
+                      QStringLiteral("返回 %1 / 贴图 %2 个 / 露着 %3")
+                          .arg(tap.toString()).arg(shot->pinnedCount())
+                          .arg(pin->isVisible() ? 1 : 0));
+
+                /*
+                 * 收尾：走「关闭」那条路（工具条上那个「关闭」调的就是它），
+                 * 关完必须从清单里划掉。**必须放最后** —— 关掉就删，这之后再碰
+                 * pin 就是野指针（自检在这儿崩过一次：ASSERT 在 qlist.h 里，
+                 * 看着像内存踩了，其实是访问已经析构掉的窗口）。
+                 */
+                pin->closePin();
+                settle();
+                check(shot->pinnedCount() == 0,
+                      QStringLiteral("贴图：关掉之后从清单里划掉了（不留空条目）"));
+                }
+            }
+        }
+
+        /*
+         * ============ 识别（框选之后交给大模型认内容） ============
+         *
+         * 自检**不发真请求**（那要一台配好的视觉模型）：发请求那一套在
+         * src/SelfTestTranslate.cpp 第 10 节里拿假服务验。这里验的是界面这条
+         * 链路 —— 选区那块图取不取得到、结果摆不摆得出来、卡片上的"复制 /
+         * 加到图上"走不走得通。这条链路最容易坏的地方是"图根本没取到"
+         * （选区坐标没按 dpr 换算）和"结果摆上去了但没法用"，两样都不会崩。
+         */
+        if (QObject *root = shot->overlayRoot()) {
+            /* 选区和缩放比从根对象 / 冻结图上读（这一块在 if (overlay) 外面，那
+               两个变量在它里面；读属性是那边同一份值） */
+            const QRectF ocrSel = root->property("sel").toRectF();
+            const QImage frozen =
+                shot->imageForId(QStringLiteral("full%1").arg(shot->serial()));
+            const double ocrDpr = frozen.devicePixelRatio() > 0 ? frozen.devicePixelRatio() : 1.0;
+
+            QVariant imageUrl;
+            QMetaObject::invokeMethod(root, "testSelectionImage", Q_RETURN_ARG(QVariant, imageUrl));
+            const QString dataUrl = imageUrl.toString();
+            check(dataUrl.startsWith(QStringLiteral("data:image/png;base64,")),
+                  QStringLiteral("识别：选区那块图取得出来（界面点「识别」发的就是它）"),
+                  dataUrl.left(32));
+
+            /*
+             * 这张图**必须就是选区那一块**：解回来量一下尺寸。
+             * 少了这一条的话，"高 DPI 下少乘一个 dpr"这类错误看不出来 ——
+             * 图是有一张，只是内容跟框的那块对不上。
+             */
+            if (dataUrl.startsWith(QStringLiteral("data:image/png;base64,"))) {
+                const QImage cropped = QImage::fromData(
+                    QByteArray::fromBase64(
+                        dataUrl.mid(QStringLiteral("data:image/png;base64,").size()).toLatin1()));
+                const int wantW = qRound(ocrSel.width() * ocrDpr);
+                const int wantH = qRound(ocrSel.height() * ocrDpr);
+                check(!cropped.isNull() && qAbs(cropped.width() - wantW) <= 2
+                          && qAbs(cropped.height() - wantH) <= 2,
+                      QStringLiteral("识别：那张图正好是框选的那一块（设备像素）"),
+                      QStringLiteral("%1x%2 / 期望 %3x%4")
+                          .arg(cropped.width()).arg(cropped.height()).arg(wantW).arg(wantH));
+            }
+
+            check(shot->selectionReady(ocrSel), QStringLiteral("识别：选区可用时按钮是亮的"));
+            check(!shot->selectionReady(QRectF(ocrSel.x(), ocrSel.y(), 2, 2)),
+                  QStringLiteral("识别：选区小到没意义时不当成可用（不至于发个空请求出去）"));
+
+            /*
+             * 工具条上那两个"识别"键**撤了**（用户说这个功能不要了），别哪天又被
+             * 加回来。识别请求那套代码本身还留着（卡片 / selectionReady 那些检查
+             * 照旧走），所以这里只量"工具条上没这两个键"。
+             */
+            check(root->findChild<QObject *>(QStringLiteral("screenshotRecognize")) == nullptr,
+                  QStringLiteral("截图：工具条上不再有「识别」那个键（这个功能撤了）"));
+            check(root->findChild<QObject *>(QStringLiteral("screenshotRecognizeLang")) == nullptr,
+                  QStringLiteral("截图：工具条上不再有换识别语言那个 ▾ 了"));
+
+            /*
+             * 颜色：**就 24 种**，"更多颜色"那个系统取色框（QColorDialog）撤了。
+             * 一半在 QML（调色板几条），一半在 C++（那个方法得真没了，不然
+             * 界面上找不到入口、代码里还挂着个模态框）。
+             */
+            QVariant colorState;
+            QMetaObject::invokeMethod(root, "colorState", Q_RETURN_ARG(QVariant, colorState));
+            const QVariantMap colorMap = colorState.toMap();
+            check(colorMap.value(QStringLiteral("palette")).toInt() == 24,
+                  QStringLiteral("截图：调色板就是 24 种颜色（不多不少）"),
+                  QStringLiteral("%1 种").arg(colorMap.value(QStringLiteral("palette")).toInt()));
+            check(shot->metaObject()->indexOfMethod("pickColor(QString)") < 0,
+                  QStringLiteral("截图：系统取色框那套（pickColor）删干净了"));
+
+            /* 摆一份结果进卡片（等同模型回复到了） */
+            QVariant shown;
+            QMetaObject::invokeMethod(root, "testShowRecognition", Q_RETURN_ARG(QVariant, shown),
+                                      Q_ARG(QVariant, QVariant(QStringLiteral("Hello world"))),
+                                      Q_ARG(QVariant, QVariant(QStringLiteral("你好，世界"))));
+            settle();
+            check(shown.toBool(), QStringLiteral("识别：结果摆得出来"));
+
+            QVariant state;
+            QMetaObject::invokeMethod(root, "testRecognitionState", Q_RETURN_ARG(QVariant, state));
+            const QVariantMap map = state.toMap();
+            check(map.value(QStringLiteral("visible")).toBool(),
+                  QStringLiteral("识别：卡片真的显示出来了"));
+            check(map.value(QStringLiteral("original")).toString()
+                      == QStringLiteral("Hello world"),
+                  QStringLiteral("识别：卡片上是原文那一栏"),
+                  map.value(QStringLiteral("original")).toString());
+            check(map.value(QStringLiteral("translated")).toString()
+                      == QStringLiteral("你好，世界"),
+                  QStringLiteral("识别：卡片上是译文那一栏"),
+                  map.value(QStringLiteral("translated")).toString());
+
+            /* "加到图上"：识别出来的字变成一条普通文字标注（能接着改字号 / 拖动） */
+            QMetaObject::invokeMethod(root, "testRecognitionAnnotate");
+            settle();
+            QVariant textsVariant;
+            QMetaObject::invokeMethod(root, "textsData", Q_RETURN_ARG(QVariant, textsVariant));
+            bool foundAnnotated = false;
+            const QVariantList textList = textsVariant.toList();
+            for (const QVariant &entry : textList) {
+                if (entry.toMap().value(QStringLiteral("text")).toString()
+                        == QStringLiteral("Hello world"))
+                    foundAnnotated = true;
+            }
+            check(foundAnnotated,
+                  QStringLiteral("识别：识别出来的字能落成一条文字标注（落到图上接着改）"),
+                  QStringLiteral("标注 %1 条").arg(textList.size()));
+
+            /* "复制"：识别出来的字进剪贴板 */
+            QMetaObject::invokeMethod(root, "testRecognitionCopy");
+            settle();
+            check(QGuiApplication::clipboard()->text().contains(QStringLiteral("Hello world")),
+                  QStringLiteral("识别：卡片上的「复制」把文字放进了剪贴板"),
+                  QGuiApplication::clipboard()->text());
         }
 
         shot->endCapture();

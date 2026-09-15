@@ -1,6 +1,7 @@
 pragma ComponentBehavior: Bound
 
 import QtQuick
+import QtQuick.Controls
 import QtQuick.Layouts
 import "../utils"
 import SmartClip.Globals 1.0
@@ -129,6 +130,27 @@ Rectangle {
 
     /* 和界面其它地方同一支强调蓝（见 Main.qml 的 accentColor） */
     readonly property color accent: "#4c96d8"
+
+    /*
+     * ---- 识别（把框选区域交给大模型认字 / 认了顺便翻） ----
+     *
+     * 链接那条路是：这里的"识别"按钮 -> Shot.selectionImage(sel) 取到选区那块图
+     * （png 的 data URL）-> Llm.recognize() 发出去 -> 回来的文字摆进识别卡片
+     * （qml/screenshot/RecognitionCard.qml）。
+     *
+     * 界面只做两件事：把图发出去、把结果摆出来。真正发请求那套（提示词 /
+     * 多模态消息体 / token 契约）都在 LlmClient 里 —— 和翻译卡片共用同一个单例，
+     * 所以设置面板里配的模型就是这里用的模型。
+     */
+    /* 这次等待的是哪个请求（和 TranslateCard 一样的做法：对不上就是上一次那口） */
+    property string ocrToken: ""
+    /* 等模型的那几秒（按钮转圈、卡片显示"正在识别…"） */
+    property bool ocrBusy: false
+    /* 识别 + 翻译的目标语言；空串 = 只识别（别翻）。
+       默认跟着设置面板里那个"默认目标语言"走 */
+    property string ocrTarget: Llm.defaultTarget
+    /* 目标语言清单由 C++ 那份说了算，界面不另抄一份（见 SettingsPanel 的说明） */
+    readonly property var ocrTargets: Llm.targetLanguages
 
     /* 文本框四个角上的图标（旋转 / 缩放 / 箭头），见 qml/utils/IconProvider.qml */
     IconProvider { id: icons }
@@ -431,7 +453,10 @@ Rectangle {
         ? [1, 2, 3, 4, 5, 6, 8, 10, 12]
         : [8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 32, 36, 40, 48, 64, 96]
 
-    /* "更多颜色"那一格里摆的调色板（8 列，够日常用又不至于找不着） */
+    /*
+     * "更多颜色"那一格里摆的调色板：**就这 24 个**（8 列）。
+     * 原来最下面还有一行「自定义…」开系统取色框，撤了（用户要求，见 colorMenu）。
+     */
     readonly property var colorPalette: [
         "#ffffff", "#d6d7da", "#8b929e", "#4b4d4f", "#000000",
         "#ff3b30", "#ff6b35", "#ffd60a", "#30d158", "#0a84ff",
@@ -444,18 +469,8 @@ Rectangle {
     property bool menuSize: false
     property bool menuColor: false
 
-    /*
-     * 正开着系统取色框（QtWidgets 模态框，里面是嵌套事件循环）。
-     *
-     * 这期间要把窗口级快捷键全让开：实测取色框开着按 Esc，先被这边的
-     * Esc Shortcut 接住、把选区窗口关了 —— 对话框的父窗口一没，它直接
-     * abort（弹"Microsoft Visual C++ Runtime Library"）。让开之后 Esc
-     * 才轮到对话框自己处理。C++ 那侧 endCapture 也加了同样的闸门。
-     */
-    property bool pickingColor: false
-
-    /* 快捷键总闸：打字 / 开着系统对话框的时候都让开 */
-    readonly property bool shortcutsOn: editing < 0 && !pickingColor
+    /* 快捷键总闸：正在打字的时候让开（原来还让开系统取色框那会儿，框撤了） */
+    readonly property bool shortcutsOn: editing < 0
 
     function closeMenus() {
         root.menuSize = false
@@ -469,16 +484,6 @@ Rectangle {
             root.strokeWidth = Math.max(1, Math.min(12, n))
         else
             root.setFontSize(n)
-    }
-
-    /* 弹出面板上的"自定义…"：开系统取色框（C++ 那边 QColorDialog） */
-    function pickCustomColor() {
-        root.pickingColor = true
-        const picked = Shot.pickColor(root.annotColor.toString())
-        root.pickingColor = false
-        if (picked !== "")
-            root.setColor(picked)
-        root.menuColor = false
     }
 
     /*
@@ -632,6 +637,106 @@ Rectangle {
     }
 
     /*
+     * ---- 识别（框选之后让大模型认内容） ----
+     *
+     * 发一条识别请求。target 空 = 只要图上那点字；填了 = 认了顺手翻一遍
+     * （都在同一次请求里做完，见 LlmClient::recognize）。
+     *
+     * 选区那块图由 C++ 裁（Shot.selectionImage）：它和"复制 / 保存"合成用的
+     * 是同一份裁切，两边不会各裁各的。
+     */
+    function startRecognize(target) {
+        if (!root.selReady || root.ocrBusy)
+            return
+        const t = (target === undefined) ? root.ocrTarget : target
+        root.commitEditing()
+
+        const image = Shot.selectionImage(root.sel)
+        if (image === "") {
+            /* 取不到图（选区太小 / 还没抓屏）：说人话，别发个空请求出去 */
+            recognitionCard.showError("选区里没有可以识别的画面")
+            recognitionCard.visible = true
+            return
+        }
+
+        recognitionCard.clearText()
+        recognitionCard.showBusy(t === "" ? "正在识别…" : "正在识别并翻译…")
+        recognitionCard.targetLang = t
+        recognitionCard.visible = true
+        root.ocrBusy = true
+        root.ocrToken = Llm.recognize(image, t, "自动检测")
+    }
+
+    /*
+     * 模型的回复到了：摆进卡片。
+     *
+     * 带翻译的那条回的是"原文 ---- 译文"（见 LlmClient::postVision 的约定），
+     * 用 Llm.ocrOriginal() 把原文那一段抠出来单独放一栏 —— 模型有时不按格式
+     * 回，抠不出来就把整段当原文（那种情况下译文栏空着，用户还能自己点"翻译"）。
+     */
+    function applyRecognition(text, wantedTranslate) {
+        root.ocrBusy = false
+        root.ocrToken = ""
+
+        const trimmed = String(text === undefined ? "" : text)
+        if (trimmed === "") {
+            recognitionCard.showError("模型没有认出文字（图上可能没有文字）")
+            return
+        }
+        if (!wantedTranslate) {
+            recognitionCard.showResult(trimmed, "")
+            return
+        }
+        const original = Llm.ocrOriginal(trimmed)
+        /* 抠出来的原文和整段一样 = 模型没按"原文 ---- 译文"的格式回，那就没有译文 */
+        recognitionCard.showResult(original, original === trimmed ? "" : trimmed)
+    }
+
+    /* 卡片上那个语言下拉：换语言 = 拿原图重来一次（要翻译的在同一次请求里翻） */
+    function setOcrTarget(lang) {
+        root.ocrTarget = lang
+        recognitionCard.targetLang = lang
+        /* 顺手记住这次挑的语言：下次截图、下次开程序默认就是它 */
+        if (lang !== "")
+            Llm.defaultTarget = lang
+        if (!root.selReady)
+            return
+        root.startRecognize(lang)
+    }
+
+    /* 把识别出来的文字复制走（原文和译文都有时，两份一起，用空行隔开） */
+    function copyRecognition() {
+        const card = recognitionCard
+        if (!card.hasText)
+            return
+        const text = (card.translated && card.originalText !== "")
+                         ? card.originalText + "\n\n" + card.translatedText
+                         : card.originalText
+        /* 走 C++ 那一份：QML 里没有剪贴板类型（见 Screenshot::copyText） */
+        Shot.copyText(text)
+    }
+
+    /*
+     * 把识别结果当成**一条文字标注**落在选区里：落下来就是一个普通的文本框，
+     * 字号 / 颜色 / 拖动 / 旋转都跟手打的字一模一样。
+     * 用户要的是"识别出来之后能直接在图上改"，而不是只能复制走。
+     */
+    function annotateRecognition() {
+        const card = recognitionCard
+        const text = card.originalText !== "" ? card.originalText : card.translatedText
+        if (text === "")
+            return
+        const index = root.beginTextBox(root.sel.x + 12, root.sel.y + 12)
+        if (index < 0)
+            return
+        textModel.setProperty(index, "txt", text)
+        /* 落定（和手打完字点别处一样：空串会被收掉，这里已经不是空的） */
+        root.selected = index
+        root.editing = -1
+        root.history = root.history.concat(["text"])
+    }
+
+    /*
      * 工具条四个按钮 / 快捷键 / 自检走同一份动作。
      * 复制 / 保存 / 贴图做完都直接收工（选区窗口关掉、主窗口放回来）。
      */
@@ -700,7 +805,16 @@ Rectangle {
         root.drawPts = []
         root.menuSize = false
         root.menuColor = false
-        root.pickingColor = false
+        /*
+         * 识别那几样也要复位：卡片收起来、清空，在飞的那口作废（token 清掉之后
+         * 它回来也对不上号了，不会再往新的一轮里插结果）。
+         */
+        root.ocrBusy = false
+        root.ocrToken = ""
+        recognitionCard.clearText()
+        recognitionCard.hasResult = false
+        recognitionCard.visible = false
+        recognitionCard.targetLang = root.ocrTarget
         /*
          * 先别画那圈选区边框（见 overlayReady 的说明）：等窗口稳定显示之后
          * C++ 会调 settleOverlay()。取消落在"窗口刚出来"那几十毫秒里时，
@@ -720,10 +834,38 @@ Rectangle {
         Shot.uiTrace("settleOverlay(): border allowed")
     }
 
-    /* ---- 自检入口（见 src/SelfTest.cpp），和界面上那几下是同一批函数 ---- */    function testSelect(x, y, w, h) {
+    /*
+     * ---- 自检入口（见 src/SelfTest.cpp），和界面上那几下是同一批函数 ----
+     *
+     * 识别那几项也留了口子：自检**不真发请求**（那要一台配好的视觉模型），但
+     * "选区那块图取不取得到 -> 回复摆进卡片 -> 复制 / 加到图上"这条链路要能量
+     * 得出来（见 src/SelfTestTranslate.cpp 里那一节）。
+     */
+    /* 自检：选区那块图的 data URL 拿不拿得到（等同于点"识别"时的第一步） */
+    function testSelectionImage() { return Shot.selectionImage(root.sel) }
+
+    /* 自检：直接把一份识别结果摆进卡片（等同模型回复到了） */
+    function testShowRecognition(original, translated) {
+        recognitionCard.showResult(original, translated)
+        recognitionCard.visible = true
+        return recognitionCard.visible
+    }
+    function testRecognitionState() {
+        return { visible: recognitionCard.visible, busy: recognitionCard.busy,
+                 original: recognitionCard.originalText,
+                 translated: recognitionCard.translatedText,
+                 target: recognitionCard.targetLang, token: root.ocrToken,
+                 status: recognitionCard.status }
+    }
+    function testRecognitionCopy() { root.copyRecognition() }
+
+    function testSelect(x, y, w, h) {
         root.selAuto = false
         root.sel = Qt.rect(x, y, w, h)
     }
+    /* 自检：把当前卡片上的文字当成标注落到选区里（要先 testSelect 过） */
+    function testRecognitionAnnotate() { root.annotateRecognition() }
+
     function testTextTool(on) { root.tool = on ? "text" : "" }
     /* 自检：选某个工具 -> 按下 -> 拖 -> 松开（走界面上同一套 pointer*） */
     function testDrawWith(tool, x1, y1, x2, y2) {
@@ -841,7 +983,20 @@ Rectangle {
     function barState() {
         return { x: bar.x, y: bar.y, width: bar.width, height: bar.height,
                  atScreensRight: bar.atScreensRight,
-                 ready: root.overlayReady, borderVisible: selBorder.visible }
+                 ready: root.overlayReady, borderVisible: selBorder.visible,
+                 /* 工具条里竖着排了几块：现在**只有按钮那一行**（底下那句
+                    快捷键提示撤了，见 barColumn） */
+                 rows: barColumn.children.length }
+    }
+
+    /*
+     * 自检：颜色那块的现状 —— 调色板几个颜色、面板开着没有。
+     * 用户要求"只保留 24 种颜色、更多颜色那个系统取色框不要了"，这条量前一半
+     * （后一半在 C++ 那边量：Screenshot 上已经没有 pickColor 这个方法了）。
+     */
+    function colorState() {
+        return { palette: root.colorPalette.length, menuOpen: root.menuColor,
+                 current: root.annotColor.toString() }
     }
 
     /*
@@ -1562,6 +1717,65 @@ Rectangle {
     }
 
     /*
+     * LLM 的回复按 token 认领（和 TranslateCard 同一套做法）：用户连点两次
+     * "识别"时，先回来的那一口不能把后一口的结果盖掉。
+     *
+     * 不做成"发请求时就地等回调"是因为请求是异步的（可能几十秒，本地模型还要
+     * 先加载），这期间用户还能继续框选、加标注。
+     */
+    Connections {
+        target: Llm
+
+        function onFinished(token, text) {
+            if (token !== root.ocrToken)
+                return
+            root.applyRecognition(text, recognitionCard.targetLang !== "")
+        }
+
+        function onFailed(token, error) {
+            if (token !== root.ocrToken)
+                return
+            root.ocrBusy = false
+            root.ocrToken = ""
+            recognitionCard.showError(error)
+            recognitionCard.visible = true
+        }
+    }
+
+    /*
+     * 识别结果卡片（见 qml/screenshot/RecognitionCard.qml）。
+     *
+     * 一直建着（不是用时才建）：它是浮在选区旁边的可视项，工具条的位置又要看它
+     * 在不在上面（见下面 bar 的 wantY），用时现建会有一帧对不上。反正内容为空
+     * 时它不显示，放在场景里不花什么代价。
+     */
+    RecognitionCard {
+        id: recognitionCard
+
+        targetLanguages: root.ocrTargets
+        sourceLang: "自动检测"
+        targetLang: root.ocrTarget
+        x: Math.max(8, Math.min(root.width - width - 8, root.sel.x + root.sel.width - width))
+        y: {
+            const below = root.sel.y + root.sel.height + 10
+            if (below + height <= root.height - 8)
+                return below
+            const above = root.sel.y - height - 10
+            return above >= 8 ? above : Math.max(8, root.height - height - 8)
+        }
+        visible: hasResult && root.overlayReady
+
+        onCopyRequested: root.copyRecognition()
+        onAnnotateRequested: root.annotateRecognition()
+        onTargetPicked: (lang) => root.setOcrTarget(lang)
+        /* ✕ 只是喊一声，摆不摆由这边说了算（见 RecognitionCard 那个信号的说明） */
+        onCloseRequested: {
+            recognitionCard.visible = false
+            recognitionCard.hasResult = false
+        }
+    }
+
+    /*
      * 浮动工具条：贴着选区下沿，下面放不下就翻到上面，再夹回窗口里。
      * 它自己不做位移 —— 选区一动它跟着动，用户不用去追它。
      *
@@ -1571,7 +1785,12 @@ Rectangle {
     Rectangle {
         id: bar
 
+        /*
+         * 工具条贴着选区下沿；识别卡片也贴着那儿（见 recognitionCard 的 y）——
+         * 卡片露出来的时候工具条让开一个身位，两块不叠在一起。
+         */
         readonly property real wantY: root.sel.y + root.sel.height + 10
+                                      + (recognitionCard.visible ? recognitionCard.height + 8 : 0)
         readonly property bool flip: wantY + height > root.height
         /* 工具条这会儿是不是按"整屏选区"摆在右上角（自检要看这个状态） */
         readonly property bool atScreensRight: root.selAuto
@@ -1655,6 +1874,8 @@ Rectangle {
         }
 
         ColumnLayout {
+            id: barColumn
+
             anchors.centerIn: parent
             spacing: 3
 
@@ -1742,7 +1963,7 @@ Rectangle {
                 ColorDot { dotColor: "#30d158" }
                 ColorDot { dotColor: "#ffffff" }
 
-                /* 更多颜色：弹一块调色板，最后一行还能开系统取色框 */
+                /* 更多颜色：弹一块调色板（24 色，没有系统取色框了，见 colorMenu） */
                 BarButton {
                     id: moreColors
                     label: "更多"
@@ -1770,13 +1991,6 @@ Rectangle {
                 BarGap {}
 
                 BarButton { label: "取消"; danger: true; onClicked: root.runAction("cancel") }
-            }
-
-            Text {
-                Layout.alignment: Qt.AlignHCenter
-                text: "T 文字 / A 箭头 / P 铅笔 / R 方框 · 左下角拖整框 · 左上旋转 · 右下缩放（Shift 整体放大）· Ctrl+Z 撤销 · 双击取消"
-                font.pixelSize: 10
-                color: "#6f737a"
             }
         }
 
@@ -1842,13 +2056,19 @@ Rectangle {
             }
         }
 
-        /* "更多颜色"那块调色板（8 列），最下面一行是系统取色框 */
+        /*
+         * "更多颜色"那块调色板（8 列，24 个）。
+         *
+         * 就这 24 个 —— 原来最下面还有一行「自定义…」开系统取色框（QColorDialog），
+         * **撤了**（用户要求："只保留24种颜色"）。那个系统框又大又占屏，跟"随手
+         * 挑个标注色"这件事完全不匹配。
+         */
         Rectangle {
             id: colorMenu
 
             visible: root.menuColor
             width: colorGrid.implicitWidth + 16
-            height: colorGrid.implicitHeight + customColor.height + 26
+            height: colorGrid.implicitHeight + 16
             x: Math.max(4, Math.min(bar.width - width - 4,
                                     moreColors.mapToItem(bar, 0, 0).x))
             y: (bar.y - height - 6 >= 4) ? -height - 6 : bar.height + 6
@@ -1890,15 +2110,6 @@ Rectangle {
                     }
                 }
             }
-
-            BarButton {
-                id: customColor
-                label: "自定义…"
-                anchors.horizontalCenter: parent.horizontalCenter
-                anchors.bottom: parent.bottom
-                anchors.bottomMargin: 8
-                onClicked: root.pickCustomColor()
-            }
         }
     }
 
@@ -1933,11 +2144,11 @@ Rectangle {
      * 文字输入框拿到焦点之后就没有"当前项"了（打字全给 TextEdit），
      * 挂在根元素上的 Keys 收不到 Esc —— Shortcut 是窗口级的，不受焦点影响。
      *
-     * 全部挂在 `enabled: root.shortcutsOn` 上（= 没在打字 && 没开着系统取色框）：
+     * 全部挂在 `enabled: root.shortcutsOn` 上（= 没在打字）：
      * **打字的时候要让开** —— 回车在文本框里是"换行"（TextEdit 自己处理），
      * Esc 交给编辑框自己的 Keys.onEscapePressed；窗口级 Shortcut 的优先级比
-     * 控件的按键处理高，不让开的话回车永远换不了行。开着系统对话框时同理
-     * （见 pickingColor 的说明）。
+     * 控件的按键处理高，不让开的话回车永远换不了行。
+     * （原来还让开"系统取色框开着"那一种情况，那个框撤了，见 colorMenu。）
      */
     Shortcut {
         sequence: "Escape"

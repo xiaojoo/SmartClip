@@ -1,5 +1,6 @@
 #include "Translate.h"
 
+#include <QBuffer>
 #include <QClipboard>
 #include <QCloseEvent>
 #include <QGuiApplication>
@@ -23,6 +24,8 @@
 #include <QVBoxLayout>
 #include <QVariantMap>
 #include <QWindow>
+
+#include "PinOcr.h"
 
 namespace {
 
@@ -60,6 +63,26 @@ QString defaultTargetLanguage() {
                              QStringLiteral("中文（简体）")).toString();
 }
 
+/*
+ * 识别 + 翻译那条路回来时的分隔行（提示词里的格式约定，见 postVision）。
+ *
+ * "第一段原文 / 分隔行 / 第二段译文" —— 抠原文（ocrOriginal）就是按这一行切。
+ * 提示词里写的就是这一串，两处必须一致，所以只留 C++ 这一份，界面不自己抄。
+ * 行首行尾刻意不留标记词（不写"【原文】"）：那样切出来的原文还得再洗一遍
+ * 才干净，而用户多半是要直接复制走的。
+ */
+constexpr const char *kOcrSeparator = "----";
+
+/*
+ * 识别那两种任务的代号（recognize -> postVision 之间传的就是它）。
+ *
+ * 用常量而不是在两处各写一遍字面量：哪天改了字面量而漏改一处，请求会**悄悄地**
+ * 退回"只识别"那条提示词（多模态的 body 照样发得出去，不报错），
+ * 只有拿真模型才看得出来翻译没了。
+ */
+constexpr const char *kPersonaOcr = "ocr";
+constexpr const char *kPersonaOcrTranslate = "ocr-translate";
+
 }  // namespace
 
 /* ===========================================================================
@@ -77,11 +100,21 @@ LlmClient::LlmClient(QObject *parent) : QObject(parent) {
     m_apiKey = settings.value(QString::fromLatin1(kKeyBase) + QStringLiteral("apiKey")).toString();
     m_model = settings.value(QString::fromLatin1(kKeyBase) + QStringLiteral("model"),
                              QStringLiteral("deepseek-chat")).toString();
+    /* 识别模型留空 = 用上面那个 model（见 Translate.h 里 ocrModel 的说明） */
+    m_ocrModel = settings.value(QString::fromLatin1(kKeyBase) + QStringLiteral("ocrModel")).toString();
     m_localExe = settings.value(QString::fromLatin1(kKeyBase) + QStringLiteral("localExe")).toString();
     m_localModel = settings.value(QString::fromLatin1(kKeyBase) + QStringLiteral("localModel")).toString();
     m_localMmproj = settings.value(QString::fromLatin1(kKeyBase) + QStringLiteral("localMmproj")).toString();
     m_localPort = settings.value(QString::fromLatin1(kKeyBase) + QStringLiteral("localPort"), 8080).toInt();
     m_defaultTarget = defaultTargetLanguage();
+    /*
+     * 贴图"图上选字"：默认用 Windows 自带那套（离线、不用配，装上就能用）。
+     * PP-OCR 那条命令默认填好（python + 随包脚本）—— 填好用户才看得见"要装什么"。
+     */
+    m_pinOcrEngine = settings.value(QString::fromLatin1(kKeyBase) + QStringLiteral("pinOcrEngine"),
+                                    QStringLiteral("windows")).toString();
+    m_pinOcrRunner = settings.value(QString::fromLatin1(kKeyBase) + QStringLiteral("pinOcrRunner"),
+                                    PinOcr::defaultRunnerCommand()).toString();
 }
 
 LlmClient::~LlmClient() {
@@ -128,6 +161,21 @@ void LlmClient::setModel(const QString &value) {
     m_model = value;
     persist(QStringLiteral("model"), value);
     emit settingsChanged();
+}
+
+QString LlmClient::ocrModel() const { return m_ocrModel; }
+
+void LlmClient::setOcrModel(const QString &value) {
+    if (m_ocrModel == value)
+        return;
+    m_ocrModel = value;
+    persist(QStringLiteral("ocrModel"), value);
+    emit settingsChanged();
+}
+
+QString LlmClient::visionModel() const {
+    const QString ocr = m_ocrModel.trimmed();
+    return ocr.isEmpty() ? m_model.trimmed() : ocr;
 }
 
 QString LlmClient::localExe() const { return m_localExe; }
@@ -206,7 +254,39 @@ bool LlmClient::localRunning() const {
     return m_proc && m_proc->state() != QProcess::NotRunning;
 }
 
+/* ---- 贴图"图上选字"的两个设置（见 Translate.h） ---- */
+
+QString LlmClient::pinOcrEngine() const { return m_pinOcrEngine; }
+
+void LlmClient::setPinOcrEngine(const QString &value) {
+    const QString clean = value.trimmed().toLower();
+    if (m_pinOcrEngine == clean || clean.isEmpty())
+        return;
+    m_pinOcrEngine = clean;
+    persist(QStringLiteral("pinOcrEngine"), clean);
+    emit settingsChanged();
+}
+
+QString LlmClient::pinOcrRunner() const { return m_pinOcrRunner; }
+
+void LlmClient::setPinOcrRunner(const QString &value) {
+    if (m_pinOcrRunner == value)
+        return;
+    m_pinOcrRunner = value;
+    persist(QStringLiteral("pinOcrRunner"), value);
+    emit settingsChanged();
+}
+
 QStringList LlmClient::languages() const { return languageList(); }
+
+QString LlmClient::ocrOriginal(const QString &result) const {
+    const QString text = result.trimmed();
+    const QString separator = QString::fromUtf8(kOcrSeparator);
+    const int at = text.indexOf(separator);
+    if (at < 0)
+        return text;
+    return text.left(at).trimmed();
+}
 
 QStringList LlmClient::targetLanguages() const {
     QStringList list = languageList();
@@ -252,6 +332,30 @@ QString LlmClient::translate(const QString &text, const QString &target, const Q
     return token;
 }
 
+/*
+ * 识别：把框选出来的那块图交给视觉模型读字。
+ *
+ * 和 translate() 走同一条回调契约（token + finished/failed），区别只有两点：
+ * 发的是带图的消息，用的是 visionModel()（见 ocrModel 的说明）。
+ *
+ * target 为空 = 只要图上那点字；填了 = 一边认一边翻，**同一次请求**里做完
+ * （模型这会儿手里就有图，版式、表格、图上那些没写全的话都看得见，比"先抠出
+ * 一段文字、再发一次纯文本翻译"少一次往返，也更不容易翻串行）。
+ * 两种情况下回来都是纯文字：
+ *   * 只识别   —— 就是图上那段原文；
+ *   * 识别+翻译 —— "原文" + 一条分隔行 + "译文"（见 postVision 里的约定，
+ *                  界面按它拆成上下两栏）。
+ */
+QString LlmClient::recognize(const QString &imageDataUrl, const QString &target,
+                             const QString &source) {
+    const QString token = QStringLiteral("r%1").arg(++m_nextToken);
+    const bool wantTranslate = !target.trimmed().isEmpty();
+    postVision(token, imageDataUrl, target, source,
+               wantTranslate ? QString::fromLatin1(kPersonaOcrTranslate)
+                             : QString::fromLatin1(kPersonaOcr));
+    return token;
+}
+
 void LlmClient::probe() {
     /*
      * 试连接用一句真翻译：能和不能的唯一判据就是"这一次请求回不回得来"，
@@ -264,8 +368,6 @@ void LlmClient::probe() {
 
 void LlmClient::post(const QString &token, const QString &text, const QString &target,
                      const QString &source, bool probe) {
-    const QString url = chatUrl();
-
     /*
      * 配置不全 / 输入是空的：**异步**回一个失败。
      *
@@ -284,7 +386,7 @@ void LlmClient::post(const QString &token, const QString &text, const QString &t
         failLater(QStringLiteral("还没有输入要翻译的内容"));
         return;
     }
-    if (url.isEmpty()) {
+    if (chatUrl().isEmpty()) {
         failLater(QStringLiteral("还没配置接口地址（设置 → 翻译）"));
         return;
     }
@@ -334,7 +436,119 @@ void LlmClient::post(const QString &token, const QString &text, const QString &t
         {QStringLiteral("stream"), false},
     };
 
-    QNetworkRequest request{QUrl(url)};
+    send(token, probe ? QStringLiteral("正在测试…") : QStringLiteral("翻译中…"), body, probe);
+}
+
+/*
+ * 识别那条路：把图（png 的 data URL）和一句"要干什么"发给视觉模型。
+ *
+ * 消息体用 OpenAI 兼容的多模态格式（content 是个数组，元素里 type=text 是
+ * 提示词、type=image_url 是图）。OpenAI / 通义 / 智谱 / Kimi / 本地 llama.cpp
+ * 的 server 都是这一套；只填文字（content 是字符串）那边也认，但图片就等于
+ * 没发 —— 模型会回一句"我没有收到图片"，所以这个格式不能省。
+ *
+ * 图片用 data URL（base64 内联）而不是先上传拿 URL：这些服务对图片地址的支持
+ * 各不相同，内联是最通用的一种；截图那一块通常几十 KB，不至于撑坏请求。
+ */
+void LlmClient::postVision(const QString &token, const QString &imageDataUrl,
+                           const QString &target, const QString &source,
+                           const QString &persona) {
+    auto failLater = [this, token](const QString &reason) {
+        setBusy(false);
+        setStatus(reason);
+        QTimer::singleShot(0, this, [this, token, reason]() { emit failed(token, reason); });
+    };
+
+    if (imageDataUrl.trimmed().isEmpty()) {
+        failLater(QStringLiteral("没拿到要识别的图像（选区是不是太小了？）"));
+        return;
+    }
+    if (chatUrl().isEmpty()) {
+        failLater(QStringLiteral("还没配置接口地址（设置 → 翻译）"));
+        return;
+    }
+    if (m_mode == QLatin1String("api") && visionModel().isEmpty()) {
+        failLater(QStringLiteral("还没填识别用的模型名（设置 → 翻译）"));
+        return;
+    }
+    /* 本地模型还没起来：和翻译一样排队等它加载完（见 post 里那段说明） */
+    if (m_mode == QLatin1String("local") && !localRunning()) {
+        PendingRequest pending;
+        pending.token = token;
+        pending.target = target;
+        pending.source = source;
+        pending.image = imageDataUrl;
+        pending.persona = persona;
+        m_pending.append(pending);
+        setBusy(true);
+        setStatus(QStringLiteral("正在启动本地模型…"));
+        if (!startLocal())
+            failPending(m_status);
+        return;
+    }
+
+    const bool wantTranslate = (persona == QLatin1String(kPersonaOcrTranslate));
+    const QString to = target.trimmed();
+    const bool autoSource = source.trimmed().isEmpty()
+                            || source.trimmed() == QStringLiteral("自动检测");
+
+    QString system = QStringLiteral(
+        "你是一名文字识别助手。请把图片里的文字**原样**读出来：不要翻译、不要解释、"
+        "不要加任何前后缀，按图片里的换行和版式分段。");
+    if (wantTranslate) {
+        /*
+         * 一边认一边翻。中间那条分隔行是界面拆"原文 / 译文"两栏的依据
+         * （见 kOcrSeparator 和 LlmClient::ocrOriginal），所以格式得说死 ——
+         * 让模型自己发挥的话，界面上就分不清哪段是原文了。
+         *
+         * 分隔行是拼上去的（不写进带 %1 的那条串里）：它和 %1 都是"-"
+         * 开头的替换位，混在一起容易数错第几个。
+         */
+        system = QStringLiteral(
+                     "你是一名文字识别 + 翻译助手。先把图片里的文字**原样**读出来，"
+                     "再把它翻译成%1。只按下面这个格式输出，不要加任何别的话：\n"
+                     "第一段：读出来的原文，按图片里的换行和版式分段；\n"
+                     "然后单独一行写 ")
+                     .arg(to)
+                 + QString::fromUtf8(kOcrSeparator)
+                 + QStringLiteral("；\n第二段：译好的译文，同样保留原有分段。");
+        system += autoSource ? QStringLiteral(" 源语言请自行判断。")
+                             : QStringLiteral(" 源语言是%1。").arg(source.trimmed());
+    }
+
+    QJsonArray content;
+    content.append(QJsonObject{{QStringLiteral("type"), QStringLiteral("text")},
+                               {QStringLiteral("text"), system}});
+    content.append(QJsonObject{
+        {QStringLiteral("type"), QStringLiteral("image_url")},
+        {QStringLiteral("image_url"),
+         QJsonObject{{QStringLiteral("url"), imageDataUrl}}}});
+
+    QJsonArray messages;
+    messages.append(QJsonObject{{QStringLiteral("role"), QStringLiteral("user")},
+                                {QStringLiteral("content"), content}});
+
+    QJsonObject body{
+        {QStringLiteral("model"), visionModel()},
+        {QStringLiteral("messages"), messages},
+        {QStringLiteral("temperature"), 0.2},
+        {QStringLiteral("stream"), false},
+    };
+
+    send(token, wantTranslate ? QStringLiteral("正在识别并翻译…") : QStringLiteral("正在识别…"),
+         body, false);
+}
+
+/*
+ * 发一条 chat/completions 请求，并把回来的那句话派给调用方。
+ *
+ * 这一步是翻译和识别共用的：两条路只有"拼什么 body / 用哪个模型 / 状态栏写什么"
+ * 不同，发出去之后**出错怎么认、内容从哪儿取、token 怎么对上**完全一样 ——
+ * 分成两份的话，迟早有一份会漏掉某个字段（比如只在一份里读 error.message）。
+ */
+void LlmClient::send(const QString &token, const QString &busyStatus, const QJsonObject &body,
+                     bool probe) {
+    QNetworkRequest request{QUrl(chatUrl())};
     request.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
     if (!m_apiKey.trimmed().isEmpty())
         request.setRawHeader("Authorization", "Bearer " + m_apiKey.trimmed().toUtf8());
@@ -342,7 +556,7 @@ void LlmClient::post(const QString &token, const QString &text, const QString &t
     request.setTransferTimeout(120000);
 
     setBusy(true);
-    setStatus(probe ? QStringLiteral("正在测试…") : QStringLiteral("翻译中…"));
+    setStatus(busyStatus);
 
     QNetworkReply *reply = m_net->post(request, QJsonDocument(body).toJson(QJsonDocument::Compact));
     connect(reply, &QNetworkReply::finished, this, [this, reply, token, probe]() {
@@ -477,8 +691,14 @@ void LlmClient::flushPending() {
     /* 先摘干净再发：post() 万一又把某条排回队里，也不会在这儿绕圈 */
     const QList<PendingRequest> waiting = m_pending;
     m_pending.clear();
-    for (const PendingRequest &request : waiting)
-        post(request.token, request.text, request.target, request.source, request.probe);
+    for (const PendingRequest &request : waiting) {
+        /* image 非空 = 这是一条识别请求（见 PendingRequest 的说明） */
+        if (!request.image.isEmpty())
+            postVision(request.token, request.image, request.target, request.source,
+                       request.persona);
+        else
+            post(request.token, request.text, request.target, request.source, request.probe);
+    }
 }
 
 void LlmClient::failPending(const QString &reason) {

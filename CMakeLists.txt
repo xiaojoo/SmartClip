@@ -54,6 +54,16 @@ set(SMARTCLIP_SOURCES
     src/EditorViewItem.cpp
     src/Screenshot.h
     src/Screenshot.cpp
+    # 贴图窗口（"固定到桌面"那块图，见 src/PinWindow.h）：
+    # 它自己是个 Q_OBJECT 的窗口 + 一份 QML 界面，还有"标注的画法"那一份共用实现
+    # （截图合成也用）。单独成文件是因为 AUTOMOC 要求 Q_OBJECT 的类在自己的
+    # 文件里（放在 Screenshot.cpp 里会报 "does not include Screenshot.moc"）。
+    src/PinWindow.h
+    src/PinWindow.cpp
+    # 图上选字用的 OCR（Windows 自带那套，见 src/PinOcr.h）：
+    # 只碰 WinRT 的一个文件，别的源文件只 include 它的头
+    src/PinOcr.h
+    src/PinOcr.cpp
     src/NoteThumbs.h
     src/NoteThumbs.cpp
     src/NoteLinkModel.h
@@ -145,6 +155,8 @@ qt_add_qml_module(SmartClip
         qml/notes/NoteMenu.qml
         qml/translate/TranslateCard.qml
         qml/screenshot/CaptureOverlay.qml
+        qml/screenshot/PinOverlay.qml
+        qml/screenshot/RecognitionCard.qml
         qml/utils/IconProvider.qml
         qml/utils/AppIcon.qml
         qml/utils/ThinScrollBar.qml
@@ -178,12 +190,68 @@ qt_add_resources(SmartClip "app_icons"
         resources/icons/trash.svg
 )
 
+# ---------------------------------------------------------------------------
+# 图上选字那条路要调的小脚本（PP-OCR 那条）。
+#
+# 只放**模板**在 qrc 里，第一次用到时由 PinOcr::runnerScriptPath() 落到
+# %APPDATA%/SmartClip/SmartClip/ppocr_runner.py —— 落到磁盘上用户才能自己看、
+# 自己改（qrc 里那份是只读的）。
+# ---------------------------------------------------------------------------
+qt_add_resources(SmartClip "app_scripts"
+    PREFIX "/scripts"
+    BASE "resources/scripts"
+    FILES
+        resources/scripts/ppocr_runner.py
+)
+
 target_link_libraries(SmartClip PRIVATE
     Qt6::Core Qt6::Gui Qt6::Network Qt6::Qml Qt6::Quick Qt6::QuickControls2 Qt6::QuickWidgets
     Qt6::Sql Qt6::Widgets Qt6::PrintSupport
     qscintilla
     dwmapi
 )
+
+# ---------------------------------------------------------------------------
+# 图上选字（Windows 自带 OCR，见 src/PinOcr.h）
+#
+# 走 C++/WinRT：头在 Windows SDK 的 **cppwinrt** 目录下，而 MSVC 默认**不**把那个
+# 目录加进包含路径（um / shared / ucrt / winrt 才加）—— 所以这里自己找。
+#
+# 找不到（SDK 缺件 / 不是 Windows）就不定义 SMARTCLIP_HAS_WINOCR：PinOcr.cpp 里
+# 有一份"没有 OCR"的兜底实现，界面那边 ocrAvailable=false，选字这条路整个收起来，
+# 别的功能一点不受影响。
+#
+# windowsapp.lib 是 WinRT 激活要的（RoGetActivationFactory 在那儿）。
+# ---------------------------------------------------------------------------
+if (WIN32)
+    set(_smartclip_cppwinrt "")
+    if (DEFINED ENV{WindowsSdkDir} AND DEFINED ENV{WindowsSDKVersion})
+        # vcvars 会摆好这两个（Qt Creator 的 MSVC 套件也会）
+        set(_smartclip_cppwinrt "$ENV{WindowsSdkDir}Include/$ENV{WindowsSDKVersion}cppwinrt")
+    endif()
+    if (NOT EXISTS "${_smartclip_cppwinrt}/winrt/Windows.Media.Ocr.h")
+        # 退路：这台机器装了好几套 SDK 时，挑版本号最大的那套
+        file(GLOB _smartclip_sdk_dirs LIST_DIRECTORIES true
+             "C:/Program Files (x86)/Windows Kits/10/Include/*")
+        list(SORT _smartclip_sdk_dirs)
+        list(REVERSE _smartclip_sdk_dirs)
+        foreach(_dir IN LISTS _smartclip_sdk_dirs)
+            if (EXISTS "${_dir}/cppwinrt/winrt/Windows.Media.Ocr.h")
+                set(_smartclip_cppwinrt "${_dir}/cppwinrt")
+                break()
+            endif()
+        endforeach()
+    endif()
+
+    if (EXISTS "${_smartclip_cppwinrt}/winrt/Windows.Media.Ocr.h")
+        target_include_directories(SmartClip PRIVATE "${_smartclip_cppwinrt}")
+        target_compile_definitions(SmartClip PRIVATE SMARTCLIP_HAS_WINOCR=1)
+        target_link_libraries(SmartClip PRIVATE windowsapp)
+        message(STATUS "图上选字：用 Windows 自带 OCR（cppwinrt: ${_smartclip_cppwinrt}）")
+    else()
+        message(STATUS "图上选字：没找到 SDK 的 cppwinrt 头，OCR 这条路关掉（其余功能照旧）")
+    endif()
+endif()
 
 include(GNUInstallDirs)
 install(TARGETS SmartClip RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})

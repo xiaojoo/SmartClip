@@ -2,6 +2,7 @@
 #include "ClipboardStore.h"
 #include "EditorController.h"
 #include "EditorViewItem.h"
+#include "PinWindow.h"
 #include "Screenshot.h"
 #include "SelfTest.h"
 #include "StickyNotes.h"
@@ -313,6 +314,154 @@ int main(int argc, char *argv[]) {
      * 和便签同一个位置、同一个理由 —— 必须在这份单例注册之后。
      */
     cards.start();
+
+    /*
+     * 看一眼"贴图窗口"长什么样（`SMARTCLIP_PIN_DEMO=1`）。
+     *
+     * 为什么要有这个口子：贴图窗口只能在**截图那一刻**由用户按出来（框选 ->
+     * 固定到桌面），外面既点不到、也不好脚本化（要先按热键、再拖出一块选区）。
+     * 调样式 / 排版的时候每次都得手动走一遍，很费劲。
+     *
+     * 这里直接在桌面上贴一块：底图是抓屏抓来的（那块屏的左上角 640x360），
+     * 上面预先划一道荧光笔、加一条文字 —— 一眼就能看出工具条挤不挤、标注和
+     * 底图对不对得齐。正常启动一个字都不做。
+     */
+    if (qEnvironmentVariableIsSet("SMARTCLIP_PIN_DEMO")) {
+        if (QScreen *screen = QGuiApplication::primaryScreen()) {
+            /*
+             * 底图多大。默认 640x360；量工具条 / 提示条这类"跟着窗口宽走"的排版时
+             * 得先有一张**宽图**（贴图宽到一千多时工具条会不会撑满、键会不会挤在
+             * 中间一小段里，只有这个尺寸看得出来）：SMARTCLIP_PIN_DEMO_SIZE=1178x400
+             */
+            QSize grabSize(640, 360);
+            const QStringList sizeSpec = qEnvironmentVariable("SMARTCLIP_PIN_DEMO_SIZE")
+                                             .split(QLatin1Char('x'), Qt::SkipEmptyParts);
+            if (sizeSpec.size() == 2 && sizeSpec.at(0).toInt() > 0
+                && sizeSpec.at(1).toInt() > 0)
+                grabSize = QSize(sizeSpec.at(0).toInt(), sizeSpec.at(1).toInt());
+            const QPixmap grabbed = screen->grabWindow(0, 0, 0, grabSize.width(),
+                                                       grabSize.height());
+            if (!grabbed.isNull()) {
+                auto *pin = new PinWindow(grabbed.toImage(),
+                                          screen->geometry().topLeft() + QPoint(200, 200),
+                                          quick->engine(), &screenshot);
+                if (QQuickItem *pinRoot = pin->qmlRoot()) {
+                    QVariant result;
+                    QMetaObject::invokeMethod(
+                        pinRoot, "testDraw", Q_RETURN_ARG(QVariant, result),
+                        Q_ARG(QVariant, QVariant(QStringLiteral("highlight"))),
+                        Q_ARG(QVariant, QVariant(60.0)), Q_ARG(QVariant, QVariant(90.0)),
+                        Q_ARG(QVariant, QVariant(320.0)), Q_ARG(QVariant, QVariant(102.0)));
+                    QMetaObject::invokeMethod(
+                        pinRoot, "testAddText", Q_RETURN_ARG(QVariant, result),
+                        Q_ARG(QVariant, QVariant(60.0)), Q_ARG(QVariant, QVariant(150.0)),
+                        Q_ARG(QVariant, QVariant(QStringLiteral("贴图上的字可以直接改"))));
+                    QMetaObject::invokeMethod(
+                        pinRoot, "testDraw", Q_RETURN_ARG(QVariant, result),
+                        Q_ARG(QVariant, QVariant(QStringLiteral("wavy"))),
+                        Q_ARG(QVariant, QVariant(60.0)), Q_ARG(QVariant, QVariant(190.0)),
+                        Q_ARG(QVariant, QVariant(300.0)), Q_ARG(QVariant, QVariant(190.0)));
+                }
+                pin->show();
+                /*
+                 * `SMARTCLIP_PIN_DEMO=save`：把窗口和成品图各存一张到 build 下。
+                 * 调样式的时候不想去截图（桌面上一堆窗口挡着，截出来的东西全靠
+                 * 运气），存文件最省事 —— 看一眼就知道排版和标注对不对。
+                 */
+                if (qEnvironmentVariable("SMARTCLIP_PIN_DEMO") == QLatin1String("save")) {
+                    QTimer::singleShot(900, &app, [pin]() {
+                        pin->grab().save(QStringLiteral("pin-demo-window.png"));
+                        pin->composedImage().save(QStringLiteral("pin-demo-composed.png"));
+                        qWarning("PIN-DEMO pos=%d,%d size=%dx%d", pin->pos().x(), pin->pos().y(),
+                                 pin->width(), pin->height());
+                    });
+                    /*
+                     * 过一会儿再报一次位置：外面可以在这个空档里用**真鼠标**拖一下，
+                     * 然后比这两个数 —— "拖动到底动不动"只有真鼠标能验（进程内调
+                     * 那几个函数只能验到"我们自己搬得动"）。
+                     */
+                    QTimer::singleShot(12000, &app, [pin]() {
+                        qWarning("PIN-DEMO after=%d,%d", pin->pos().x(), pin->pos().y());
+                    });
+                    /*
+                     * 图上选字：等认字认完（贴上去就自动认一次），把**第一行**选上
+                     * 再存一张 —— 看一眼"选中的高亮"和底图上的字对不对得齐。
+                     * 对齐这件事自检量不了（自检摆的是假的行），只能眼睛看。
+                     *
+                     * 不固定等一个时间：认字那条路可能是 PP-OCR（小档两三秒、
+                     * medium 十几秒，首次还要下模型），固定几秒经常扑空。这里每
+                     * 500ms 看一眼认出来没有，好了就动手（最多等 40 秒）。
+                     */
+                    auto *ocrPoll = new QTimer(&app);
+                    ocrPoll->setProperty("n", 0);
+                    ocrPoll->setInterval(500);
+                    QObject::connect(ocrPoll, &QTimer::timeout, &app,
+                                     [pin, ocrPoll, &app]() {
+                        const int n = ocrPoll->property("n").toInt() + 1;
+                        ocrPoll->setProperty("n", n);
+                        if (pin->ocrLines().isEmpty() && n < 60)
+                            return;
+                        ocrPoll->stop();
+                        QQuickItem *pinRoot = pin->qmlRoot();
+                        const QVariantList lines = pin->ocrLines();
+                        if (!pinRoot || lines.isEmpty()) {
+                            qWarning("PIN-DEMO ocr: 没认出字（lines=%d / %s）", int(lines.size()),
+                                     qPrintable(pin->ocrMessage()));
+                            return;
+                        }
+                        const QVariantMap line = lines.first().toMap();
+                        const double w = double(pin->width());
+                        const double h = double(pin->height());
+                        const double y =
+                            (line.value(QStringLiteral("y")).toDouble()
+                             + line.value(QStringLiteral("h")).toDouble() * 0.5) * h;
+                        const double x0 = (line.value(QStringLiteral("x")).toDouble() + 0.005) * w;
+                        const double x1 =
+                            (line.value(QStringLiteral("x")).toDouble()
+                             + line.value(QStringLiteral("w")).toDouble() * 0.7) * w;
+                        QVariant picked;
+                        QMetaObject::invokeMethod(pinRoot, "testOcrDrag",
+                                                  Q_RETURN_ARG(QVariant, picked),
+                                                  Q_ARG(QVariant, QVariant(x0)),
+                                                  Q_ARG(QVariant, QVariant(y)),
+                                                  Q_ARG(QVariant, QVariant(x1)),
+                                                  Q_ARG(QVariant, QVariant(y)));
+                        qWarning("PIN-DEMO ocr: %d 行，选中「%s」", int(lines.size()),
+                                 qPrintable(picked.toString()));
+                        /*
+                         * 存图隔一拍再抓：让场景图那一帧更新完（矩形高亮是属性驱动的，
+                         * 理论上同步就有，隔一拍不亏）。
+                         */
+                        QTimer::singleShot(400, &app, [pin]() {
+                            pin->grab().save(QStringLiteral("pin-demo-ocr.png"));
+                        });
+                        /*
+                         * 再用"划词即标注"贴一道荧光笔上去（选中还在，点一下工具按钮
+                         * 就贴上），存一张 —— 色带是不是正好盖住那一行、左右到不到
+                         * 选中的两端，这个只能眼睛看（自检摆的是假的行）。
+                         */
+                        QTimer::singleShot(600, &app, [pin, pinRoot, &app]() {
+                            QMetaObject::invokeMethod(
+                                pinRoot, "pickTool",
+                                Q_ARG(QVariant, QVariant(QStringLiteral("highlight"))));
+                            QTimer::singleShot(250, &app, [pin]() {
+                                pin->grab().save(QStringLiteral("pin-demo-ocr-hl.png"));
+                            });
+                        });
+                        /* 再把「认字」菜单叫出来存一张：两个引擎的选项长什么样 */
+                        QTimer::singleShot(1200, &app, [pin, pinRoot, &app]() {
+                            QMetaObject::invokeMethod(pinRoot, "testOcrMenu",
+                                                      Q_ARG(QVariant, QVariant(true)));
+                            QTimer::singleShot(250, &app, [pin]() {
+                                pin->grab().save(QStringLiteral("pin-demo-ocr-menu.png"));
+                            });
+                        });
+                    });
+                    ocrPoll->start();
+                }
+            }
+        }
+    }
 
     /*
      * 看一眼"一摞便签 + 左边标签条"长什么样（`SMARTCLIP_NOTES_DEMO=1`）。

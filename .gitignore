@@ -6,3 +6,5 @@ build_verify/
 /.idea
 /build_mod
 /cmake-build-debug
+# Python 虚拟环境（图上选字那条路用的 rapidocr 装在这儿，不进仓库）
+/venv/

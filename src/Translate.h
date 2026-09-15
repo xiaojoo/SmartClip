@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QJsonObject>
 #include <QObject>
 #include <QPointer>
 #include <QRect>
@@ -17,12 +18,16 @@ class TranslateCards;
 /*
  * LLM 客户端（QML 单例 Llm，见 src/main.cpp 的 qmlRegisterSingletonInstance）。
  *
- * 两件事：
+ * 三件事：
  *   1) **配置**：接口地址 / 密钥 / 模型名（api 模式），或者本地服务程序 +
  *      模型文件 + 端口（local 模式）。都落在 QSettings 的 translate/ 下，
  *      改一下立刻落盘，设置面板直接绑属性。
  *   2) **翻译**：translate() 发一次 OpenAI 兼容的 chat/completions 请求，
  *      结果通过 finished(token, 文字) / failed(token, 原因) 回来。
+ *   3) **识别**：recognize() 把**一张图**（截图框选出来的那一块，PNG 的
+ *      data URL）发给视觉模型，让它把图上的字读出来 —— 要译文就再加上
+ *      "翻译成 X"这条指令，一次请求回来既是识别也是翻译。识别用的模型名
+ *      单独一项（ocrModel），因为能看图的模型和纯文本模型通常不是同一个。
  *
  * 为什么走 HTTP 而不是内嵌一个推理库：
  *   现在主流的模型服务（OpenAI / DeepSeek / 通义 / Ollama / LM Studio /
@@ -49,6 +54,17 @@ class LlmClient final : public QObject {
     Q_PROPERTY(QString apiBase READ apiBase WRITE setApiBase NOTIFY settingsChanged)
     Q_PROPERTY(QString apiKey READ apiKey WRITE setApiKey NOTIFY settingsChanged)
     Q_PROPERTY(QString model READ model WRITE setModel NOTIFY settingsChanged)
+    /*
+     * 识别（看图）用的模型名。
+     *
+     * 为什么单独一项而不是共用上面那个 model：截图识别要**能看图的模型**
+     * （gpt-4o / qwen-vl-max / glm-4v / gemini-flash 这类），而用户平时配的
+     * 翻译模型多半是纯文本的（deepseek-chat）。共用一个的话，要么翻译用不上便宜的
+     * 文本模型，要么识别永远报"这个模型不支持图片"。
+     *
+     * 留空就用 model —— 只配了一个视觉模型的用户（本地 Qwen2-VL 那种）不用填两遍。
+     */
+    Q_PROPERTY(QString ocrModel READ ocrModel WRITE setOcrModel NOTIFY settingsChanged)
 
     /* 本地模式：OpenAI 兼容的推理服务程序（如 llama-server.exe）+ 模型文件 */
     Q_PROPERTY(QString localExe READ localExe WRITE setLocalExe NOTIFY settingsChanged)
@@ -68,6 +84,22 @@ class LlmClient final : public QObject {
 
     /* 新建卡片时的默认目标语言（语言名见 languages()） */
     Q_PROPERTY(QString defaultTarget READ defaultTarget WRITE setDefaultTarget
+                   NOTIFY settingsChanged)
+
+    /*
+     * ---- 贴图"图上选字"用哪个引擎（两个选项，见 PinOverlay 的「认字」菜单） ----
+     *
+     *   "windows" 本机 Windows 自带 OCR（离线、不用配）
+     *   "ppocr"   跑本机那个 PP-OCR 程序（RapidOCR / PaddleOCR，见 pinOcrRunner）
+     *
+     * 为什么这两个设置挂在这儿：它们和"识别"是一家人（上面就有 ocrModel），
+     * 设置面板那一节也在一起；而且界面（PinOverlay / 设置面板）手里只有这几个
+     * 单例，挂在别处还得再开一个单例。
+     */
+    Q_PROPERTY(QString pinOcrEngine READ pinOcrEngine WRITE setPinOcrEngine
+                   NOTIFY settingsChanged)
+    /* PP-OCR 那条路要跑的命令行（默认 python + 随包脚本，见 PinOcr::defaultRunnerCommand） */
+    Q_PROPERTY(QString pinOcrRunner READ pinOcrRunner WRITE setPinOcrRunner
                    NOTIFY settingsChanged)
 
     /* 本地服务进程在不在（设置面板那个按钮的文案跟着它变） */
@@ -103,6 +135,11 @@ public:
     QString model() const;
     void setModel(const QString &value);
 
+    QString ocrModel() const;
+    void setOcrModel(const QString &value);
+    /* 真去发识别请求时用的模型名：ocrModel 留空就退回 model */
+    QString visionModel() const;
+
     QString localExe() const;
     void setLocalExe(const QString &value);
 
@@ -134,12 +171,42 @@ public:
     QStringList targetLanguages() const;
 
     /*
+     * "识别 + 翻译"那条路的回复里，取回原文那一段（见 .cpp 里 kOcrSeparator 的说明）。
+     *
+     * 为什么要专门有它：那个"原文 ---- 译文"的格式是给**模型**下的规矩，它不一定
+     * 老老实实照做（有时回一句"图上写着：…"，或者干脆只给译文）。界面上宁可
+     * 显示一点东西也不要空着，所以：能按分隔行拆开就取前半段，拆不开就把整段
+     * 当原文（译文那栏空着，用户还能自己点"翻译"再来一遍）。
+     */
+    Q_INVOKABLE QString ocrOriginal(const QString &result) const;
+
+    /*
      * 翻译一条。返回这次请求的 token（界面记下来，和回调里的 token 对上才认）。
      * text 空 / 没配置模型 / 已经在忙，都会异步地回一个 failed(token, 原因)，
      * 不会阻塞调用方。
      */
     Q_INVOKABLE QString translate(const QString &text, const QString &target,
                                   const QString &source = QString());
+
+    /*
+     * 识别图上的字（截图框选出来的那一块）。
+     *
+     * imageDataUrl 是 png 的 data URL（"data:image/png;base64,…"，见
+     * Screenshot::selectionImage）。target 为空 = 只要原文；填了（"中文（简体）"
+     * 这种名字）= 一边认一边翻，回来的就是译文 —— 两步并一步，比"先识别再
+     * 拿文字翻一遍"少一次往返，模型看着图翻也比看着 OCR 结果翻准。
+     *
+     * 和 translate 一样返回这次请求的 token，结果从 finished / failed 回来。
+     * 图上没字（或者模型什么都没认出来）也会回一个 failed，界面上才有人话可说。
+     */
+    Q_INVOKABLE QString recognize(const QString &imageDataUrl, const QString &target = QString(),
+                                  const QString &source = QString());
+
+    /* 选字引擎 / PP-OCR 命令（见上面那两个 Q_PROPERTY 的说明） */
+    QString pinOcrEngine() const;
+    void setPinOcrEngine(const QString &value);
+    QString pinOcrRunner() const;
+    void setPinOcrRunner(const QString &value);
 
     /*
      * 试一下配置对不对：发一句最短的翻译，结果只更新 status。
@@ -178,6 +245,21 @@ private:
     /* 真正发请求；probe 为真时不发 finished，只更新 status */
     void post(const QString &token, const QString &text, const QString &target,
               const QString &source, bool probe);
+    /*
+     * 发一条**带图**的请求（识别那条路）。
+     *
+     * persona 挑的是这次要模型干哪一件事："ocr" = 只把图上的字读出来，
+     * "ocr-translate" = 读出来再翻一遍（要翻译时回来的是"原文 / 分隔行 / 译文"
+     * 两段，见 .cpp 里的 kOcrSeparator）。两套提示词和 post() 里那套翻译提示词
+     * 分开写 —— 识别要的是"只输出读到的文字"，和翻译的规矩不是一套。
+     */
+    void postVision(const QString &token, const QString &imageDataUrl, const QString &target,
+                    const QString &source, const QString &persona);
+    /*
+     * 最后那一步：把拼好的 body 发出去、认回复。翻译和识别共用（见 .cpp 里的说明）。
+     * busyStatus 是这期间状态栏上那句话（"翻译中…" / "正在识别…"）。
+     */
+    void send(const QString &token, const QString &busyStatus, const QJsonObject &body, bool probe);
 
     /*
      * 等本地模型启动的那些请求（一般只有一条）。
@@ -192,6 +274,12 @@ private:
         QString target;
         QString source;
         bool probe = false;
+        /*
+         * 识别那几条请求也要能在本地模型加载期间排队（见上面那段），
+         * 所以这里带上图：image 非空 = 这是一条识别请求，persona 是它的角色词。
+         */
+        QString image;
+        QString persona;
     };
     /* 模型就绪了：把排在最前面的那条发出去 */
     void flushPending();
@@ -215,11 +303,15 @@ private:
     QString m_apiBase;
     QString m_apiKey;
     QString m_model;
+    QString m_ocrModel;
     QString m_localExe;
     QString m_localModel;
     QString m_localMmproj;
     int m_localPort = 8080;
     QString m_defaultTarget;
+    /* 贴图"图上选字"：用哪个引擎 + PP-OCR 那条命令（见上面那两个 Q_PROPERTY） */
+    QString m_pinOcrEngine;
+    QString m_pinOcrRunner;
 
     /* 等本地模型启动的那几条请求（见 PendingRequest） */
     QList<PendingRequest> m_pending;

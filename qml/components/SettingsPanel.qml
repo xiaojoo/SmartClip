@@ -1106,7 +1106,16 @@ Popup {
                                          { k: "apiKey",  label: "密钥",
                                            hint: "sk-…（Ollama 这类本地服务可以留空）" },
                                          { k: "model",   label: "模型名",
-                                           hint: "deepseek-chat / gpt-4o-mini / qwen-plus …" } ]
+                                           hint: "deepseek-chat / gpt-4o-mini / qwen-plus …" },
+                                         /*
+                                          * 截图识别要**能看图**的模型（多模态）。
+                                          * 和上面那个翻译模型分开填：翻译用便宜的
+                                          * 文本模型、识别用视觉模型，是常见配法；
+                                          * 只配了一个视觉模型的话这项留空就行
+                                          * （留空 = 用上面那个模型名）。
+                                          */
+                                         { k: "ocrModel", label: "识别模型",
+                                           hint: "留空 = 用上面那个；要能看图的，如 qwen-vl-max / glm-4v / gpt-4o" } ]
 
                                 delegate: Row {
                                     id: apiRow
@@ -1158,6 +1167,17 @@ Popup {
                                 font.pixelSize: 11
                                 text: "已经在跑 Ollama / LM Studio 的话，选这种模式、地址填 "
                                       + "http://127.0.0.1:11434/v1（Ollama）或它给的地址就行，不用下面那套。"
+                            }
+
+                            Text {
+                                width: parent.width
+                                wrapMode: Text.WordWrap
+                                color: root.mutedColor
+                                font.pixelSize: 11
+                                text: "截图的时候还能认字：框好区域点工具条上的「识别」，"
+                                      + "图会交给这里的视觉模型（识别模型，留空就用上面那个模型名），"
+                                      + "结果摆在选区旁边那张卡片上，可以复制、也可以直接贴到截图上。"
+                                      + "要翻译的话选一下目标语言 —— 认和翻在同一次请求里做完。"
                             }
                         }
 
@@ -1475,6 +1495,111 @@ Popup {
                                                                         : root.mutedColor
                                 font.pixelSize: 11
                                 elide: Text.ElideRight
+                            }
+                        }
+
+                        /* ---- 图上选字：贴图上用鼠标选字时，用哪个引擎 ---- */
+                        Column {
+                            width: parent.width
+                            spacing: 6
+
+                            Text {
+                                text: "图上选字（贴图上按住拖，把图里的字选出来）"
+                                color: root.textColor
+                                font.pixelSize: 12
+                            }
+
+                            Row {
+                                spacing: 6
+
+                                Repeater {
+                                    model: [ { k: "windows", label: "Windows 自带" },
+                                             { k: "ppocr",   label: "PP-OCRv6" } ]
+
+                                    delegate: Rectangle {
+                                        id: engCell
+                                        required property var modelData
+                                        readonly property bool active: Llm.pinOcrEngine === engCell.modelData.k
+
+                                        width: 96
+                                        height: 24
+                                        radius: 4
+                                        color: engCell.active ? "#2f3a44"
+                                                              : (engHit.containsMouse ? root.rowHover
+                                                                                      : "transparent")
+                                        border.width: 1
+                                        border.color: engCell.active ? root.accentColor : root.borderColor
+
+                                        Text {
+                                            anchors.centerIn: parent
+                                            text: engCell.modelData.label
+                                            color: engCell.active ? root.accentColor : root.textColor
+                                            font.pixelSize: 11
+                                        }
+                                        MouseArea {
+                                            id: engHit
+                                            anchors.fill: parent
+                                            hoverEnabled: true
+                                            cursorShape: Qt.PointingHandCursor
+                                            onClicked: Llm.pinOcrEngine = engCell.modelData.k
+                                        }
+                                    }
+                                }
+                            }
+
+                            Text {
+                                width: parent.width
+                                wrapMode: Text.WordWrap
+                                color: root.mutedColor
+                                font.pixelSize: 11
+                                text: "Windows 自带：离线、不用配（默认）。PP-OCRv6：跑下面这条本机命令，"
+                                      + "框更准，但要先装好。"
+                            }
+
+                            Row {
+                                spacing: 8
+
+                                Text {
+                                    width: 62
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    text: "OCR 程序"
+                                    color: root.mutedColor
+                                    font.pixelSize: 12
+                                }
+                                TextField {
+                                    id: ocrRunnerField
+                                    width: 420
+                                    height: 26
+                                    text: Llm.pinOcrRunner
+                                    placeholderText: "python \"…\\ppocr_runner.py\""
+                                    color: root.textColor
+                                    placeholderTextColor: root.mutedColor
+                                    font.pixelSize: 12
+                                    selectByMouse: true
+                                    leftPadding: 7
+                                    rightPadding: 7
+                                    onEditingFinished: Llm.pinOcrRunner = text
+                                    onTextChanged: if (!activeFocus) cursorPosition = 0
+                                    background: Rectangle {
+                                        color: "#26282b"
+                                        border.color: root.borderColor
+                                        border.width: 1
+                                        radius: 4
+                                    }
+                                }
+                            }
+
+                            Text {
+                                width: parent.width
+                                wrapMode: Text.WordWrap
+                                color: root.mutedColor
+                                font.pixelSize: 11
+                                text: "PP-OCR 那条路要装：pip install rapidocr onnxruntime（RapidOCR 3.9 "
+                                      + "起内置 PP-OCRv6，模型第一次跑会自动下）。随包那个脚本第一次用到时会"
+                                      + "落到 %APPDATA%/SmartClip/SmartClip/ppocr_runner.py，可以自己改。"
+                                      + "选档：命令后面再接一个词 —— tiny / small / medium（默认 small，"
+                                      + "medium 最准也最慢）；想指到自己下的 ONNX 文件，就把一份 params JSON "
+                                      + "的路径接在后面当第三个参数。"
                             }
                         }
                     }
