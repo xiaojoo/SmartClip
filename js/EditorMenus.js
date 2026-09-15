@@ -639,7 +639,16 @@ function scrollBarMenu(horizontal) {
 
 /* 菜单栏 tab */
 function tabLabels() {
-    return ["文件", "编辑", "搜索", "视图", "语言", "编码", "换行", "设置", "帮助"]
+    /*
+     * 顶部只留这几栏。"语言 / 编码 / 换行"**不再单独占一格** —— 它们本来就是
+     * 编辑器里"改当前文档属性"那类动作，现在只从「视图」菜单里那三条子菜单进
+     * （见 viewMenu() 里带 submenu: true 的那三项）。
+     *
+     * 注意 menuItems() 里那三个分支**要留着**：DropdownMenu 展开子菜单时是按
+     * items 现算的，而自检的 dispatch("menu:语言") / openSubmenuFor("menu:语言")
+     * 也直接走 menuItems()，都不经过 hasMenu()。
+     */
+    return ["文件", "编辑", "搜索", "视图", "设置", "帮助"]
 }
 
 function hasMenu(label) {

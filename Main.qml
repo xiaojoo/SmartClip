@@ -2071,17 +2071,23 @@ Rectangle {
                                 }
                             }
 
-                            /* 接上动作的那几格给提示 */
+                            /*
+                             * 接上动作的那几格给提示。
+                             *
+                             * 气泡里**只留名字**：不写快捷键，也不加"右键排列"这种
+                             * 补充说明 —— 图标条这排是"一眼认工具"的地方，字越少越好。
+                             * 快捷键在菜单里和设置面板里都写着；便签的右键菜单
+                             * 自己会弹，不需要气泡先教一遍。
+                             */
                             AppToolTip {
                                 hovered: navHit.containsMouse && navCell.acts
                                 text: modelData.k === "folder"
                                       ? (window.folderTreeHidden ? "显示项目树" : "收起项目树")
                                       : (modelData.k === "screenshot"
-                                         ? "截图（" + window.shortcutLabel("shot", "Ctrl+Alt+A") + "）"
+                                         ? "截图"
                                          : (modelData.k === "translate"
-                                            ? "翻译卡片（" + window.shortcutLabel("translate", "Ctrl+Alt+T") + "）"
-                                            : "新建便签（" + window.shortcutLabel("note", "Ctrl+Alt+N")
-                                              + "）· 右键排列"))
+                                            ? "翻译"
+                                            : "便签"))
                                 /* 贴着窗口左沿放：默认的"居中在格子上"会往左出界 */
                                 x: 2
                                 y: -implicitHeight - 3
