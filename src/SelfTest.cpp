@@ -1307,8 +1307,57 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
               QStringLiteral("同一段文本不会写第二遍（按内容去重）"));
 
         const QString dateKey = QDate::currentDate().toString(QStringLiteral("yyyy-MM-dd"));
-        const QDir day(store->rootPath() + QLatin1Char('/') + dateKey);
-        check(day.exists(), QStringLiteral("日期目录按 2026-09-13 这种名字建"), day.path());
+
+        /*
+         * ---- 旧布局的清理：只删"看着像我们自己建的日期目录" ----
+         *
+         * 加「剪贴板」那一层之前，日期目录直接摆在根目录下。用户说历史数据不要了，
+         * 所以 open() 里会清掉那些孤儿目录（见 pruneLegacyLayout）。
+         *
+         * 关键是**不能横扫**：保存根目录可能是用户自己挑的（甚至指向网盘某个夹），
+         * 里面放着他别的东西。判据只看目录名严格是 yyyy-MM-dd —— 这里特意在根
+         * 目录下摆一个 `我的东西` 和一个 `2026-1-1`（不是零填充的合法日期），
+         * 清完之后它们必须还在。
+         */
+        {
+            const QString legacyDay = store->rootPath() + QStringLiteral("/1999-01-02");
+            const QString mineFolder = store->rootPath() + QStringLiteral("/我的东西");
+            const QString notADate = store->rootPath() + QStringLiteral("/2026-1-1");
+            QDir().mkpath(legacyDay);
+            QDir().mkpath(mineFolder);
+            QDir().mkpath(notADate);
+            QFile legacyFile(legacyDay + QStringLiteral("/旧的.md"));
+            if (legacyFile.open(QIODevice::WriteOnly))
+                legacyFile.write("旧布局的内容");
+            legacyFile.close();
+
+            check(store->setRootPath(store->rootPath()),
+                  QStringLiteral("重新指一次同一个根目录（触发一次 open/清理）"));
+
+            check(!QDir(legacyDay).exists(),
+                  QStringLiteral("旧布局的日期目录被清掉了"), legacyDay);
+            check(QDir(mineFolder).exists(),
+                  QStringLiteral("用户自己的文件夹**不动**（名字不是日期的都不碰）"),
+                  mineFolder);
+            check(QDir(notADate).exists(),
+                  QStringLiteral("名字长得像日期但不严格的不动（2026-1-1）"), notADate);
+            /* 清完把这两块自检造的东西收掉，别留在临时目录里影响后面的检查 */
+            QDir(mineFolder).removeRecursively();
+            QDir(notADate).removeRecursively();
+        }
+        /*
+         * 日期目录在 **<root>/剪贴板/** 下面 —— 根目录是用户选的保存位置，里面
+         * 只放「剪贴板」这一个子目录（用户要的"剪贴板 → 日期 → 文件"三层）。
+         * 这里不写死 "剪贴板" 三个字，走 store->contentRoot()：换个名字只改一处。
+         */
+        const QDir content(store->contentRoot());
+        check(content.exists(), QStringLiteral("根目录下建出了「剪贴板」那一层"),
+              content.path());
+        const QDir day(content.absoluteFilePath(dateKey));
+        check(day.exists(), QStringLiteral("日期目录按 2026-09-13 这种名字建在剪贴板下面"),
+              day.path());
+        check(!QDir(store->rootPath() + QLatin1Char('/') + dateKey).exists(),
+              QStringLiteral("日期目录**不再**直接摆在根目录下（旧布局已经不用了）"));
 
         /*
          * 在目录里**按内容**找文件。
@@ -1385,15 +1434,40 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
         const QVariantList clipTree = store->tree(QString(), true);
         check(!clipTree.isEmpty(), QStringLiteral("左树数据能从元数据建出来"));
         if (!clipTree.isEmpty()) {
-            const QVariantMap top = clipTree.first().toMap();
-            check(top.value(QStringLiteral("kind")).toString() == QLatin1String("date"),
-                  QStringLiteral("树的第一层是日期文件夹"));
-            check(top.value(QStringLiteral("label")).toString() == dateKey,
-                  QStringLiteral("日期文件夹的名字就是这一天"),
-                  top.value(QStringLiteral("label")).toString());
-            check(top.value(QStringLiteral("files")).toInt() >= 3,
-                  QStringLiteral("日期文件夹下面挂着那几份 md"),
-                  QStringLiteral("%1 份").arg(top.value(QStringLiteral("files")).toInt()));
+            /*
+             * 树顶是「剪贴板」，它下面才是日期文件夹：
+             *
+             *     剪贴板
+             *       2026-09-16
+             *         011647.md
+             *
+             * 用户要的层次（和磁盘布局一致，见 ClipboardStore::contentRoot）。
+             */
+            const QVariantMap clipRoot = clipTree.first().toMap();
+            check(clipRoot.value(QStringLiteral("label")).toString() == QStringLiteral("剪贴板"),
+                  QStringLiteral("树顶第一层是「剪贴板」"),
+                  clipRoot.value(QStringLiteral("label")).toString());
+            check(clipRoot.value(QStringLiteral("kind")).toString() == QLatin1String("folder"),
+                  QStringLiteral("「剪贴板」是普通文件夹（不是日期那一支）"),
+                  clipRoot.value(QStringLiteral("kind")).toString());
+
+            const QVariantList days = clipRoot.value(QStringLiteral("children")).toList();
+            check(!days.isEmpty(), QStringLiteral("「剪贴板」下面有日期文件夹"));
+            if (!days.isEmpty()) {
+                const QVariantMap day = days.first().toMap();
+                check(day.value(QStringLiteral("kind")).toString() == QLatin1String("date"),
+                      QStringLiteral("日期文件夹在「剪贴板」下面（第二层）"),
+                      day.value(QStringLiteral("kind")).toString());
+                check(day.value(QStringLiteral("label")).toString() == dateKey,
+                      QStringLiteral("日期文件夹的名字就是这一天"),
+                      day.value(QStringLiteral("label")).toString());
+                check(day.value(QStringLiteral("files")).toInt() >= 3,
+                      QStringLiteral("日期文件夹下面挂着那几份 md"),
+                      QStringLiteral("%1 份").arg(day.value(QStringLiteral("files")).toInt()));
+                check(day.value(QStringLiteral("depth")).toInt() == 1,
+                      QStringLiteral("日期文件夹的层级是 1（剪贴板下面）"),
+                      QStringLiteral("depth=%1").arg(day.value(QStringLiteral("depth")).toInt()));
+            }
         }
 
         /* 搜索：按条目摘要找得到（库里存的是摘要，不是正文） */
@@ -2332,6 +2406,17 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
             check(panel.value(QStringLiteral("storageRoot")).toString() == store->rootPath(),
                   QStringLiteral("\"存储\"栏显示的就是当前保存位置"),
                   panel.value(QStringLiteral("storageRoot")).toString());
+            /*
+             * 内容目录 = 保存位置下面的「剪贴板」那一层。
+             *
+             * 界面上单独列了这一行（不然用户只知道"保存位置"，找不到文件到底在哪），
+             * 这里钉住它确实是 rootPath 的子目录、而且真的存在。
+             */
+            check(panel.value(QStringLiteral("storageContentRoot")).toString()
+                      == store->contentRoot()
+                      && store->contentRoot().startsWith(store->rootPath()),
+                  QStringLiteral("\"存储\"栏显示的内容目录在保存位置下面"),
+                  panel.value(QStringLiteral("storageContentRoot")).toString());
             check(panel.value(QStringLiteral("storageEntries")).toInt() == store->entryCount(),
                   QStringLiteral("\"存储\"栏的内容条数和元数据一致"),
                   QStringLiteral("面板 %1 / 元数据 %2")
@@ -2340,6 +2425,63 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
         }
         QMetaObject::invokeMethod(qmlRoot, "closeSettings");
         settle();
+
+        /*
+         * 「帮助」那一栏：**点一下直接开"关于 SmartClip"**，不弹下拉菜单。
+         *
+         * 走 Main.qml 的 activateMenuTab（它转给 TopBar::activateTab）—— 和鼠标点
+         * 那一栏是**同一个函数**。用户要的就是这一条：原来它弹两项（快捷键一览 /
+         * 关于 SmartClip），现在一步到位，快捷键一览在设置面板里本来就有。
+         */
+        {
+            QMetaObject::invokeMethod(qmlRoot, "activateMenuTab",
+                                      Q_ARG(QVariant, QVariant(QStringLiteral("帮助"))));
+            settle();
+            const QVariantMap panel = uiState();
+            check(panel.value(QStringLiteral("settingsOpened")).toBool()
+                      && panel.value(QStringLiteral("settingsSection")).toString()
+                             == QLatin1String("about"),
+                  QStringLiteral("点「帮助」直接开\"关于 SmartClip\"（不弹菜单）"),
+                  QStringLiteral("打开=%1 栏目=%2")
+                      .arg(panel.value(QStringLiteral("settingsOpened")).toBool())
+                      .arg(panel.value(QStringLiteral("settingsSection")).toString()));
+            /* 菜单不该跟着弹出来 */
+            check(!uiState().value(QStringLiteral("menuOpened")).toBool(),
+                  QStringLiteral("点「帮助」不会弹出下拉菜单"));
+            QMetaObject::invokeMethod(qmlRoot, "closeSettings");
+            settle();
+        }
+
+        /*
+         * 菜单挂在**被点的那一栏下方**，不是窗口最左边。
+         *
+         * 这里真出过问题：TopBar::activateTab 的锚点写死成 appBadge（左边那个应用
+         * 图标），于是点「设置」菜单从最左边弹出来，整条偏移到应用图标底下去了
+         * （用户报的"全部偏移菜单了"）。
+         *
+         * 判据：菜单实际画在窗口里的左上角 x，要落在「设置」那一栏的宽度范围内 ——
+         * 菜单是独立原生窗口，锚点对不对只有把两边的坐标都拿出来比才知道。
+         */
+        {
+            QVariant tabLeft;
+            QMetaObject::invokeMethod(qmlRoot, "topBarTabLeft", Q_RETURN_ARG(QVariant, tabLeft),
+                                      Q_ARG(QVariant, QVariant(QStringLiteral("设置"))));
+            QMetaObject::invokeMethod(qmlRoot, "clickMenuTab",
+                                      Q_ARG(QVariant, QVariant(QStringLiteral("设置"))));
+            settle();
+            const QVariantMap ui = uiState();
+            const double menuLeft = ui.value(QStringLiteral("menuX")).toDouble();
+            const double barLeft = tabLeft.toDouble();
+            const double barWidth = ui.value(QStringLiteral("menuAnchorWidth")).toDouble();
+            check(ui.value(QStringLiteral("menuOpened")).toBool(),
+                  QStringLiteral("点「设置」打开了下拉菜单"));
+            check(barLeft >= 0 && menuLeft >= barLeft && menuLeft <= barLeft + barWidth + 1,
+                  QStringLiteral("菜单挂在被点的那一栏下方（不是窗口最左边）"),
+                  QStringLiteral("菜单 x=%1，「设置」那一栏 %2..%3")
+                      .arg(menuLeft).arg(barLeft).arg(barLeft + barWidth));
+            dispatch(QStringLiteral("menu:设置"));   /* 再点一下同一条 = 收起来 */
+            settle();
+        }
 
         /*
          * 设置面板这块窗口本身的两条要求。
@@ -2643,8 +2785,25 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
         const QVariantMap ui = uiState();
         check(ui.value(QStringLiteral("menuOpened")).toBool(),
               QStringLiteral("dispatch(menu:视图) 打开\"视图\"菜单"));
-        check(!ui.value(QStringLiteral("submenuOpened")).toBool(),
-              QStringLiteral("刚打开时右边还没有子菜单那一栏"));
+    }
+
+    /*
+     * 子菜单那一栏"刚打开时是空的"—— 用"再 openFor 一次，它要归零"来验。
+     *
+     * 原来直接读一句 `!submenuOpened` 就完事，但那个会**偶发飘红**：自检跑的时候
+     * 真实鼠标指针可能恰好压在菜单上（"视图"里带子菜单的那几条），hover 一触就
+     * 把右边那块展开了。那和"openFor 复位了没有"是两件事。
+     *
+     * 重新 openFor 一次之后再读就稳定了：openFor 的头几行就是
+     * `subEntries = []`，不管之前有没有被子菜单占着，这一下必须归零。
+     */
+    dispatch(QStringLiteral("menu:视图"));
+    settle();
+    {
+        const QVariantMap ui = uiState();
+        check(ui.value(QStringLiteral("menuOpened")).toBool()
+                  && !ui.value(QStringLiteral("submenuOpened")).toBool(),
+              QStringLiteral("重新打开时右边没有子菜单那一栏（openFor 复位了）"));
     }
 
     {

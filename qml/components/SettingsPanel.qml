@@ -895,6 +895,14 @@ Popup {
                                 Repeater {
                                     model: [
                                         { k: "保存位置", v: Store.rootPath },
+                                        /*
+                                         * 内容实际躺在「保存位置/剪贴板」下面 —— 保存位置
+                                         * 是用户可以换的那个根（默认「文档/SmartClip」），
+                                         * 剪贴板内容是它下面的一个子目录（见
+                                         * ClipboardStore::contentRoot）。单独列一行，
+                                         * 用户才找得到文件在哪。
+                                         */
+                                        { k: "内容目录", v: Store.contentRoot },
                                         { k: "文件",     v: Store.fileCount + " 份 md" },
                                         { k: "内容",     v: Store.entryCount + " 条" },
                                         { k: "切分",     v: "每份 md 写满 20K 就另起一份，名字取那一条的时间" },

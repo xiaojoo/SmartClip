@@ -26,9 +26,12 @@ class QImage;
  *
  * 磁盘布局（rootPath 可在设置面板里改，默认「文档/SmartClip」）：
  *
- *     <root>/2026-09-13/073100.md          当天的剪贴板内容
- *     <root>/2026-09-13/073545.md          前一个文件超过 20K 之后的新文件
- *     <root>/2026-09-13/assets/*.png       图片（md 里用相对路径引用）
+ *     <root>/剪贴板/2026-09-13/073100.md          当天的剪贴板内容
+ *     <root>/剪贴板/2026-09-13/073545.md          前一个文件超过 20K 之后的新文件
+ *     <root>/剪贴板/2026-09-13/assets/*.png       图片（md 里用相对路径引用）
+ *
+ * 根目录下面那层「剪贴板」：根目录是用户选的保存位置，里面放剪贴板这一个
+ * 子目录 —— 以后要再放别的东西也不会跟剪贴板内容混在一起（见 contentRoot）。
  *
  * 文件名 = 写进这个文件的**第一条内容的时间**（时分秒），所以名字本身就
  * 说明"这个文件是从几点几分开始记的"，按名字排序天然是时间顺序。
@@ -49,6 +52,11 @@ class ClipboardStore final : public QObject {
 
     /* 剪贴板文件的保存根目录（设置面板里可改） */
     Q_PROPERTY(QString rootPath READ rootPath NOTIFY rootPathChanged)
+    /*
+     * 内容实际存放的那个子目录（`<rootPath>/剪贴板`，见 contentRoot）。
+     * 界面上单独列一行 —— 不然用户只知道"保存位置"，找不到文件到底在哪儿。
+     */
+    Q_PROPERTY(QString contentRoot READ contentRoot NOTIFY rootPathChanged)
     /*
      * 用户导入的"外部文件夹"（整棵目录照原样看，新内容不会写进去）。
      *
@@ -104,6 +112,16 @@ public:
     /* ---- 保存位置 / 导入的文件夹 ---- */
 
     QString rootPath() const { return m_rootPath; }
+    /*
+     * 剪贴板内容真正存放的那个子目录：`<rootPath>/剪贴板`。
+     *
+     * 为什么根目录下面还要再套一层：用户要的是"剪贴板 → 日期 → 文件"这个层次
+     * —— 根目录（默认「文档/SmartClip」）是他的保存位置，里面放剪贴板这一个
+     * 子目录，以后要再放别的东西（其它类型的库）也不会跟剪贴板内容混在一起。
+     *
+     * 日期目录、assets 全在这层下面，见 dateDir()。
+     */
+    QString contentRoot() const;
     /* 换根目录：建目录、重扫、记进 QSettings；失败返回 false */
     Q_INVOKABLE bool setRootPath(const QString &path);
 
@@ -181,6 +199,13 @@ private:
                      const QString &payload, const QString &hash, const QString &assetPath);
 
     QString dateDir(const QString &dateKey) const;
+    /*
+     * 清掉"加剪贴板那一层"之前的旧布局：日期目录原来直接摆在根目录下
+     * （`<root>/2026-09-16/…`），现在内容都在 `<root>/剪贴板/` 里，那些孤儿目录
+     * 没人读了。只删名字严格是 `yyyy-MM-dd` 的目录，别的一律不碰（见 .cpp）。
+     * 幂等，open() 里调一次。
+     */
+    void pruneLegacyLayout();
     /*
      * 当前该往哪个文件里追加（今天这一组）。
      *

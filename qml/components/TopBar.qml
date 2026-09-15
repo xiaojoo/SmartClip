@@ -36,6 +36,14 @@ Rectangle {
 
     signal openMenu(Item anchor, var items)
     signal searchChanged(string text)
+    /*
+     * 点了「帮助」那一栏。
+     *
+     * 它**没有下拉菜单**（见下面 navHit 的 onClicked 和 js/EditorMenus.js 的
+     * helpMenu 说明）—— 点一下直接开"关于 SmartClip"。所以不走 openMenu，
+     * 单独一个信号让 Main.qml 去 dispatch("about")。
+     */
+    signal aboutRequested()
 
     readonly property color borderColor: "#43454a"
     readonly property color iconColor:   "#8b929e"
@@ -44,7 +52,36 @@ Rectangle {
     readonly property color textMuted:   "#6f737a"
     readonly property color fieldBg:     "#2b2d30"
 
+    /*
+     * 这一栏点了有没有反应。
+     *
+     * 「帮助」也算有 —— 它虽然没有下拉菜单，但点一下直接开"关于"（见下面
+     * onClicked）。不把它算进来的话那一栏没有 hover 反馈，看着像坏的。
+     */
     function hasMenu(label) { return Menus.hasMenu(label) }
+    /* 这一栏点下去是"直接执行"，不是"弹下拉菜单" */
+    function isDirect(label) { return label === "帮助" }
+
+    /*
+     * 点某一栏。**鼠标和自检都走这一个函数** —— 自检要是自己另写一套触发方式，
+     * 它验的就不是用户真走的那条路了（这个项目里栽过：自检 new 了一个影子
+     * DocImport，结果验了个寂寞）。
+     *
+     * anchor 是**被点的那一栏**（菜单就挂在它正下方）。这里踩过一次：原来写死
+     * 用 appBadge（左边那个应用图标）当锚点，于是点「设置」菜单从最左边弹出来，
+     * 整条偏移到应用图标底下去了（用户报的"全部偏移菜单了"）。鼠标点的时候
+     * 锚点只能是那一栏自己。
+     *
+     * anchor 传 null 时（比如 Main.qml 的 "menu:设置" 那条命令、自检）退回
+     * appBadge —— 那种情况没有"被点的那一栏"可言。
+     */
+    function activateTab(label, anchor) {
+        if (root.isDirect(label)) {
+            root.aboutRequested()
+        } else if (root.hasMenu(label)) {
+            root.openMenu(anchor ? anchor : appBadge, root.menuItems(label))
+        }
+    }
 
     /*
      * 菜单条目。
@@ -63,14 +100,42 @@ Rectangle {
     }
 
     /*
-     * 锚点用左边的应用图标。
+     * 按名字开某一栏的菜单，锚点用左边的应用图标。
      *
-     * 现在唯一还会调到这里的是 Main.qml 的 "menu:" 命令，
-     * 用它当锚点菜单会从这一行最左边弹出，位置仍然合理。
+     * 走这条的是 Main.qml 的 "menu:xx" 命令（快捷键 / 自检调的那条路）——
+     * 那种情况手里没有"被点的那一栏"，只能拿应用图标当锚点，菜单会从这一行
+     * 最左边弹出。**鼠标点那一栏不走这里**，走 activateTab(label, 那一栏自己)，
+     * 菜单挂在那一栏正下方。
      */
     function openGroup(label) { root.openMenu(appBadge, root.menuItems(label)) }
     function clearSearch() { field.text = "" }
     function tabLabels() { return Menus.tabLabels() }
+
+    /*
+     * 找某一栏那个方块（自检用）。
+     *
+     * 鼠标点的时候是 MouseArea 把 `parent`（那一栏自己）传给 activateTab 的；
+     * 自检要走**同一条路**，就得先拿到那个方块。找不到返回 null。
+     */
+    function tabItem(label) {
+        for (var i = 0; i < tabRepeater.count; ++i) {
+            var cell = tabRepeater.itemAt(i)
+            if (cell && cell.children[0] && cell.children[0].text === label)
+                return cell
+        }
+        return null
+    }
+
+    /*
+     * 某一栏在宿主窗口里的左边（自检用）。
+     *
+     * 自检拿它验"菜单挂在被点的那一栏正下方"—— 锚点写错时（比如写死用 appBadge）
+     * 菜单会整条偏到窗口最左边，一比就露馅。找不到那一栏返回 -1。
+     */
+    function tabLeft(label) {
+        var cell = root.tabItem(label)
+        return cell ? cell.mapToItem(root, 0, 0).x : -1
+    }
 
     IconProvider { id: icons }
 
@@ -118,27 +183,34 @@ Rectangle {
                 delegate: Rectangle {
                     required property string modelData
 
+                    /*
+                     * 这一栏鼠标压上去有没有反馈。除了"有下拉菜单的"，还有
+                     * 「帮助」—— 它一按就直接开"关于"，没有下拉菜单但也得亮起来。
+                     */
+                    readonly property bool live: root.hasMenu(modelData)
+                                                 || root.isDirect(modelData)
+
                     Layout.alignment: Qt.AlignVCenter
                     Layout.preferredHeight: 22
                     Layout.preferredWidth: tabLabel.implicitWidth + 14
                     radius: 4
-                    color: tabHover.containsMouse && root.hasMenu(modelData) ? "#3a3d41" : "transparent"
+                    color: tabHover.containsMouse && live ? "#3a3d41" : "transparent"
 
                     Label {
                         id: tabLabel
                         anchors.centerIn: parent
                         text: modelData
                         font.pixelSize: 12
-                        color: tabHover.containsMouse && root.hasMenu(modelData)
-                               ? "#e8e8e8" : root.textColor
+                        color: tabHover.containsMouse && live ? "#e8e8e8" : root.textColor
                     }
 
                     MouseArea {
                         id: tabHover
                         anchors.fill: parent
                         hoverEnabled: true
-                        onClicked: if (root.hasMenu(modelData))
-                                       root.openMenu(parent, root.menuItems(modelData))
+                        /* 锚点传**这一栏自己**（parent 就是那个 Rectangle）——
+                           菜单要挂在被点的那一栏正下方，不是窗口最左边。 */
+                        onClicked: root.activateTab(modelData, parent)
                     }
                 }
             }

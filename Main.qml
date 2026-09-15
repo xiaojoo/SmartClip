@@ -72,6 +72,13 @@ Rectangle {
      */
     property string selectedPath: ""
     property var treeRows: []
+
+    /*
+     * 上一次弹出下拉菜单时锚在哪个控件上（见 TopBar 的 onOpenMenu）。
+     * 只给自检用：验"菜单挂在被点的那一栏下方"，见 uiState 里的 menuAnchorWidth。
+     */
+    property var lastMenuAnchor: null
+
     /* 欢迎页 / 编辑器：现在由"有没有打开的标签"决定，见 EditorArea */
 
     /*
@@ -1079,6 +1086,40 @@ Rectangle {
         settingsPanel.show("storage")
     }
 
+    /*
+     * 自检用：点菜单栏某一栏（走 TopBar::activateTab，和鼠标同一个入口）。
+     *
+     * 「帮助」那一栏改成"直接开关于"之后，要有一条检查钉住它 —— 但不能在自检里
+     * 另写一套触发方式，那样验的不是用户走的路。所以从这儿转一手。
+     *
+     * anchor 传 null：自检手里没有"被点的那一栏"，TopBar 会退回用应用图标当锚点
+     * （鼠标点的时候传的是那一栏自己，见那边的 activateTab）。
+     */
+    function activateMenuTab(label) {
+        topBar.activateTab(label, null)
+    }
+
+    /*
+     * 自检用：某一栏在宿主窗口里的左边（见 TopBar::tabLeft）。
+     *
+     * 自检拿它和"菜单实际画在哪"比 —— 菜单要挂在被点的那一栏下方，不是窗口
+     * 最左边（锚点写死成 appBadge 的时候就是整条偏到最左边）。
+     */
+    function topBarTabLeft(label) {
+        return topBar.tabLeft(label)
+    }
+
+    /*
+     * 自检用：**像鼠标那样**点某一栏 —— 把那一栏自己当锚点传进去。
+     *
+     * 和 activateMenuTab 的区别：那个不传锚点（走"没有那一栏"的退路，拿应用图标
+     * 当锚点，是给 `menu:xx` 命令用的）。要验"菜单挂在被点的那一栏下方"就必须
+     * 走这一条 —— 否则验的是另一条路，锚点写错了也照样绿。
+     */
+    function clickMenuTab(label) {
+        topBar.activateTab(label, topBar.tabItem(label))
+    }
+
     /* 自检收尾用：关掉设置面板，别让它挂到进程退出那一刻再拆 */
     function closeSettings() {
         settingsPanel.close()
@@ -1508,6 +1549,14 @@ Rectangle {
              */
             menuX: window.menuTopLeft().x,
             menuY: window.menuTopLeft().y,
+            /*
+             * 这次菜单锚在哪个控件上（宽度 / 高度 / 名字）。
+             *
+             * 自检据此确认"菜单挂在**被点的那一栏**下方"，而不是窗口最左边那个
+             * 应用图标下面（锚点写错就是这么暴露的：菜单整条偏到最左边）。
+             */
+            menuAnchorWidth: window.lastMenuAnchor ? window.lastMenuAnchor.width : -1,
+            menuAnchorHeight: window.lastMenuAnchor ? window.lastMenuAnchor.height : -1,
 
             /* 设置面板（存储那一栏的绑定会在打开时才算出来，自检据此确认它没报错） */
             settingsOpened: settingsPanel.opened,
@@ -1534,6 +1583,8 @@ Rectangle {
             docCardShouldShow: docCard.shouldShow,
             docWindowUsable: Doc.windowUsable,
             storageRoot: Store.rootPath,
+            /* 内容实际在哪儿（<保存位置>/剪贴板，见 ClipboardStore::contentRoot） */
+            storageContentRoot: Store.contentRoot,
             storageFiles: Store.fileCount,
             storageEntries: Store.entryCount,
             storageImported: Store.importedFolders.length,
@@ -2117,8 +2168,25 @@ Rectangle {
             host: window
             view: window.view
             shortcuts: window.shortcutItems
-            onOpenMenu: (anchor, items) => ddMenu.openFor(anchor, items)
+            onOpenMenu: (anchor, items) => {
+                /*
+                 * 记下这次菜单锚在哪个控件上 —— 自检拿它验"菜单挂在被点的那一栏
+                 * 正下方，而不是窗口最左边"。
+                 *
+                 * 这条真出过问题：TopBar::activateTab 里写死用 appBadge（左边那个
+                 * 应用图标）当锚点，于是点「设置」菜单从最左边弹出来，整条偏移到
+                 * 应用图标底下去了。菜单是独立原生窗口，锚点对不对只有这里知道。
+                 */
+                window.lastMenuAnchor = anchor
+                ddMenu.openFor(anchor, items)
+            }
+
             onSearchChanged: (text) => { window.searchText = text; window.refresh() }
+            /*
+             * 「帮助」那一栏是"直接执行"的：点一下开"关于 SmartClip"，
+             * 不弹下拉菜单（见 TopBar.qml 的 isDirect）。
+             */
+            onAboutRequested: window.dispatch("about")
         }
 
         /*

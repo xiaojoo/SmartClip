@@ -24,6 +24,14 @@
 
 namespace {
 
+/*
+ * 剪贴板内容那一层的目录名（根目录下面再套一层，见 ClipboardStore::contentRoot）。
+ *
+ * 单独提出来是因为它出现在好几个地方（建目录 / 扫描 / 清理旧结构），
+ * 写散了改一处漏一处。
+ */
+const QString kContentDirName = QStringLiteral("剪贴板");
+
 /* 我们自己写进 md 的段首标记："## 07:31:00" */
 const QString kEntryMark = QStringLiteral("## ");
 /* 日期目录名：2026-09-13 */
@@ -118,8 +126,45 @@ QString ClipboardStore::settingsKey(const QString &key) {
     return QStringLiteral("clip/") + key;
 }
 
+/*
+ * 清掉"加剪贴板那一层"之前的旧目录结构。
+ *
+ * 旧布局是把日期目录直接摆在**根目录**下（`<root>/2026-09-16/…`），现在内容都在
+ * `<root>/剪贴板/` 里了，根目录下那些日期目录已经没人读（重扫只看 contentRoot），
+ * 留着就是一堆孤儿。用户明确说"历史数据不要了，清理掉"。
+ *
+ * **只删根目录下名字严格是 `yyyy-MM-dd` 的目录**，别的一律不碰：
+ *   * 用户的保存根目录可能是他自己挑的（甚至指向网盘某个夹），不能横扫；
+ *   * 判据用和重扫同一个 dateDirPattern，认得出的才是我们以前建的。
+ *
+ * 幂等：清完之后根目录下就没有日期目录了，再跑什么都不做。
+ */
+void ClipboardStore::pruneLegacyLayout() {
+    QDir root(m_rootPath);
+    if (!root.exists())
+        return;
+
+    const QFileInfoList dirs =
+        root.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name);
+    int removed = 0;
+    for (const QFileInfo &dir : dirs) {
+        if (!dateDirPattern().match(dir.fileName()).hasMatch())
+            continue;
+        if (QDir(dir.absoluteFilePath()).removeRecursively())
+            ++removed;
+    }
+    if (removed > 0) {
+        qInfo("剪贴板：清掉了 %d 个旧布局的日期目录（内容现在在 %s 下）",
+              removed, qUtf8Printable(contentRoot()));
+    }
+}
+
 QString ClipboardStore::dateDir(const QString &dateKey) const {
-    return m_rootPath + QLatin1Char('/') + dateKey;
+    return contentRoot() + QLatin1Char('/') + dateKey;
+}
+
+QString ClipboardStore::contentRoot() const {
+    return m_rootPath + QLatin1Char('/') + kContentDirName;
 }
 
 bool ClipboardStore::open() {
@@ -132,6 +177,12 @@ bool ClipboardStore::open() {
 
     /* 保存目录先建出来：用户把设置里的路径指到一个还不存在的目录也要能用 */
     QDir().mkpath(m_rootPath);
+    /*
+     * 内容那一层也先建出来（<root>/剪贴板）—— 采集时反正会 mkpath，但重扫 /
+     * 建树那几条路都从这层往下列，先建出来省得每处都判一次存不存在。
+     * （旧布局的清理在 rescan() 里，open 底下会调它。）
+     */
+    QDir().mkpath(contentRoot());
 
     /*
      * 元数据库还是放在应用数据目录（%APPDATA%/SmartClip/SmartClip/smartclip.db）——
@@ -457,6 +508,15 @@ void ClipboardStore::rescan() {
     m_importedDirs.clear();
 
     /*
+     * 先清旧布局（日期目录原来直接摆在根目录下，现在内容都在 <root>/剪贴板/ 里）。
+     *
+     * 放在 rescan 里而不是 open 里：换保存位置（setRootPath）走的也是 rescan ——
+     * 用户切到一个还留着旧布局的目录时，那批孤儿目录也该顺手清掉。幂等，重复调
+     * 没代价（清完根目录下就没有日期目录了）。
+     */
+    pruneLegacyLayout();
+
+    /*
      * 整趟扫盘包在**一个事务**里。
      *
      * 每个文件要写好几条 SQL（删旧条目、插条目、更新文件行）；SQLite 默认
@@ -487,12 +547,12 @@ void ClipboardStore::rescan() {
         }
     }
 
-    QDir root(m_rootPath);
+    QDir root(contentRoot());
     if (root.exists()) {
         const QFileInfoList dirs =
             root.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name);
         for (const QFileInfo &dir : dirs) {
-            /* 根目录下只认 "2026-09-13" 这种日期目录，别把用户别的文件夹也索引进来 */
+            /* 这层里只认 "2026-09-13" 这种日期目录，别把别的文件夹也索引进来 */
             if (!dateDirPattern().match(dir.fileName()).hasMatch())
                 continue;
             scanFolder(dir.absoluteFilePath(), false, seen, 0, &cached);
@@ -793,7 +853,19 @@ QVariantList ClipboardStore::tree(const QString &query, bool newestFirst) const 
         QStringList chain;
         bool isDate = false;
         if (!file.imported) {
-            chain << QDir::cleanPath(file.folder);
+            /*
+             * 剪贴板这一支：**两层** —— 先「剪贴板」，再日期目录。
+             *
+             * 树上是 `剪贴板 -> 2026-09-16 -> 011647.md`（用户要的层次，和磁盘上
+             * 的布局一致：内容都在 <root>/剪贴板/ 下面，见 contentRoot）。
+             * 以前只挂日期目录那一层（顶层一堆 2026-09-16），加了一层之后树要跟上，
+             * 不然从树上根本看不出这些东西都在「剪贴板」底下。
+             *
+             * 日期目录名从路径推（不要 file.dateKey：那个可能是文件修改时间兜出来的，
+             * 未必等于它所在的目录名）。
+             */
+            const QString folder = QDir::cleanPath(file.folder);
+            chain << QDir::cleanPath(contentRoot()) << folder;
             isDate = true;
         } else {
             /* 找到它所属的那个导入根（可能套了好几层） */
@@ -829,10 +901,14 @@ QVariantList ClipboardStore::tree(const QString &query, bool newestFirst) const 
                 node.path = QDir::cleanPath(chain.at(i));
                 node.label = QFileInfo(node.path).fileName();
                 node.depth = i;
-                node.chronological = isDate;
-                node.kind = isDate ? QStringLiteral("date")
-                                   : (i == 0 ? QStringLiteral("imported")
-                                             : QStringLiteral("folder"));
+                /*
+                 * 名字就是时间的那一支只有**日期那层**（i == 1）—— 「剪贴板」自己
+                 * （i == 0）不是时间，它按普通文件夹画。
+                 */
+                node.chronological = isDate && i == 1;
+                node.kind = isDate
+                                ? (i == 0 ? QStringLiteral("folder") : QStringLiteral("date"))
+                                : (i == 0 ? QStringLiteral("imported") : QStringLiteral("folder"));
                 it = pool.emplace(key, node).first;
                 if (parent)
                     parent->children.append(&it->second);
@@ -905,6 +981,28 @@ QVariantList ClipboardStore::tree(const QString &query, bool newestFirst) const 
         }
     }
 
+    /*
+     * 「剪贴板」这一层：一个文件都没有时也要有它这个节点。
+     *
+     * 上面那轮是**按文件**拼的，目录是顺带出来的；新装的机器上一条内容都没有，
+     * 树上就什么都不显示，看着像坏了。补一个空节点（kind 用 "folder"：它是
+     * 组织层，不是日期那一支）。
+     *
+     * 搜索时**不补** —— 那是在筛文件，旁边挂一个空目录没意义。
+     */
+    if (needle.isEmpty()) {
+        const QString key = QStringLiteral("dir:") + QDir::cleanPath(contentRoot());
+        if (pool.find(key) == pool.end()) {
+            Node node;
+            node.key = key;
+            node.path = QDir::cleanPath(contentRoot());
+            node.label = kContentDirName;
+            node.depth = 0;
+            node.kind = QStringLiteral("folder");
+            roots.append(&pool.emplace(key, node).first->second);
+        }
+    }
+
     std::function<QVariantMap(Node *)> dump = [&](Node *node) -> QVariantMap {
         QList<Node *> childNodes = node->children;
         QList<const MetaFile *> leafFiles = node->leaves;
@@ -964,7 +1062,17 @@ QVariantList ClipboardStore::tree(const QString &query, bool newestFirst) const 
     };
 
     QList<Node *> top = roots;
-    std::sort(top.begin(), top.end(), [newestFirst](const Node *a, const Node *b) {
+    std::sort(top.begin(), top.end(), [this, newestFirst](const Node *a, const Node *b) {
+        /*
+         * 「剪贴板」永远排最前面 —— 它是这台机器剪贴板内容的入口，比导入的项目
+         * 更常用。用户要的就是树顶上一个「剪贴板」，点开才是日期文件夹。
+         */
+        const QString clipKey = QLatin1String("dir:") + QDir::cleanPath(contentRoot());
+        const bool aClip = a->key == clipKey;
+        const bool bClip = b->key == clipKey;
+        if (aClip != bClip)
+            return aClip;
+
         const bool aDate = a->kind == QLatin1String("date");
         const bool bDate = b->kind == QLatin1String("date");
         if (aDate != bDate)

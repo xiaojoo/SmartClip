@@ -451,10 +451,18 @@ function settingsMenu(view, ov) {
     return applyOverrides(items, ov)
 }
 
+/*
+ * 「帮助」那一栏。
+ *
+ * **现在它不弹下拉菜单了** —— 点一下直接开"关于 SmartClip"（见 TopBar.qml 的
+ * isDirect / aboutRequested）。原来这里有两项（快捷键一览 / 关于 SmartClip），
+ * 用户要的是一步到位；快捷键一览在设置面板里本来就有（设置 → 快捷键）。
+ *
+ * 这份清单还留着，因为 `dispatch("menu:帮助")` 那条路仍然可用（Main.qml 的
+ * "menu:" 分支、自检也走它）；只是鼠标点那一栏不再走这里。
+ */
 function helpMenu(ov) {
     return applyOverrides([
-        { label: "快捷键一览", act: "shortcuts", icon: "info" },
-        { separator: true },
         { label: "关于 SmartClip", act: "about", icon: "info" }
     ], ov)
 }
