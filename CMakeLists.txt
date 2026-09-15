@@ -64,6 +64,13 @@ set(SMARTCLIP_SOURCES
     # 只碰 WinRT 的一个文件，别的源文件只 include 它的头
     src/PinOcr.h
     src/PinOcr.cpp
+    # 文档 / 图片识别成 Markdown（见 src/DocConvert.h + src/DocImport.h）：
+    # DocConvert 是"跑本机程序"的窄约定（和 PinOcr 同一套做法），DocImport 是
+    # 队列 + 落到笔记那一层（QML 单例 Doc）
+    src/DocConvert.h
+    src/DocConvert.cpp
+    src/DocImport.h
+    src/DocImport.cpp
     src/NoteThumbs.h
     src/NoteThumbs.cpp
     src/NoteLinkModel.h
@@ -88,6 +95,8 @@ set(SMARTCLIP_SOURCES
     src/SelfTestNotes.cpp
     # 翻译自检（`--translate-test` 只跑它，见 src/SelfTest.h）：
     src/SelfTestTranslate.cpp
+    # 文档识别自检（`--doc-test` 只跑它，见 src/SelfTest.h）：
+    src/SelfTestDoc.cpp
 )
 
 qt_add_executable(SmartClip ${SMARTCLIP_SOURCES})
@@ -146,6 +155,7 @@ qt_add_qml_module(SmartClip
         qml/components/EditorArea.qml
         qml/components/FindBar.qml
         qml/components/AskCard.qml
+        qml/components/DocCard.qml
         qml/components/FolderTree.qml
         qml/components/SettingsPanel.qml
         qml/components/StatusBar.qml
@@ -205,6 +215,26 @@ qt_add_resources(SmartClip "app_scripts"
     BASE "resources/scripts"
     FILES
         resources/scripts/ppocr_runner.py
+)
+
+# ---------------------------------------------------------------------------
+# 文档识别那三个小脚本（见 src/DocConvert.h）。
+#
+# 和 ppocr_runner.py 一样只放**模板**在 qrc 里，第一次用到时由
+# DocConvert::runnerScriptPath() 落到 %APPDATA%/SmartClip/SmartClip/ 下 ——
+# 落到磁盘上用户才能自己看、自己改。
+#
+# 三个 runner 共用一个 doc_runner_common.py（那份是**契约**：三个都 import 它，
+# 所以 DocConvert::runnerScriptPath 每次用到都覆盖一遍）。
+# ---------------------------------------------------------------------------
+qt_add_resources(SmartClip "app_doc_scripts"
+    PREFIX "/scripts"
+    BASE "resources/scripts"
+    FILES
+        resources/scripts/doc_runner_common.py
+        resources/scripts/doc_runner_rapid.py
+        resources/scripts/doc_runner_paddleocr_vl.py
+        resources/scripts/doc_runner_granite.py
 )
 
 target_link_libraries(SmartClip PRIVATE

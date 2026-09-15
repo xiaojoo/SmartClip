@@ -1013,6 +1013,69 @@ QString ClipboardStore::createFile(const QString &text) {
     return path;
 }
 
+QString ClipboardStore::createNote(const QString &title, const QString &markdown,
+                                   const QMap<QString, QByteArray> &assets) {
+    const QDateTime now = QDateTime::currentDateTime();
+    const QString dateKey = now.toString(QStringLiteral("yyyy-MM-dd"));
+    const QString dir = dateDir(dateKey);
+    if (!QDir().mkpath(dir))
+        return QString();
+
+    /*
+     * 图片先落盘，正文后写。
+     *
+     * 顺序不能反：正文里已经写着 `assets/<名字>`，图没写出去就是个断链，而
+     * 这个文件已经建出来、用户已经看得见了。先把图准备好，再写那个引用它们的
+     * 文件，中间失败就直接放弃、不留下半成品。
+     */
+    if (!assets.isEmpty()) {
+        const QString assetsDir = dir + QStringLiteral("/assets");
+        if (!QDir().mkpath(assetsDir))
+            return QString();
+        for (auto it = assets.constBegin(); it != assets.constEnd(); ++it) {
+            /* 只取文件名：脚本给的名字理论上不带路径，带上也不能让它跑出 assets */
+            const QString name = QFileInfo(it.key()).fileName();
+            if (name.isEmpty() || name == QLatin1String(".") || name == QLatin1String(".."))
+                continue;
+            QFile image(assetsDir + QLatin1Char('/') + name);
+            if (image.open(QIODevice::WriteOnly | QIODevice::Truncate))
+                image.write(it.value());
+        }
+    }
+
+    /*
+     * 正文：`# 标题` + 识别出来的 Markdown。
+     *
+     * 识别结果自己已经带标题（`# 文档名`）时不重复加 —— 否则笔记开头会有两行
+     * 一模一样的标题。
+     */
+    QString body = markdown.trimmed();
+    const QString heading = QStringLiteral("# %1")
+                                .arg(title.trimmed().isEmpty() ? QStringLiteral("识别结果")
+                                                               : title.trimmed());
+    if (!body.startsWith(QLatin1Char('#')))
+        body = heading + QStringLiteral("\n\n") + body;
+    if (!body.endsWith(QLatin1Char('\n')))
+        body += QLatin1Char('\n');
+
+    const QString path = newFilePath(dir, now);
+    QFile file(path);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate))
+        return QString();
+    const QByteArray bytes = body.toUtf8();
+    const bool ok = file.write(bytes) == bytes.size();
+    file.close();
+    if (!ok) {
+        QFile::remove(path);
+        return QString();
+    }
+
+    reindexFile(path, false);
+    recount();
+    emit changed();
+    return path;
+}
+
 bool ClipboardStore::renameFile(const QString &path, const QString &newName) {
     QString name = newName.trimmed();
     if (name.isEmpty())

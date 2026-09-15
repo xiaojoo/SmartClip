@@ -525,6 +525,25 @@ Rectangle {
         settingsPanel.setLocalPath(kind, path)
     }
 
+    /*
+     * 设置 → 识别：选识别脚本用的 Python 解释器。
+     *
+     * 为什么值得单独一个入口：那三个识别包一般装在某个虚拟环境里，而 PATH 里
+     * 的 python 多半是系统那个 —— 装了却报 "No module named 'rapid_doc'"，
+     * 用户完全看不出是解释器选错了。选完之后 Doc 会把默认那条命令里的解释器
+     * 换掉（见 DocImport::setPythonPath）。
+     */
+    function chooseDocPython() {
+        var path = withSettingsPanelAway(function () {
+            return Cmd.chooseFileDialog("选择 Python 解释器（venv 里的 python.exe）",
+                                        "Python (python.exe);;可执行文件 (*.exe);;所有文件 (*.*)")
+        })
+        if (path === "")
+            return
+        Doc.pythonPath = path
+        settingsPanel.refreshDocRunner()
+    }
+
     /* ------------------------------------------------------------------
      * 命令分发
      *
@@ -1069,6 +1088,49 @@ Rectangle {
         settingsPanel.show("about")
     }
 
+    /* ------------------------------------------------------------------
+     * 文档识别（见 src/DocImport.h + qml/components/DocCard.qml）
+     * ------------------------------------------------------------------ */
+
+    /*
+     * 挑一个文档来识别。
+     *
+     * 走和"选择保存位置…"同一条路：**先让设置面板让开**再开文件框 —— 面板是
+     * 置顶的原生窗口，不让开的话 Windows 的文件选择框会被它整块盖住
+     * （见 withSettingsPanelAway 上面那段）。
+     */
+    function importDocumentDialog() {
+        var path = withSettingsPanelAway(function () {
+            return Cmd.chooseFileDialog("选择要识别的文档", Doc.fileFilter())
+        })
+        if (path === "")
+            return
+        importDocuments([path])
+    }
+
+    /*
+     * 把一批文件交给识别队列（菜单、拖拽、以后别的入口都走这里）。
+     *
+     * 这里只做**能不能开始**这一层判断：命令配好了没有、文件认得认不了。
+     * 真正的报错（缺依赖、认到一半失败）由 Doc 那边的 status / error 报出来。
+     */
+    function importDocuments(paths) {
+        if (!paths || paths.length === 0)
+            return
+
+        var problem = Doc.runnerProblem()
+        if (problem !== "") {
+            Cmd.alert("识别程序还没配好",
+                      problem + "\n\n设置 → 识别 里可以换一条命令；\n"
+                      + "默认那条要装：pip install rapid-doc")
+            settingsPanel.show("document")
+            return
+        }
+
+        Doc.clearResult()
+        Doc.enqueue(paths)
+    }
+
     /*
      * "便签"那一格的右键菜单（新建 / 排列 / 显示全部 / 收起全部）。
      *
@@ -1361,6 +1423,13 @@ Rectangle {
         if (act === "translateChooseModel") { chooseTranslateLocalFile("model"); return }
         if (act === "translateChooseMmproj") { chooseTranslateLocalFile("mmproj"); return }
         if (act === "about") { showAbout(); return }
+        /* 设置面板的"识别"栏：文档识别用哪条命令 */
+        if (act === "settingsDocument") { settingsPanel.show("document"); return }
+        /*
+         * 识别文档（文件菜单那一条）。文件框由 Main.qml 开、不由设置面板开 ——
+         * 面板是置顶原生窗口，会把系统文件框整个盖住（见 withSettingsPanelAway）。
+         */
+        if (act === "docImport") { importDocumentDialog(); return }
     }
 
     /*
@@ -1445,6 +1514,25 @@ Rectangle {
             settingsSection: settingsPanel.section,
             /* 点面板外面的空白处还会不会把它收掉（见 SettingsPanel.closePolicy） */
             settingsClosesOnOutside: settingsPanel.closesOnOutsidePress,
+
+            /*
+             * 文档识别那张小卡片（见 qml/components/DocCard.qml）。
+             *
+             * 它是**独立原生窗口**，不在主窗口的场景树里 —— `findChild` 那种按
+             * objectName 找 Item 的办法对它是没用的。所以照菜单 / 设置面板那套，
+             * 把几何报出来给自检量。
+             *
+             * docCardBottomOverlap 是那条关键判据：卡片底边**有没有压到底部
+             * 状态栏**。>0 就是压上了。
+             */
+            docCardOpened: docCard.visible,
+            docCardX: docCard.x,
+            docCardY: docCard.y,
+            docCardWidth: docCard.width,
+            docCardHeight: docCard.height,
+            docCardShowing: docCard.showing,
+            docCardShouldShow: docCard.shouldShow,
+            docWindowUsable: Doc.windowUsable,
             storageRoot: Store.rootPath,
             storageFiles: Store.fileCount,
             storageEntries: Store.entryCount,
@@ -1766,6 +1854,67 @@ Rectangle {
     }
 
     /*
+     * 文档识别要打开某份新笔记（卡片上那个"打开笔记"按钮，见 DocImport::openLast）。
+     *
+     * 打开笔记要动左树 + 编辑器（都要 Main.qml 这一层的东西），所以识别那边只
+     * 报"该打开这个文件了"，这里接住 —— 和 RecognitionCard 把动作交回给
+     * CaptureOverlay 是同一个分工。
+     */
+    Connections {
+        target: Doc
+        function onOpenRequested(path) {
+            window.openTreeFile(path)
+        }
+    }
+
+    /*
+     * 主窗口现在可不可用 —— 识别那张卡片据此决定收不收起来（见 DocCard.qml）。
+     *
+     * 卡片是**独立置顶的原生窗口**，不跟着主窗口隐藏，所以要有人告诉它"主窗口
+     * 没了"。自检里主窗口是故意不显示的，那种情况下 Doc.windowUsable 由 C++ 侧
+     * 强制打开（见 DocImport 的构造）—— 这里的绑定会被那一次赋值打断，
+     * 正是要的效果。
+     */
+    Binding {
+        target: Doc
+        property: "windowUsable"
+        value: window.visible
+    }
+
+    /*
+     * 把文档拖进主窗口 = 识别它。
+     *
+     * 拖拽热区铺满整个窗口（DropArea 不参与布局，只收拖放事件）。做成整窗而不是
+     * 某一块：用户手里拿着一个 PDF 往回拖的时候，不会去瞄"该放在哪个格子里"。
+     *
+     * 只收文件（hasUrls）—— 从浏览器里拖一段选中的文字过来也走拖放，那种不该
+     * 触发识别（那是剪贴板那条路的事）。
+     */
+    DropArea {
+        id: docDrop
+        anchors.fill: parent
+        onDropped: (drop) => {
+            if (!drop.hasUrls)
+                return
+            var files = []
+            for (var i = 0; i < drop.urls.length; ++i) {
+                /*
+                 * 只认本地文件。
+                 *
+                 * 路径不能自己从 "file:///C:/a.pdf" 上切字符串 —— "file:///"
+                 * 是 8 个字符，但 "file:///C:/…" 里那个 C 前面还有个斜杠，
+                 * 切 8 位会把盘符第一个字母吃掉。交给 Qt 转最稳。
+                 */
+                var local = drop.urls[i].toLocalFile()
+                if (local !== "")
+                    files.push(local)
+            }
+            if (files.length > 0)
+                window.importDocuments(files)
+        }
+    }
+
+    /*
      * 四块问答卡片：关闭窗口 / 未保存改动 / 确认 / 提示。
      *
      * 都是同一个组件（qml/components/AskCard.qml），也是和上面两个一样的
@@ -1906,6 +2055,32 @@ Rectangle {
             to: 1.0
             duration: 150
             easing.type: Easing.OutCubic
+        }
+
+        /*
+         * 文档识别的进度 / 结果卡片（主窗口右下角，见 qml/components/DocCard.qml）。
+         *
+         * 它是一个**独立的原生窗口**（Window），几何由它自己算 —— 这里不用给
+         * anchors，也没有 z 可言（不在主窗口的场景树里）。为什么必须这样，见那个
+         * 文件头的说明：编辑区是原生 QScintilla 子窗口，场景内的浮层会被它盖住。
+         */
+        DocCard {
+            id: docCard
+            objectName: "docCard"
+        }
+
+        /*
+         * 卡片的位置由 C++ 推过来（见 main.cpp 里那个 cardGeo 定时器和
+         * DocImport::publishCardGeometry）。
+         *
+         * 为什么不让 QML 自己算：QML 那个 ApplicationWindow 的 x/y 和宿主
+         * QWidget 的 geometry **不是同一套坐标系** —— 实测宿主摆在 (300,160)
+         * 时 QML 读出来 x=0，于是卡片被算到屏幕中间去（用户报的"不在右下角"
+         * 就是这个）。只有 C++ 那边知道宿主窗口的真实几何。
+         */
+        Connections {
+            target: Doc
+            function onCardGeometryChanged(x, y) { docCard.placeAt(x, y) }
         }
 
         Rectangle {

@@ -6,5 +6,8 @@ build_verify/
 /.idea
 /build_mod
 /cmake-build-debug
-# Python 虚拟环境（图上选字那条路用的 rapidocr 装在这儿，不进仓库）
+# Python 虚拟环境（图上选字那条路的 rapidocr、文档识别那条路的 rapid-doc /
+# paddleocr 都装在这儿，不进仓库 —— 见「文档识别.md」里的装法）
 /venv/
+# 跑随包脚本时 Python 自己生成的字节码缓存（resources/scripts/ 下会冒出来）
+__pycache__/

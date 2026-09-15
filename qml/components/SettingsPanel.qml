@@ -100,8 +100,45 @@ Popup {
         { key: "shortcuts", label: "快捷键", icon: "gear" },
         { key: "storage",   label: "存储",   icon: "folder" },
         { key: "translate", label: "翻译",   icon: "translate" },
+        { key: "document",  label: "识别",   icon: "ocr" },
         { key: "about",     label: "关于",   icon: "info" }
     ]
+
+    /*
+     * 文档识别用哪个引擎 —— 从**那条命令**上认，不另存一个"引擎名"。
+     *
+     * 为什么不单独存一个字段：命令本身就是唯一的真相（用户可以直接编辑那一行
+     * 改成任何东西）。存两份的话，改了命令而没改字段，界面上的高亮就骗人了。
+     */
+    function docEngineKey() {
+        var cmd = Doc.runner
+        if (cmd.indexOf("doc_runner_paddleocr_vl") >= 0)
+            return "paddle"
+        if (cmd.indexOf("doc_runner_granite") >= 0)
+            return "granite"
+        if (cmd.indexOf("doc_runner_rapid") >= 0)
+            return "rapid"
+        return ""
+    }
+
+    /* 三个按钮各自对应的那条命令（脚本路径和默认那条同一个目录） */
+    function runnerForEngine(key) {
+        var script = key === "paddle" ? "doc_runner_paddleocr_vl.py"
+                   : (key === "granite" ? "doc_runner_granite.py"
+                                        : "doc_runner_rapid.py")
+        return Doc.commandForScript(script)
+    }
+
+    /*
+     * 把界面那个命令框刷成 C++ 那边当前的值。
+     *
+     * 换引擎 / 选完解释器之后要调一次：那个框里的 text 是用户点进来时抄的一份，
+     * C++ 改了它不会自己跟着变（TextField 的 text 不是绑定 —— 绑定会被用户输入
+     * 打断，也会把正在敲的字弹回去）。
+     */
+    function refreshDocRunner() {
+        docRunnerField.text = Doc.runner
+    }
 
     /*
      * 语言下拉的条目（[ { label, act, checked } ]，见 DropdownMenu 的说明）。
@@ -1601,6 +1638,272 @@ Popup {
                                       + "medium 最准也最慢）；想指到自己下的 ONNX 文件，就把一份 params JSON "
                                       + "的路径接在后面当第三个参数。"
                             }
+                        }
+                    }
+
+                    /* ============ 识别（文档 / 图片 -> Markdown） ============ */
+                    Column {
+                        anchors.fill: parent
+                        anchors.margins: 14
+                        spacing: 10
+                        visible: root.section === "document"
+
+                        Text {
+                            text: "文档识别（PDF / 图片 / Office → Markdown 笔记）"
+                            color: root.textBright
+                            font.pixelSize: 14
+                            font.bold: true
+                        }
+
+                        Text {
+                            width: parent.width
+                            wrapMode: Text.WordWrap
+                            color: root.mutedColor
+                            font.pixelSize: 11
+                            text: "把文件拖进主窗口（或者用「文件 → 识别文档…」）就会认一遍，"
+                                  + "认出来的 Markdown 存成一份新笔记，文档里的插图一起落到笔记目录的 "
+                                  + "assets/ 下。识别跑在后台，右下角那张小卡片显示进展。"
+                        }
+
+                        /* ---- 引擎：三个可选项，换的就是下面那条命令 ---- */
+                        Text {
+                            text: "引擎"
+                            color: root.textColor
+                            font.pixelSize: 12
+                        }
+
+                        Row {
+                            spacing: 6
+
+                            Repeater {
+                                model: [ { k: "rapid",    label: "RapidDoc（默认）" },
+                                         { k: "paddle",   label: "PaddleOCR-VL" },
+                                         { k: "granite",  label: "Granite-Docling" } ]
+
+                                delegate: Rectangle {
+                                    id: docEngCell
+                                    required property var modelData
+                                    readonly property bool active: docEngineKey() === docEngCell.modelData.k
+
+                                    width: 138
+                                    height: 24
+                                    radius: 4
+                                    color: docEngCell.active ? "#2f3a44"
+                                                             : (docEngHit.containsMouse ? root.rowHover
+                                                                                        : "transparent")
+                                    border.width: 1
+                                    border.color: docEngCell.active ? root.accentColor : root.borderColor
+
+                                    Text {
+                                        anchors.centerIn: parent
+                                        text: docEngCell.modelData.label
+                                        color: docEngCell.active ? root.accentColor : root.textColor
+                                        font.pixelSize: 11
+                                    }
+                                    MouseArea {
+                                        id: docEngHit
+                                        anchors.fill: parent
+                                        hoverEnabled: true
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: {
+                                            Doc.runner = runnerForEngine(docEngCell.modelData.k)
+                                            refreshDocRunner()
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        Text {
+                            width: parent.width
+                            wrapMode: Text.WordWrap
+                            color: root.mutedColor
+                            font.pixelSize: 11
+                            text: "RapidDoc：纯 ONNX，模型随包（约 800MB），CPU 就够，装 "
+                                  + "pip install rapid-doc 即可 —— 默认这个。\n"
+                                  + "PaddleOCR-VL 1.6：精度最高（版面 / 表格 / 公式 / 109 种语言），"
+                                  + "要装 paddlepaddle + paddleocr[doc-parser]，权重约 1.8GB，建议有独显。\n"
+                                  + "Granite-Docling 258M：最省资源（权重约 515MB），表格公式不错，"
+                                  + "但语言以英文为主 —— 中文材料别选它。"
+                        }
+
+                        /* ---- 档位 ---- */
+                        Row {
+                            spacing: 8
+
+                            Text {
+                                width: 62
+                                anchors.verticalCenter: parent.verticalCenter
+                                text: "档位"
+                                color: root.mutedColor
+                                font.pixelSize: 12
+                            }
+
+                            Repeater {
+                                model: [ { k: "fast",     label: "快" },
+                                         { k: "balanced", label: "均衡" },
+                                         { k: "best",     label: "最准" } ]
+
+                                delegate: Rectangle {
+                                    id: tierCell
+                                    required property var modelData
+                                    readonly property bool active: Doc.tier === tierCell.modelData.k
+
+                                    width: 60
+                                    height: 24
+                                    radius: 4
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    color: tierCell.active ? "#2f3a44"
+                                                           : (tierHit.containsMouse ? root.rowHover
+                                                                                    : "transparent")
+                                    border.width: 1
+                                    border.color: tierCell.active ? root.accentColor : root.borderColor
+
+                                    Text {
+                                        anchors.centerIn: parent
+                                        text: tierCell.modelData.label
+                                        color: tierCell.active ? root.accentColor : root.textColor
+                                        font.pixelSize: 11
+                                    }
+                                    MouseArea {
+                                        id: tierHit
+                                        anchors.fill: parent
+                                        hoverEnabled: true
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: Doc.tier = tierCell.modelData.k
+                                    }
+                                }
+                            }
+                        }
+
+                        Text {
+                            width: parent.width
+                            wrapMode: Text.WordWrap
+                            color: root.mutedColor
+                            font.pixelSize: 11
+                            text: "「快」关掉表格和公式识别（一份 PDF 往往快好几倍）；「均衡」是默认；"
+                                  + "「最准」一次处理更多页、更激进的排版还原。"
+                        }
+
+                        /* ---- 用哪个 Python ---- */
+                        Row {
+                            spacing: 8
+
+                            Text {
+                                width: 62
+                                anchors.verticalCenter: parent.verticalCenter
+                                text: "Python"
+                                color: root.mutedColor
+                                font.pixelSize: 12
+                            }
+                            TextField {
+                                id: docPythonField
+                                width: 420
+                                height: 26
+                                text: Doc.pythonPath
+                                placeholderText: "留空 = 用 PATH 里的 python"
+                                color: root.textColor
+                                placeholderTextColor: root.mutedColor
+                                font.pixelSize: 12
+                                selectByMouse: true
+                                leftPadding: 7
+                                rightPadding: 7
+                                onEditingFinished: Doc.pythonPath = text
+                                onTextChanged: if (!activeFocus) cursorPosition = 0
+                                background: Rectangle {
+                                    color: "#26282b"
+                                    border.color: root.borderColor
+                                    border.width: 1
+                                    radius: 4
+                                }
+                            }
+                            Rectangle {
+                                width: 62
+                                height: 26
+                                radius: 4
+                                anchors.verticalCenter: parent.verticalCenter
+                                color: pyHit.containsMouse ? root.rowHover : "transparent"
+                                border.width: 1
+                                border.color: root.borderColor
+
+                                Text {
+                                    anchors.centerIn: parent
+                                    text: "选择…"
+                                    color: pyHit.containsMouse ? root.textBright : root.textColor
+                                    font.pixelSize: 11
+                                }
+                                MouseArea {
+                                    id: pyHit
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    cursorShape: Qt.PointingHandCursor
+                                    /* 文件框由 Main.qml 开（面板是置顶窗口，会盖住它） */
+                                    onClicked: Cmd.chooseDocPython()
+                                }
+                            }
+                        }
+
+                        Text {
+                            width: parent.width
+                            wrapMode: Text.WordWrap
+                            color: root.mutedColor
+                            font.pixelSize: 11
+                            text: "识别包装在虚拟环境里的话，这里要指到那个 venv 的 python.exe —— "
+                                  + "PATH 里的 python 往往是系统那个，会报「No module named 'rapid_doc'」。"
+                        }
+
+                        /* ---- 那条命令 ---- */
+                        Row {
+                            spacing: 8
+
+                            Text {
+                                width: 62
+                                anchors.verticalCenter: parent.verticalCenter
+                                text: "识别程序"
+                                color: root.mutedColor
+                                font.pixelSize: 12
+                            }
+                            TextField {
+                                id: docRunnerField
+                                width: 420
+                                height: 26
+                                text: Doc.runner
+                                placeholderText: "python \"…\\doc_runner_rapid.py\""
+                                color: root.textColor
+                                placeholderTextColor: root.mutedColor
+                                font.pixelSize: 12
+                                selectByMouse: true
+                                leftPadding: 7
+                                rightPadding: 7
+                                onEditingFinished: Doc.runner = text
+                                onTextChanged: if (!activeFocus) cursorPosition = 0
+                                background: Rectangle {
+                                    color: "#26282b"
+                                    border.color: root.borderColor
+                                    border.width: 1
+                                    radius: 4
+                                }
+                            }
+                        }
+
+                        Text {
+                            width: parent.width
+                            wrapMode: Text.WordWrap
+                            color: root.mutedColor
+                            font.pixelSize: 11
+                            text: "这条命令就是「用哪个引擎」唯一的接口：前面是程序，后面接到脚本的档位词"
+                                  + "由上面那个「档位」自动接上。随包那三个脚本第一次用到时会落到 "
+                                  + "%APPDATA%/SmartClip/SmartClip/ 下，可以自己看、自己改。"
+                        }
+
+                        /* ---- 识别程序的健康状况 ---- */
+                        Text {
+                            width: parent.width
+                            wrapMode: Text.WordWrap
+                            color: Doc.runnerProblem() === "" ? root.accentColor : root.mutedColor
+                            font.pixelSize: 11
+                            text: Doc.runnerProblem() === "" ? "识别程序就绪。"
+                                                             : ("用不了：" + Doc.runnerProblem())
                         }
                     }
 

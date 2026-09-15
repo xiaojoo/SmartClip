@@ -1,6 +1,8 @@
 #pragma once
 
+#include <QByteArray>
 #include <QHash>
+#include <QMap>
 #include <QObject>
 #include <QSet>
 #include <QSqlDatabase>
@@ -132,6 +134,21 @@ public:
 
     /* 在今天这一组里新建一个 md 并返回它的路径（左侧树那个 "+"）；失败返回空串 */
     Q_INVOKABLE QString createFile(const QString &text = QString());
+
+    /*
+     * 新建一份**带完整正文**的笔记（文档识别那条路用的，见 src/DocImport.h）。
+     *
+     * 和 createFile 的区别：那个是"空白笔记 + 追加一段"，标题固定成日期和时间，
+     * 正文由调用方自己拼；这里是"这份内容就是整篇"，标题是文档名，图片要一起
+     * 落进 assets/。
+     *
+     * assets 的键是正文里引用的**文件名**（DocConvert 已经把引用改写成
+     * `assets/<名字>` 了），值是图片数据。写不进去的图跳过，不影响正文。
+     *
+     * 返回新文件的路径；失败返回空串。
+     */
+    QString createNote(const QString &title, const QString &markdown,
+                       const QMap<QString, QByteArray> &assets);
     /* 改名（只改文件名，不动目录）；同名文件已存在则失败 */
     Q_INVOKABLE bool renameFile(const QString &path, const QString &newName);
     /* 删文件（它引用到的图片一起清掉，除非还有别的文件引用） */

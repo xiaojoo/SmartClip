@@ -1,5 +1,11 @@
 #pragma once
 
+/*
+ * QString 要**完整的类型**（不是前置声明）：下面 runDocQueue 的默认实参
+ * 写的是 `QString()`，那需要构造函数可见。
+ */
+#include <QString>
+
 class QObject;
 class ClipboardStore;
 class Screenshot;
@@ -9,6 +15,7 @@ class StickyNotes;
 class TranslateCards;
 class LlmClient;
 class Speech;
+class DocImport;
 
 /*
  * 自检模式：`SmartClip.exe --self-test`
@@ -41,6 +48,29 @@ bool noteTestEnabled(int argc, char **argv);
 
 /* `--translate-test`：只跑翻译那一节（见 runTranslate） */
 bool translateTestEnabled(int argc, char **argv);
+
+/* `--doc-test`：只跑文档识别那一节（见 runDoc） */
+bool docTestEnabled(int argc, char **argv);
+
+/*
+ * `--doc-e2e`：文档识别**真跑一遍**（造一份 PDF -> 调真脚本 -> 落成笔记）。
+ *
+ * 和 --doc-test 分开是因为它慢：真脚本第一次跑要几十秒（RapidDoc 首次加载模型），
+ * 没装任何识别包的机器上还会直接失败。所以它**不**并进 --doc-test，也不并进
+ * 全量自检 —— 要验"脚本那条路真的通"的时候单独跑这一条。
+ */
+bool docE2eEnabled(int argc, char **argv);
+
+/*
+ * `--doc-queue`：文档识别**走队列真跑一遍**（DocImport::enqueue -> 线程池里的
+ * Task -> 落成笔记 -> finished 信号）。
+ *
+ * 和 --doc-e2e 的区别：那条直接调 DocConvert::convert（同步），验的是"脚本那条
+ * 路通不通"；这一条走的是**界面真正走的那条路** —— enqueue 排队、Task 在线程池
+ * 里跑、结果从 finished 信号回来、createNote 落盘。也就是把"零件都好用"和
+ * "装起来也好用"之间那个缺口补上。
+ */
+bool docQueueEnabled(int argc, char **argv);
 
 /* qmlRoot 是 Main.qml 的根对象；run() 通过它的 dispatch() 发命令 */
 int run(QObject *qmlRoot, ClipboardStore *store, Screenshot *screenshot = nullptr,
@@ -92,5 +122,47 @@ int runTranslate(TranslateCards *cards, LlmClient *llm = nullptr, TrayIcon *tray
  */
 int translatePassed();
 int translateFailed();
+
+/*
+ * 文档识别专用自检：**只测"文件 -> Markdown -> 笔记"这条链路**
+ * （结果 JSON 的解析 / 图片引用改写 / 命令拼法 / 笔记落盘 + assets），
+ * 不跑真脚本（那要几十秒到几分钟，还依赖本机装没装那几个包）。
+ *
+ * 和便签 / 翻译那两份同一个用意：改识别的时候不用把 SelfTest.cpp 那几千行
+ * 全跑一遍。不显示主窗口，也不弹任何模态框。返回失败项数（0 = 全过）。
+ */
+int runDoc(ClipboardStore *store = nullptr);
+
+/*
+ * 文档识别的端到端自检：真造一份 PDF、真调那条命令、真落成笔记，再把笔记清掉。
+ *
+ * 跑的是**设置里配的那条命令**（DocImport::runner），所以它验的正是用户实际
+ * 会走的那条路。返回失败项数（0 = 全过）；脚本没装好会报出来而不是崩。
+ */
+int runDocE2e(ClipboardStore *store = nullptr);
+
+/*
+ * 文档识别队列自检：真文件 -> enqueue -> 线程池 -> 落成笔记。
+ *
+ * 会等 finished 信号（最多等两分钟），所以它**必须**跑在事件循环里
+ * （main.cpp 那边用 QTimer::singleShot 起）。返回失败项数（0 = 全过）。
+ *
+ * doc **必须是 QML 里那个 Doc 单例本身**（不是新 new 一个）。踩过：一开始在这里
+ * `DocImport doc(store)` 自己建了一个，于是"给它排队、去问 QML 里的单例"问的是
+ * 两个对象 —— 界面那一侧（卡片开不开、busy 亮不亮）永远没被驱动过，检查全红，
+ * 而且红得莫名其妙。
+ *
+ * qmlRoot 是 Main.qml 的根对象（拿 uiState 量卡片几何）；给 nullptr 就跳过
+ * 卡片那一段。
+ */
+int runDocQueue(DocImport *doc, ClipboardStore *store, const QString &pythonExe,
+                QObject *qmlRoot);
+
+/*
+ * 文档识别自检跑完之后，它那几十项里通过了几项、失败了几项。
+ * 全量自检（run）要把这两笔并进自己的总计里 —— 理由同 notesPassed。
+ */
+int docPassed();
+int docFailed();
 
 }  // namespace SelfTest

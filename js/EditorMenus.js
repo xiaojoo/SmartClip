@@ -108,6 +108,13 @@ function fileMenu(ov) {
          */
         { label: "截图…", act: "shot", shortcut: "Ctrl+Alt+A", icon: "image" },
         /*
+         * 识别文档（PDF / 图片 / Office 文档 -> Markdown 笔记，见 src/DocImport.h）。
+         *
+         * 放在截图旁边：都是"把外面的东西读进来变成笔记"，只是这个读的是整份文档
+         * （连版面、表格、公式一起），而截图那条只读框出来的一小块。
+         */
+        { label: "识别文档…", act: "docImport", icon: "ocr" },
+        /*
          * 便签（桌面上的小块文本，见 src/StickyNotes.h）。
          *
          * 放在截图旁边：两者是一类东西 —— "把一小块东西从程序里拿出来钉在

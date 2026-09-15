@@ -1,5 +1,6 @@
 #include "ClipboardManager.h"
 #include "ClipboardStore.h"
+#include "DocImport.h"
 #include "EditorController.h"
 #include "EditorViewItem.h"
 #include "PinWindow.h"
@@ -95,6 +96,19 @@ int main(int argc, char *argv[]) {
     QQuickStyle::setStyle("Fusion");
 
     /*
+     * 自检模式（挑一个，见 src/SelfTest.h）—— 只影响下面那几件事：
+     *   * 主窗口不显示（省得自检时屏幕上一堆窗口乱跳）；
+     *   * 识别那张卡片不许因为"主窗口不可见"就自己收掉（见 DocImport 的构造）。
+     *
+     * 必须在**任何单例构造之前**设好：DocImport 是在构造里读这个变量的。
+     */
+    if (SelfTest::enabled(argc, argv) || SelfTest::noteTestEnabled(argc, argv)
+        || SelfTest::translateTestEnabled(argc, argv) || SelfTest::docTestEnabled(argc, argv)
+        || SelfTest::docE2eEnabled(argc, argv) || SelfTest::docQueueEnabled(argc, argv)) {
+        qputenv("SMARTCLIP_DOC_SELFTEST", "1");
+    }
+
+    /*
      * 工具提示（ToolTip）+ QtWidgets 对话框的全局配色。
      *
      * 界面整个是深色的，但 Fusion 那个 ToolTip 模板的背景取的是调色板里的
@@ -186,6 +200,15 @@ int main(int argc, char *argv[]) {
      * 和上面两个同一个理由声明在 host 之前：卡片窗口的 QML 一构造就会读到它。
      */
     Speech speech;
+
+    /*
+     * 文档 / 图片识别（见 src/DocImport.h）：把 PDF / 图片 / Office 文档认成
+     * Markdown，落成一份笔记。
+     *
+     * 要 store 是因为"落成笔记"这件事只有它知道（assets 放哪、文件名怎么起）。
+     * 和上面几个同一个理由声明在 host 之前：界面一构造就要读它的状态。
+     */
+    DocImport doc(&store);
 
     /*
      * 主窗口用 QWidget 承载，而不是 QQmlApplicationEngine 直接开 QQuickWindow。
@@ -282,6 +305,8 @@ int main(int argc, char *argv[]) {
     qmlRegisterSingletonInstance("SmartClip.Globals", 1, 0, "Llm", &llm);
     qmlRegisterSingletonInstance("SmartClip.Globals", 1, 0, "Trans", &cards);
     qmlRegisterSingletonInstance("SmartClip.Globals", 1, 0, "Speech", &speech);
+    /* 文档识别那条路（见 src/DocImport.h）—— 界面上的进度卡片读它 */
+    qmlRegisterSingletonInstance("SmartClip.Globals", 1, 0, "Doc", &doc);
 
     /* QTP0001 = NEW 之后 QML 模块的资源前缀是 /qt/qml/<URI> */
     quick->setSource(QUrl(QStringLiteral("qrc:/qt/qml/SmartClip/Main.qml")));
@@ -553,9 +578,74 @@ int main(int argc, char *argv[]) {
      * 和便签那条同一个用意：只跑翻译那一节，不显示主窗口、不弹模态框。
      */
     const bool translateTest = SelfTest::translateTestEnabled(argc, argv);
-    if (!noteTest && !translateTest) {
+    /*
+     * 文档识别专用自检（`--doc-test`，见 src/SelfTestDoc.cpp）。
+     * 一样只跑自己那一节：不跑真脚本（几十秒到几分钟），只验解析 / 改写 / 落盘。
+     */
+    const bool docTest = SelfTest::docTestEnabled(argc, argv);
+    /*
+     * 端到端那条（`--doc-e2e`）：真造 PDF、真调脚本、真落笔记。
+     * 单独一个开关是因为它慢（首次跑几十秒）且依赖本机装了识别包；
+     * 没装的话它会**报出来**而不是崩。
+     */
+    const bool docE2e = SelfTest::docE2eEnabled(argc, argv);
+    /*
+     * 队列那条（`--doc-queue`）：enqueue -> 线程池 -> 落成笔记，
+     * 也就是界面真正走的那条异步路（和 --doc-e2e 的同步路互补）。
+     */
+    const bool docQueue = SelfTest::docQueueEnabled(argc, argv);
+    /*
+     * 看一眼"文档识别卡片"长什么样、位置对不对（`--doc-demo=<文件>`）。
+     *
+     * 为什么要有这个口子：卡片是**跟随识别进度**出现的一块原生小窗，正常要
+     * "拖一份文档进去、等它认完"才看得到 —— 调它的位置 / 观感时每次都得手动走
+     * 一遍，还未必抓得到那一瞬间。这条直接在启动时排一份真文件进去，窗口照常
+     * 显示，卡片就摆在那儿，截图 / 肉眼都能看。
+     *
+     * 位置校验走自检（--doc-queue 里量了几何）；这个口子是给"看着对不对"用的
+     * —— 层级那件事（有没有被原生编辑区盖住）只有眼睛和截图说了算。
+     */
+    QString docDemoPath;
+    for (int i = 1; i < argc; ++i) {
+        const QString arg = QString::fromLocal8Bit(argv[i]);
+        if (arg.startsWith(QLatin1String("--doc-demo=")))
+            docDemoPath = arg.mid(int(qstrlen("--doc-demo=")));
+    }
+    const bool docDemo = !docDemoPath.isEmpty();
+
+    /*
+     * 自动自检那几条**不显示**主窗口（省得屏幕上窗口乱跳、也免了截图干扰）；
+     * 正常启动和 `--doc-demo` 要显示 —— 演示就是给人看卡片的。
+     */
+    if (docDemo || (!noteTest && !translateTest && !docTest && !docE2e && !docQueue)) {
         host.resize(1460, 900);
         host.show();
+    }
+
+    /*
+     * 文档识别那张卡片的位置：**由这里推给界面**。
+     *
+     * 为什么不在 QML 里算：QML 那个 ApplicationWindow 的 x/y 和宿主 QWidget 的
+     * geometry 不是同一套坐标系（实测宿主在 (300,160) 时 QML 读出来 x=0），
+     * 拿它算会算到屏幕中间去。只有这里知道宿主窗口的真实几何。
+     *
+     * 用 60ms 轮询而不是接移动 / 改大小事件：窗口在这台机器上移动时并不总是
+     * 产生 QWidget 的 moveEvent，轮询最稳。
+     *
+     * 建在自检分支**之前**：`--doc-queue` 里要验"位置真的被推过去了"，窗口虽然
+     * 不显示但几何是有的（隐藏窗口也有 geometry），推过去的值正好拿来对算式。
+     */
+    {
+        auto *cardGeo = new QTimer(&app);
+        cardGeo->setInterval(60);
+        QObject::connect(cardGeo, &QTimer::timeout, &doc, [&host, &doc]() {
+            const QRect geo = host.geometry();
+            /* 这几个数都在 DocImport 里（唯一真相），别在这儿写死 */
+            doc.publishCardGeometry(geo.x() + geo.width() - doc.cardWidth() - doc.cardMargin(),
+                                    geo.y() + geo.height() - doc.cardHeightHint()
+                                        - doc.cardBottomGap());
+        });
+        cardGeo->start();
     }
 
     /*
@@ -592,6 +682,7 @@ int main(int argc, char *argv[]) {
         notes.shutdown();
         cards.shutdown();
         llm.shutdown();
+        doc.shutdown();
         return result < 0 ? 9 : result;
     }
 
@@ -611,6 +702,65 @@ int main(int argc, char *argv[]) {
          * （见 SelfTestTranslate.cpp），这里再 save 一次会把那份恢复覆盖掉。
          */
         llm.shutdown();
+        return result < 0 ? 9 : result;
+    }
+
+    if (docTest) {
+        int result = -1;
+        QTimer::singleShot(300, &app, [&]() {
+            result = SelfTest::runDoc(&store);
+            app.quit();
+        });
+        QTimer::singleShot(40000, &app, []() {
+            qWarning("文档识别自检超时，强制退出");
+            ::exit(9);
+        });
+        app.exec();
+        /* 没有真跑脚本，也就没有子进程要收；shutdown 是幂等的，顺手调一下 */
+        doc.shutdown();
+        return result < 0 ? 9 : result;
+    }
+
+    if (docQueue) {
+        int result = -1;
+        /* 和 --doc-e2e 一样，可以指一个别的解释器：--doc-python=<路径> */
+        QString pythonExe;
+        for (int i = 1; i < argc; ++i) {
+            const QString arg = QString::fromLocal8Bit(argv[i]);
+            if (arg.startsWith(QLatin1String("--doc-python="))) {
+                pythonExe = arg.mid(int(qstrlen("--doc-python=")));
+                break;
+            }
+        }
+        QTimer::singleShot(300, &app, [&]() {
+            result = SelfTest::runDocQueue(&doc, &store, pythonExe, quick->rootObject());
+            app.quit();
+        });
+        QTimer::singleShot(900000, &app, []() {
+            qWarning("文档识别队列自检超时，强制退出");
+            ::exit(9);
+        });
+        app.exec();
+        doc.shutdown();
+        return result < 0 ? 9 : result;
+    }
+
+    if (docE2e) {
+        int result = -1;
+        QTimer::singleShot(300, &app, [&]() {
+            result = SelfTest::runDocE2e(&store);
+            app.quit();
+        });
+        /*
+         * 给足 15 分钟：首次跑要下/加载模型，慢的时候一分多钟一页。
+         * 这不是"卡住了"，是这条自检本来就要真跑一遍。
+         */
+        QTimer::singleShot(900000, &app, []() {
+            qWarning("文档识别端到端自检超时，强制退出");
+            ::exit(9);
+        });
+        app.exec();
+        doc.shutdown();
         return result < 0 ? 9 : result;
     }
 
@@ -653,12 +803,34 @@ int main(int argc, char *argv[]) {
          * 这里再 save 一次会把那份恢复覆盖掉。
          */
         llm.shutdown();
+        /* 识别那条路的子进程也在这里收掉（见 DocImport::shutdown） */
+        doc.shutdown();
         return result < 0 ? 9 : result;
+    }
+
+    /*
+     * 演示模式：等界面摆好，把那份文件排进识别队列（见上面 docDemo 的说明）。
+     * 用事件循环起一次而不是直接调 —— 卡片要等 QML 那边把自己摆好（setHost）。
+     */
+    if (docDemo) {
+        /*
+         * 先把主窗口摆到一个**确定的**位置（而不是让系统随意放）。
+         *
+         * 为什么演示要管这个：卡片的位置是"主窗口右边一个 margin、下边留状态栏
+         * 那么高"，主窗口在屏幕哪个角落决定了卡片在哪。摆在固定位置，截图裁哪块
+         * 就是确定的，肉眼核对也不会因为窗口位置不同而看岔。
+         */
+        host.move(300, 160);
+        QTimer::singleShot(400, &doc, [&doc, docDemoPath]() {
+            doc.setTier(QStringLiteral("fast"));
+            doc.enqueue({ docDemoPath });
+        });
     }
 
     const int code = app.exec();
     notes.shutdown();
     cards.shutdown();
     llm.shutdown();
+    doc.shutdown();
     return code;
 }
