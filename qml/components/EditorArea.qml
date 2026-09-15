@@ -481,15 +481,6 @@ Rectangle {
                         }
                     }
                 }
-
-                Text {
-                    width: parent.width
-                    text: "点左侧列表可把剪贴板内容载入编辑器"
-                    color: root.textMuted
-                    font.pixelSize: 12
-                    horizontalAlignment: Text.AlignHCenter
-                    wrapMode: Text.WordWrap
-                }
             }
 
             /* ---- 图片预览 ---- */

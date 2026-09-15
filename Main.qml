@@ -2150,19 +2150,24 @@ Rectangle {
                     anchors.fill: parent; anchors.topMargin: 8; anchors.bottomMargin: 8; spacing: 6
                     Repeater {
                         /*
-                         * 只有"文件夹 / 截图 / 便签 / 翻译"四格接上了动作，其余几格
-                         * 还是装饰（见下面 navHit 的 onClicked）。截图 / 便签 /
-                         * 翻译那三格放在最前面几个工具窗口图标之间，因为它们也是
-                         * "叫出一个工具"—— 便签那一格点一下就地新建一块，长按
-                         * （右键）才是排列 / 收起那些（老用户不会误点，新用户看
-                         * 一眼提示就懂）；翻译那一格是把翻译卡片叫到桌面上。
+                         * 五格，**每一格都接上了动作**：项目树 / 截图 / 便签 /
+                         * 翻译 / 识别文档。
+                         *
+                         * 原来后面还挂着 file / search / play / branch 四个格子，
+                         * 但都没接动作（`acts` 为假，点了没反应、光标也是普通箭头）
+                         * —— 摆着不动就是噪音，用户问"这几个没用的去掉"，去掉了。
+                         * 那几样东西在菜单里都有：搜索是顶栏那个框和「搜索」菜单，
+                         * 分支 / 运行对"剪贴板 + 笔记"这个程序根本没有对应功能。
+                         *
+                         * 截图 / 便签 / 翻译 / 识别都是"叫出一个工具"——便签那一格点
+                         * 一下就地新建一块，长按（右键）才是排列 / 收起那些（老用户
+                         * 不会误点，新用户看一眼提示就懂）；翻译那一格是把翻译卡片
+                         * 叫到桌面上；识别那一格是挑一份文档认成笔记。
                          */
                         model: [ { k: "folder", active: true }, { k: "screenshot", active: false },
                                  { k: "note", active: false },
                                  { k: "translate", active: false },
-                                 { k: "file", active: false },
-                                 { k: "search", active: false }, { k: "play", active: false },
-                                 { k: "branch", active: false } ]
+                                 { k: "ocr", active: false } ]
                         delegate: Rectangle {
                             id: navCell
                             required property var modelData
@@ -2173,6 +2178,7 @@ Rectangle {
                                                          || modelData.k === "screenshot"
                                                          || modelData.k === "note"
                                                          || modelData.k === "translate"
+                                                         || modelData.k === "ocr"
 
                             /*
                              * 这一格算不算"当前打开的工具窗口"。
@@ -2243,6 +2249,9 @@ Rectangle {
                                     }
                                     else if (modelData.k === "translate")
                                         Trans.showCard()
+                                    else if (modelData.k === "ocr")
+                                        /* 挑一份文档认成笔记（见「文件 → 识别文档…」那条，同一个入口） */
+                                        window.importDocumentDialog()
                                 }
                             }
 
@@ -2262,7 +2271,7 @@ Rectangle {
                                          ? "截图"
                                          : (modelData.k === "translate"
                                             ? "翻译"
-                                            : "便签"))
+                                            : (modelData.k === "ocr" ? "识别文档" : "便签")))
                                 /* 贴着窗口左沿放：默认的"居中在格子上"会往左出界 */
                                 x: 2
                                 y: -implicitHeight - 3
