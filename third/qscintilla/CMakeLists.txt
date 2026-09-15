@@ -58,5 +58,15 @@ set_target_properties(qscintilla PROPERTIES AUTOMOC ON)
 
 # 第三方代码的警告不看
 if(MSVC)
-    target_compile_options(qscintilla PRIVATE /w)
+    # 用 /W0（"警告级别 0"）而不是 /w（"压制所有警告"）：
+    #
+    # 两个都是"不看警告"，但生成器对它们的处理不一样。/w 只能塞进
+    # AdditionalOptions，于是生成的 vcxproj 里 WarningLevel 属性是空的，
+    # MSBuild 就按默认补一个 /W1 —— 命令行上 /W1 和 /w 撞在一起，cl 每个
+    # 翻译单元都吐一条 warning D9025（正在重写"/W1"用"/w"）。一条无害的
+    # 警告换来 300+ 条噪音。
+    #
+    # /W0 认得出来是"警告级别"这个属性（WarningLevel=TurnOffAllWarnings），
+    # MSBuild 就不会再补 /W1，D9025 自然没有。压制效果一样。
+    target_compile_options(qscintilla PRIVATE /W0)
 endif()

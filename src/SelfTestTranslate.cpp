@@ -1,5 +1,6 @@
 #include "SelfTest.h"
 
+#include "Speech.h"
 #include "Translate.h"
 #include "TrayIcon.h"
 
@@ -82,6 +83,34 @@ void settle() {
         QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
         QThread::msleep(10);
     }
+}
+
+/*
+ * 等一个信号（最多等 timeoutMs 毫秒），返回它到底来没来。
+ *
+ * 朗读那一段要用：声音是**另一个线程**里的引擎出的，状态回来要过一轮事件循环
+ * —— 这边不能光 settle() 就断言（settle 只转 5 轮，引擎可能还没汇报）。
+ *
+ * 写法上绕了两道：
+ *   * signal 收成 `void (Speech::*)()`（Speech 里那几个信号都不带参数）——
+ *     参数类型收窄之后 connect 的重载才挑得干净；
+ *   * 连接写成 connect(sender, signal, context, lambda) 这种四参形式，这样
+ *     "收到就退出本地事件循环"绑在 loop 上；loop 是栈上的，返回前必须断开。
+ */
+template <typename Signal>
+bool waitForSignal(Speech *sender, Signal signal, int timeoutMs = 6000) {
+    if (!sender)
+        return false;
+    bool arrived = false;
+    QEventLoop loop;
+    const QMetaObject::Connection conn = QObject::connect(sender, signal, &loop, [&] {
+        arrived = true;
+        loop.quit();
+    });
+    QTimer::singleShot(timeoutMs, &loop, &QEventLoop::quit);
+    loop.exec();
+    QObject::disconnect(conn);
+    return arrived;
 }
 
 /* 从 QML 根对象上找一个具名子项（界面上的关键控件都带 objectName） */
@@ -213,7 +242,7 @@ bool SelfTest::translateTestEnabled(int argc, char **argv) {
 int SelfTest::translatePassed() { return gTranslatePassed; }
 int SelfTest::translateFailed() { return gTranslateFailed; }
 
-int SelfTest::runTranslate(TranslateCards *cards, LlmClient *llm, TrayIcon *tray) {
+int SelfTest::runTranslate(TranslateCards *cards, LlmClient *llm, TrayIcon *tray, Speech *speech) {
     /* 每条检查立刻落盘：崩了也能看到崩在哪一条 */
     setvbuf(stdout, nullptr, _IONBF, 0);
 
@@ -285,12 +314,15 @@ int SelfTest::runTranslate(TranslateCards *cards, LlmClient *llm, TrayIcon *tray
     QObject *runBtn = qmlChild(root, "translateRun");
     QObject *srcBtn = qmlChild(root, "translateSource");
     QObject *tgtBtn = qmlChild(root, "translateTarget");
+    /* 朗读那个喇叭（见 qml/translate/TranslateCard.qml 标题栏） */
+    QObject *speakBtn = qmlChild(root, "translateSpeak");
 
     trCheck(root != nullptr, QStringLiteral("界面：根对象拿得到"));
     trCheck(input != nullptr, QStringLiteral("界面：上面那个输入框在"));
     trCheck(output != nullptr, QStringLiteral("界面：下面那个译文框在"));
     trCheck(runBtn != nullptr, QStringLiteral("界面：翻译按钮在"));
     trCheck(srcBtn != nullptr && tgtBtn != nullptr, QStringLiteral("界面：源 / 目标语言选择在"));
+    trCheck(speakBtn != nullptr, QStringLiteral("界面：朗读按钮在"));
 
     /* =====================================================================
      * 3) 两份状态双向通：界面敲的字进得来，存档推得回界面
@@ -348,6 +380,123 @@ int SelfTest::runTranslate(TranslateCards *cards, LlmClient *llm, TrayIcon *tray
                 && !targets.contains(QStringLiteral("自动检测")),
             QStringLiteral("语言：目标语言里没有自动检测"),
             QString::number(targets.size()));
+
+    /* =====================================================================
+     * 4b) 朗读：卡片上那个喇叭 + 系统语音合成（见 src/Speech.h）
+     *
+     * 这一节会**真的出声**（很短的一句），因为"引擎能不能出声"只有调一下才知道：
+     * 音色清单、线程、消息泵、停止这几件都得走一遍。不想听到声音就把系统音量关了，
+     * 检查照样过。
+     *
+     * 没装语音包的机器上（Speech.available 为 false）不判失败：那是环境的事，
+     * 不是代码的事 —— 这时候只钉"界面画成灰的、点了不崩"，其余功能照旧。
+     * =================================================================== */
+    if (speech) {
+        /*
+         * 引擎是在**另一个线程**里建的，available / 音色清单要等它汇报回来。
+         * 这里等的是"清单第一次填上"（引擎起不来时也会填一次，只是空清单）。
+         */
+        if (!speech->available() && speech->voices().isEmpty())
+            waitForSignal(speech, &Speech::voicesChanged, 4000);
+
+        const QStringList voices = speech->voices();
+        trOut(QStringLiteral("朗读：%1，音色 %2 个")
+                  .arg(speech->available() ? QStringLiteral("可用") : QStringLiteral("不可用（这台机器没语音包）"))
+                  .arg(voices.size()));
+        for (const QString &voice : voices)
+            trOut(QStringLiteral("        · %1").arg(voice));
+
+        if (speech->available()) {
+            trCheck(!voices.isEmpty(), QStringLiteral("朗读：数得出音色（引擎建起来了）"));
+            /*
+             * 挑音色：中文那几个音色装了就挑得出来；挑不出来也不判失败
+             * （那只是意味着这台机器上没装中文语音包，Speech 会退回默认音色）。
+             */
+            const QString zhVoice = speech->voiceFor(QStringLiteral("中文（简体）"));
+            trOut(QStringLiteral("朗读：中文挑中的音色 = %1").arg(zhVoice));
+            trCheck(!zhVoice.isEmpty(), QStringLiteral("朗读：中文能挑到一个音色来念"), zhVoice);
+        } else {
+            trCheck(true, QStringLiteral("朗读：这台机器没语音包 —— 界面照样起得来（按钮灰着）"));
+            trCheck(!speech->error().isEmpty(),
+                    QStringLiteral("朗读：不能念的时候 error 里有一句人话"), speech->error());
+        }
+
+        /* 摆一段译文出去（下面那一下念的就是它） */
+        card->setTextOut(QStringLiteral("这是一句用来试朗读的译文。"));
+        settle();
+        if (output) {
+            trCheck(output->property("text").toString() == QStringLiteral("这是一句用来试朗读的译文。"),
+                    QStringLiteral("朗读：译文摆出去了（按钮的使能看的就是它）"));
+        }
+
+        /*
+         * 点的是**按钮那条路**：root.toggleSpeak() 正是那个 MouseArea 的 onClicked
+         * （按钮本身是个 MouseArea，没有 clicked 信号可以 invoke）。
+         */
+        const char *const toggle = "toggleSpeak";
+        const bool hasToggle = root && root->metaObject()->indexOfMethod("toggleSpeak()") >= 0;
+        trCheck(hasToggle, QStringLiteral("朗读：卡片上那个 toggleSpeak 找得到（按钮连的就是它）"));
+
+        if (speech->available()) {
+            if (hasToggle)
+                QMetaObject::invokeMethod(root, toggle);
+            settle();
+
+            bool started = speech->speaking();
+            if (!started)
+                started = waitForSignal(speech, &Speech::speakingChanged, 4000)
+                          && speech->speaking();
+            trCheck(started, QStringLiteral("朗读：点喇叭之后开始念了"));
+
+            /* 再点一下（同一条路）就是停 */
+            if (hasToggle)
+                QMetaObject::invokeMethod(root, toggle);
+            settle();
+            bool stopped = !speech->speaking();
+            if (!stopped)
+                stopped = waitForSignal(speech, &Speech::speakingChanged, 3000)
+                          && !speech->speaking();
+            trCheck(stopped, QStringLiteral("朗读：再点一下停住了"));
+
+            /* C++ 那侧的直接入口也要能停（托盘 / 自检 / 以后的快捷键都走它） */
+            speech->speak(QStringLiteral("直连引擎这一下。"));
+            settle();
+            speech->stop();
+            settle();
+            /*
+             * 这里**必须等**，不能光 settle() 就断言（第一版就是这么写的，自检红过）：
+             * speak() 和 stop() 是前后脚投进去的命令，worker 那边"开始念"和"停下"
+             * 两条状态是排队回来的 —— settle 只转固定几轮，可能刚好卡在中间那一拍，
+             * 读到的就是"还在念"。等的是状态落定，不是"stop 之后立刻就是 idle"。
+             */
+            bool idle = !speech->speaking();
+            if (!idle)
+                idle = waitForSignal(speech, &Speech::speakingChanged, 3000)
+                       && !speech->speaking();
+            trCheck(idle, QStringLiteral("朗读：stop() 掐得掉"));
+        } else {
+            /* 没引擎：点一下不能崩、也不能开始念 */
+            if (hasToggle)
+                QMetaObject::invokeMethod(root, toggle);
+            settle();
+            trCheck(!speech->speaking(), QStringLiteral("朗读：没语音包时点了也不会开始念"));
+        }
+
+        /* 空文本：不该开始念，而且要说一句为什么（先确保上一段真的停了） */
+        bool quiet = !speech->speaking();
+        if (!quiet)
+            quiet = waitForSignal(speech, &Speech::speakingChanged, 3000)
+                    && !speech->speaking();
+        speech->speak(QString());
+        settle();
+        trCheck(quiet && !speech->speaking(),
+                QStringLiteral("朗读：空文本不念"),
+                quiet ? QString() : QStringLiteral("上一段还没停干净"));
+        trCheck(!speech->error().isEmpty(), QStringLiteral("朗读：空文本会给一句提示"),
+                speech->error());
+    } else {
+        trOut(QStringLiteral("朗读：没拿到 Speech 单例，这一节跳过"));
+    }
 
     /* =====================================================================
      * 5) 请求那套的契约：失败也是**异步**回来的，而且带对 token

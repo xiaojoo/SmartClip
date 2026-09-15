@@ -75,6 +75,9 @@ set(SMARTCLIP_SOURCES
     # 翻译（LLM 客户端 + 桌面卡片，见 src/Translate.h）：
     src/Translate.h
     src/Translate.cpp
+    # 朗读（翻译卡片上那个「播放」按钮：系统自带的语音合成，见 src/Speech.h）：
+    src/Speech.h
+    src/Speech.cpp
     src/TrayIcon.h
     src/TrayIcon.cpp
     src/SelfTest.h
@@ -209,6 +212,9 @@ target_link_libraries(SmartClip PRIVATE
     Qt6::Sql Qt6::Widgets Qt6::PrintSupport
     qscintilla
     dwmapi
+    # 朗读（src/Speech.cpp）：SAPI 那套的 CoCreateInstance / CoTaskMemFree 在这
+    # 个库里（sapi.h 自己也有 #pragma comment(lib) 兜着，这里显式写一遍更清楚）。
+    ole32
 )
 
 # ---------------------------------------------------------------------------

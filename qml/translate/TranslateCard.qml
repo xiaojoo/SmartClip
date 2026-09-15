@@ -52,6 +52,13 @@ Item {
     readonly property color warnColor:   "#c8503c"
 
     /*
+     * 念不念得出来：这台机器上有语音包（Speech.available），而且译文框里确实
+     * 有字。两个条件缺一个，标题栏那个喇叭就画灰、点不动（点不动的原因是
+     * 什么，看那个按钮的 AppToolTip）。
+     */
+    readonly property bool canSpeak: Speech.available && output.text.trim() !== ""
+
+    /*
      * 两个框的高度：上面输入、下面译文各占一半。
      * 固定那几行是标题栏 34 + 语言栏 36 + 按钮行 34 + 两处 8px 缝。
      */
@@ -105,6 +112,33 @@ Item {
         for (var i = 0; i < (list ? list.length : 0); ++i)
             out.push({ label: list[i], checked: list[i] === current })
         return out
+    }
+
+    /* ---- 朗读（标题栏那个喇叭） ---- */
+
+    function toggleSpeak() {
+        if (!Speech.available || output.text.trim() === "") {
+            hint = Speech.available ? "还没有译文可念" : Speech.error
+            hintColor = root.warnColor
+            return
+        }
+        /* 在念就停（再点一次 = 停），没念就开始念译文 */
+        if (Speech.speaking) {
+            Speech.stop()
+            return
+        }
+        hint = ""
+        hintColor = root.mutedColor
+        /*
+         * 音色按**译文**的语言挑（译文的语言就是 targetLang）——
+         * 系统里没装这个语言的语音包时，Speech 退回默认音色，并在 error 里
+         * 说明为什么，这里摆到状态行上。
+         */
+        Speech.speak(output.text, root.targetLang)
+        if (Speech.error !== "") {
+            hint = Speech.error
+            hintColor = root.warnColor
+        }
     }
 
     /* ---- 翻译 ---- */
@@ -239,6 +273,48 @@ Item {
                             onClicked: if (root.cardWin) root.cardWin.copyResult()
                         }
                         AppToolTip { hovered: copyHit.containsMouse; text: "复制译文" }
+                    }
+
+                    /*
+                     * 把译文念出来（朗读）。
+                     *
+                     * 声音是**系统自带的语音合成**出的（Windows SAPI，见 src/Speech.h），
+                     * 不是模型念的 —— 大模型只吐文字，没有音频输出。所以这台机器上
+                     * 没装语音包时（Speech.available 为 false），这个按钮画灰、点不动。
+                     *
+                     * 两态：没在念 = 喇叭（点一下开始念），正在念 = 方块（点一下停）。
+                     * 念的是**译文框里那段**（没译文时念不出来，按钮也是灰的）。
+                     */
+                    Rectangle {
+                        objectName: "translateSpeak"
+                        width: 24; height: 24; radius: 5
+                        color: speakHit.containsMouse ? root.hoverColor : "transparent"
+                        opacity: root.canSpeak ? 1.0 : 0.4
+                        AppIcon {
+                            anchors.centerIn: parent
+                            provider: icons
+                            kind: Speech.speaking ? "stop"
+                                                  : (root.canSpeak ? "speak" : "speak-off")
+                            size: 14
+                            tint: !root.canSpeak ? root.mutedColor
+                                                  : (Speech.speaking ? root.accentColor
+                                                                     : (speakHit.containsMouse ? root.brightColor
+                                                                                               : root.mutedColor))
+                        }
+                        MouseArea {
+                            id: speakHit
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: root.toggleSpeak()
+                        }
+                        AppToolTip {
+                            hovered: speakHit.containsMouse
+                            text: !Speech.available ? "这台机器上没有语音包，念不了"
+                                                    : (!root.canSpeak ? "先翻译出译文，再念"
+                                                                      : (Speech.speaking ? "停止朗读"
+                                                                                         : "朗读译文"))
+                        }
                     }
 
                     /* 收起来（数据留着，图标条 / 托盘能再叫出来） */

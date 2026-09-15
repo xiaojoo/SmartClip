@@ -25,6 +25,21 @@ QtObject {
                  + p('M6 14 H3.33 A1.33 1.33 0 0 1 2 12.67 V10')
                  + p('M10 14 H12.67 A1.33 1.33 0 0 0 14 12.67 V10')
         }
+        /*
+         * 喇叭（朗读那几个图标共用）：左边一个小方箱 + 一个朝右张开的号角，
+         * 右边按 waves 画几道声波（1 = 一道，2 / 3 = 两道 / 三道）。
+         *
+         * 和 pin / translate 那些一样是 inline SVG：16 的 viewBox 里画，
+         * AppIcon 那个 Image 再按 size 缩放。
+         */
+        function speakGlyph(waves, color) {
+            var g = p('M3.2 6.2 H5.8 L9.6 3.2 V12.8 L5.8 9.8 H3.2 Z')
+            if (waves >= 2)
+                g += p('M11.4 6 L12.7 8 L11.4 10')
+            if (waves >= 3)
+                g += p('M13.1 4.4 L14.6 8 L13.1 11.6')
+            return g
+        }
         var s = ""
         if (kind === "chevron-down")   s = p('M4.4 6.4 L8 10 L11.6 6.4')
         else if (kind === "chevron-right") s = p('M6.4 4.4 L10 8 L6.4 11.6')
@@ -148,6 +163,19 @@ QtObject {
                                                  + '<ellipse cx="8" cy="8" rx="3.2" ry="6" fill="none" stroke="' + c + '" stroke-width="1.7"/>'
         /* 置顶（固定在桌面上）：一枚图钉 —— 帽 + 针 */
         else if (kind === "pin")           s = p('M6 2.6 H10') + p('M6.8 2.6 V6.4 L5 9.4 H11 L9.2 6.4 V2.6') + p('M8 9.4 V13.4')
+        /*
+         * 朗读（翻译卡片标题栏那个喇叭）：
+         *   speak      喇叭 + 两道声波 = 点一下把这段念出来
+         *   speaking   同一个喇叭 + 三道声波 = 正在念（再点一下是停）
+         *   speak-off  喇叭 + 一道斜杠 = 这件东西这会儿念不了（没语音包 / 没内容）
+         *   stop       方块 = 停止（念的时候那个按钮的另一态）
+         *   pause      两根竖条 = 暂停
+         */
+        else if (kind === "speak")         s = speakGlyph(2, c)
+        else if (kind === "speaking")      s = speakGlyph(3, c)
+        else if (kind === "speak-off")     s = speakGlyph(1, c) + p('M3 3 L13 13')
+        else if (kind === "stop")          s = f('M4.6 4.6 H11.4 V11.4 H4.6 Z')
+        else if (kind === "pause")         s = p('M6.4 3.6 V12.4') + p('M9.6 3.6 V12.4')
         else if (kind === "info")          s = co(8, 8, 6) + p('M8 7.4 V11.4') + ci(8, 4.9, 0.95)
         return "data:image/svg+xml;charset=utf-8," + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">' + s + '</svg>')
     }

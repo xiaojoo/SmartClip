@@ -5,6 +5,7 @@
 #include "PinOcr.h"
 #include "PinWindow.h"
 #include "Screenshot.h"
+#include "Speech.h"
 #include "Translate.h"
 #include <QMessageBox>
 #include <QMouseEvent>
@@ -206,7 +207,7 @@ bool SelfTest::enabled(int argc, char **argv) {
 
 int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, TrayIcon *tray,
                   EditorController *cmd, StickyNotes *notes, TranslateCards *cards,
-                  LlmClient *llm) {
+                  LlmClient *llm, Speech *speech) {
     EditorViewItem *view = EditorViewItem::instance();
 
     /*
@@ -4096,25 +4097,52 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
                     check(runnerDir.isValid(), QStringLiteral("选字：临时目录建得出来"));
                     if (runnerDir.isValid()) {
                         /* 写一份"runner 应该吐出来"的结果（像素坐标 + 中文） */
+                        const QByteArray preparedJson = QStringLiteral(
+                                                            "[{\"text\":\"第一行 RUNNER\",\"box\":[10,20,200,30]},"
+                                                            "{\"text\":\"第二行 中文\",\"box\":[12,60,160,28]}]")
+                                                            .toUtf8();
                         const QString prepared = runnerDir.filePath(QStringLiteral("prepared.json"));
                         {
+                            /*
+                             * open / write 都是 [[nodiscard]]：接住返回值再断言。
+                             * 不接的话 MSVC 会报 C4834（"放弃具有 nodiscard 属性的
+                             * 函数的返回值"），而且这里本来就该知道写没写成功 ——
+                             * 这份文件是下面假 runner 要去拷的源，写歪了后面全在测空气。
+                             */
                             QFile file(prepared);
-                            file.open(QIODevice::WriteOnly | QIODevice::Truncate);
-                            file.write(QStringLiteral(
-                                           "[{\"text\":\"第一行 RUNNER\",\"box\":[10,20,200,30]},"
-                                           "{\"text\":\"第二行 中文\",\"box\":[12,60,160,28]}]")
-                                           .toUtf8());
+                            const bool opened = file.open(QIODevice::WriteOnly | QIODevice::Truncate);
+                            check(opened, QStringLiteral("选字：假 runner 的源文件写得出来"),
+                                  prepared);
+                            if (opened) {
+                                const qint64 wrote = file.write(preparedJson);
+                                check(wrote == preparedJson.size(),
+                                      QStringLiteral("选字：假 runner 的源文件写得完整"),
+                                      QStringLiteral("写了 %1 / 共 %2 字节")
+                                          .arg(wrote)
+                                          .arg(preparedJson.size()));
+                            }
                         }
                         /* 假 runner：把准备好的那份拷到"结果路径"（argv[2]）。
                            路径都写成反斜杠：cmd 不认 C:/… 那种（会报"找不到文件"） */
+                        const QByteArray fakeBat =
+                            QStringLiteral("@echo off\r\ncopy /y \"%1\" \"%~2\" >nul\r\n")
+                                .arg(QDir::toNativeSeparators(prepared))
+                                .toUtf8();
                         const QString fake = QDir::toNativeSeparators(
                             runnerDir.filePath(QStringLiteral("fake_runner.bat")));
                         {
+                            /* 同上：接住 + 断言，别让"批处理没写出来"伪装成"PP-OCR 跑不通" */
                             QFile file(fake);
-                            file.open(QIODevice::WriteOnly | QIODevice::Truncate);
-                            file.write(QStringLiteral("@echo off\r\ncopy /y \"%1\" \"%~2\" >nul\r\n")
-                                           .arg(QDir::toNativeSeparators(prepared))
-                                           .toUtf8());
+                            const bool opened = file.open(QIODevice::WriteOnly | QIODevice::Truncate);
+                            check(opened, QStringLiteral("选字：假 runner 的批处理写得出来"), fake);
+                            if (opened) {
+                                const qint64 wrote = file.write(fakeBat);
+                                check(wrote == fakeBat.size(),
+                                      QStringLiteral("选字：假 runner 的批处理写得完整"),
+                                      QStringLiteral("写了 %1 / 共 %2 字节")
+                                          .arg(wrote)
+                                          .arg(fakeBat.size()));
+                            }
                         }
                         /* 命令按"程序 + 参数"的写法给（和设置里那栏一样） */
                         QString command = QStringLiteral("cmd /c ") + fake;
@@ -5150,7 +5178,7 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
      * 它自己会把改过的配置写回去（见那个文件开头），自检不留痕。
      */
     if (cards && llm) {
-        SelfTest::runTranslate(cards, llm, tray);
+        SelfTest::runTranslate(cards, llm, tray, speech);
         gPassed += SelfTest::translatePassed();
         gFailed += SelfTest::translateFailed();
     }

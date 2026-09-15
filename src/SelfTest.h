@@ -8,6 +8,7 @@ class EditorController;
 class StickyNotes;
 class TranslateCards;
 class LlmClient;
+class Speech;
 
 /*
  * 自检模式：`SmartClip.exe --self-test`
@@ -45,7 +46,7 @@ bool translateTestEnabled(int argc, char **argv);
 int run(QObject *qmlRoot, ClipboardStore *store, Screenshot *screenshot = nullptr,
         TrayIcon *tray = nullptr, EditorController *cmd = nullptr,
         StickyNotes *notes = nullptr, TranslateCards *cards = nullptr,
-        LlmClient *llm = nullptr);
+        LlmClient *llm = nullptr, Speech *speech = nullptr);
 
 /*
  * 便签专用自检：**只测便签**，别的功能一律不碰。
@@ -71,14 +72,19 @@ int notesPassed();
 int notesFailed();
 
 /*
- * 翻译专用自检：**只测翻译 / 识别**（卡片界面 / 双向状态 / 请求那套的 token 契约 /
- * 落盘 / 识别用哪个模型、图片按多模态格式发出去、回来的"原文 ---- 译文"拆得开），
+ * 翻译专用自检：**只测翻译 / 识别 / 朗读**（卡片界面 / 双向状态 / 请求那套的
+ * token 契约 / 落盘 / 识别用哪个模型、图片按多模态格式发出去、回来的
+ * "原文 ---- 译文"拆得开 / 朗读那个喇叭和系统语音合成），
  * 不碰编辑区、不碰截图，也不发真请求。
  *
  * 和便签那份同一个用意：改翻译的时候不用把 SelfTest.cpp 那几千行全跑一遍。
  * 它不显示主窗口，也不弹任何模态框。返回失败项数（0 = 全过）。
+ *
+ * speech 是朗读那个单例（见 src/Speech.h）：传了才会跑朗读那一节；那台机器上
+ * 没装语音包时那一节只钉"界面画灰、点了不崩"，不判失败。
  */
-int runTranslate(TranslateCards *cards, LlmClient *llm = nullptr, TrayIcon *tray = nullptr);
+int runTranslate(TranslateCards *cards, LlmClient *llm = nullptr, TrayIcon *tray = nullptr,
+                 Speech *speech = nullptr);
 
 /*
  * 翻译自检跑完之后，它那几十项里通过了几项、失败了几项。

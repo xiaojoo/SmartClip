@@ -5,6 +5,7 @@
 #include "PinWindow.h"
 #include "Screenshot.h"
 #include "SelfTest.h"
+#include "Speech.h"
 #include "StickyNotes.h"
 #include "StickyNoteStore.h"
 #include "Translate.h"
@@ -177,6 +178,16 @@ int main(int argc, char *argv[]) {
     TranslateCards cards(&llm);
 
     /*
+     * 朗读（见 src/Speech.h）：翻译卡片上那个「播放」按钮用它把译文念出来。
+     *
+     * 声音走的是系统自带的语音合成（Windows SAPI），**不是模型念的** ——
+     * 大模型只吐文字。引擎活在它自己的线程里，这里只是建起来。
+     *
+     * 和上面两个同一个理由声明在 host 之前：卡片窗口的 QML 一构造就会读到它。
+     */
+    Speech speech;
+
+    /*
      * 主窗口用 QWidget 承载，而不是 QQmlApplicationEngine 直接开 QQuickWindow。
      *
      * 为什么必须这样（这是"编辑器真正嵌进去"能否成立的前提）：
@@ -270,6 +281,7 @@ int main(int argc, char *argv[]) {
      */
     qmlRegisterSingletonInstance("SmartClip.Globals", 1, 0, "Llm", &llm);
     qmlRegisterSingletonInstance("SmartClip.Globals", 1, 0, "Trans", &cards);
+    qmlRegisterSingletonInstance("SmartClip.Globals", 1, 0, "Speech", &speech);
 
     /* QTP0001 = NEW 之后 QML 模块的资源前缀是 /qt/qml/<URI> */
     quick->setSource(QUrl(QStringLiteral("qrc:/qt/qml/SmartClip/Main.qml")));
@@ -586,7 +598,7 @@ int main(int argc, char *argv[]) {
     if (translateTest) {
         int result = -1;
         QTimer::singleShot(600, &app, [&]() {
-            result = SelfTest::runTranslate(&cards, &llm, &tray);
+            result = SelfTest::runTranslate(&cards, &llm, &tray, &speech);
             app.quit();
         });
         QTimer::singleShot(40000, &app, []() {
@@ -614,7 +626,7 @@ int main(int argc, char *argv[]) {
         /* 给 QML 引擎一点时间把原生子窗口（编辑区）真正建起来再跑检查 */
         QTimer::singleShot(600, &app, [&]() {
             result = SelfTest::run(quick->rootObject(), &store, &screenshot, &tray,
-                                   &editorController, &notes, &cards, &llm);
+                                   &editorController, &notes, &cards, &llm, &speech);
             app.quit();
         });
 
