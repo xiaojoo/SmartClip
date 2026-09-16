@@ -106,11 +106,23 @@ Popup {
     /*
      * 格式化工具表（"格式化"那一栏里一行一个语言）。
      *
-     * 存成属性而不是直接在 Repeater 里调 Fmt.toolList()：Q_INVOKABLE 是个方法，
-     * QML 不会因为它依赖的东西变了就重算（绑定只在属性变化时重求值）。
-     * Fmt 那边改完会发 toolsChanged，接住重新取一份（见下面的 Connections）。
+     * ===========================================================================
+     * 为什么是 ListModel，而不是一个 var 属性装 Fmt.toolList() 那份数组
+     * ===========================================================================
+     * 原来存成 `property var fmtTools`，每次重取就是**换一整个数组**：Repeater
+     * 会把 15 行全部销毁重建。而"重取"以前发生在输入框失焦那一刻 —— 重建正好
+     * 落在"点进另一个输入框"的那一瞬，点中的那个框跟着被销毁、焦点落空，看起来
+     * 就是点一下卡一下、有时还得再点一次。
+     *
+     * ListModel 能**按行改**（setProperty），改一行只重算那一行的绑定，不销毁
+     * 任何 delegate。所以现在：真改了某个命令 → 原地更新（见 refreshFormatTools），
+     * 谁也不重建；只有行数对不上（理论上不会发生）才整表重来。
+     *
+     * 角色名就是 C++ 那边 QVariantMap 的键（id / label / tool / defaultCommand /
+     * command / available，见 Formatter::toolList），delegate 里用 required
+     * property 接住 —— 拼错一个字母是编译期错误，不是运行时静默 undefined。
      */
-    property var fmtTools: []
+    ListModel { id: fmtToolModel }
 
     Component.onCompleted: refreshFormatTools()
 
@@ -174,15 +186,33 @@ Popup {
     }
 
     /*
-     * 格式化那一栏：整表重取一份（工具表 + 每行的命令与"装没装"）。
+     * 格式化那一栏：把工具表跟 C++ 侧对齐（每行的命令 + "装没装"）。
      *
-     * 只在**设置真的改了**的时候走（C++ 的 toolsChanged；值没变那边不发信号），
-     * 因为它换的是整个 fmtTools —— Repeater 会把每一行都销毁重建。
-     * 失焦那一瞬间的显示规范化不走这条路（那太贵，见下面输入框的
-     * onEditingFinished）：一行输入框失焦就重建 15 行，点一下卡一下。
+     * 行数一样就**按行改**（setProperty）：只重算被改那一行的绑定，不销毁任何
+     * delegate。这一步会走到"用户刚改完某个命令"（C++ 的 toolsChanged，值没变
+     * 那边不发信号）—— 那一刻用户很可能正把鼠标点向下一个输入框，整表重建会
+     * 把点中的那个框一起换掉，焦点落空（见上面 ListModel 那段说明）。
+     *
+     * 行数变了才整表重来（clear + append）：这一条只是兜底，kTools 是常量表，
+     * 正常跑不到；真跑到的时候多半是有人在改语言清单，那时候重建才是对的。
+     *
+     * tool 那一列不用刷：工具名来自 kTools，不会变；变的只有用户填的命令和
+     * "本机装没装"这个判断结果。
      */
     function refreshFormatTools() {
-        fmtTools = Fmt.toolList()
+        var list = Fmt.toolList()
+
+        if (fmtToolModel.count === list.length) {
+            for (var i = 0; i < list.length; ++i) {
+                fmtToolModel.setProperty(i, "command", list[i].command)
+                fmtToolModel.setProperty(i, "available", list[i].available)
+            }
+            return
+        }
+
+        fmtToolModel.clear()
+        for (var j = 0; j < list.length; ++j)
+            fmtToolModel.append(list[j])
     }
 
     /*
@@ -2209,20 +2239,26 @@ Popup {
                                   + "不写占位就自动追加在末尾。留空 = 用默认那一行。"
                         }
 
-                        /* 每个语言一行：状态 + 命令输入框 */
+                        /* 每个语言一行：状态 + 命令输入框（角色名见上面 ListModel 那段） */
                         Repeater {
-                            model: root.fmtTools
+                            model: fmtToolModel
 
                             delegate: Row {
                                 id: fmtRow
-                                required property var modelData
+                                required property int index
+                                required property string id
+                                required property string label
+                                required property string tool
+                                required property string defaultCommand
+                                required property string command
+                                required property bool available
 
                                 spacing: 8
 
                                 Text {
                                     width: 92
                                     anchors.verticalCenter: parent.verticalCenter
-                                    text: fmtRow.modelData.label
+                                    text: fmtRow.label
                                     color: root.textColor
                                     font.pixelSize: 12
                                 }
@@ -2233,16 +2269,16 @@ Popup {
                                     height: 8
                                     radius: 4
                                     anchors.verticalCenter: parent.verticalCenter
-                                    color: fmtRow.modelData.available ? "#7bc47f" : root.mutedColor
+                                    color: fmtRow.available ? "#7bc47f" : root.mutedColor
                                 }
 
                                 Text {
                                     width: 110
                                     anchors.verticalCenter: parent.verticalCenter
-                                    text: fmtRow.modelData.tool
-                                          + (fmtRow.modelData.available ? "" : "（没找到）")
-                                    color: fmtRow.modelData.available ? root.mutedColor
-                                                                      : "#d7a85b"
+                                    text: fmtRow.tool
+                                          + (fmtRow.available ? "" : "（没找到）")
+                                    color: fmtRow.available ? root.mutedColor
+                                                            : "#d7a85b"
                                     font.pixelSize: 11
                                     elide: Text.ElideRight
                                 }
@@ -2250,8 +2286,8 @@ Popup {
                                 PanelField {
                                     width: 300
                                     height: 24
-                                    text: fmtRow.modelData.command
-                                    placeholderText: fmtRow.modelData.defaultCommand
+                                    text: fmtRow.command
+                                    placeholderText: fmtRow.defaultCommand
                                     color: root.textColor
                                     placeholderTextColor: root.mutedColor
                                     font.pixelSize: 11
@@ -2259,23 +2295,29 @@ Popup {
                                     leftPadding: 6
                                     rightPadding: 6
                                     onEditingFinished: {
-                                        Fmt.setToolFor(fmtRow.modelData.id, text)
+                                        Fmt.setToolFor(fmtRow.id, text)
                                         /*
-                                         * 只把**这一行**刷成 C++ 侧规范化过的值（用户填了
+                                         * 把这一行刷成 C++ 侧规范化过的值（用户填了
                                          * "  clang-format  "，落盘的是 trim 过的，界面得跟着）。
                                          *
-                                         * 为什么不是原来的 Qt.callLater(root.refreshFormatTools)：
-                                         * 那是把整个 fmtTools 换成新的一份 model —— Repeater
-                                         * 会把 15 行全销毁重建，而这一步恰好发生在"点进另一个
-                                         * 输入框"的那一瞬（点中的那个框也一起被重建掉，焦点落空，
-                                         * 于是要么顿一下、要么得再点一次）。加上 toolList() 每轮
-                                         * 要扫一遍 PATH（本机实测约 190ms），一次点击就是几百毫秒。
+                                         * 只写这一行的 model，谁也不重建 —— 这是原来那个
+                                         * Qt.callLater(root.refreshFormatTools) 的主要罪状：
+                                         * 换整个数组 = Repeater 把 15 行全销毁重建，而这一步
+                                         * 恰好发生在"点进另一个输入框"的那一瞬（点中的框一起
+                                         * 被换掉、焦点落空，于是要么顿一下、要么得再点一次）。
                                          *
-                                         * 现在只读这一行的 QSettings 值：不换 model、不重建、
-                                         * 不扫 PATH。命令**真改了**时 C++ 会发 toolsChanged，
-                                         * 那条路（上面 Connections）仍然会整表刷新 —— 那时候该刷。
+                                         * setProperty 那两下是给"真改了命令"准备的：C++ 会
+                                         * 发 toolsChanged，refreshFormatTools 也会原地刷一遍，
+                                         * 这里再写一次是**失焦但没改**那条路的兜底 —— 那条路
+                                         * 不发信号，不写就看不到 trim 之后的样子。
                                          */
-                                        text = Fmt.toolFor(fmtRow.modelData.id)
+                                        fmtToolModel.setProperty(fmtRow.index, "command",
+                                                                 Fmt.toolFor(fmtRow.id))
+                                        fmtToolModel.setProperty(fmtRow.index, "available",
+                                                                 Fmt.toolAvailable(fmtRow.id))
+                                        /* text 的绑定被用户输入打断过（见上面 refreshDocRunner
+                                           那段说明），所以这里得手动回填一次 */
+                                        text = Fmt.toolFor(fmtRow.id)
                                     }
                                     onTextChanged: if (!activeFocus) cursorPosition = 0
                                     background: Rectangle {
