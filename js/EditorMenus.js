@@ -137,6 +137,14 @@ function fileMenu(ov) {
         { label: "另存为…", act: "saveAs", shortcut: "Ctrl+Shift+S", icon: "save-as" },
         { label: "全部保存", act: "saveAll", icon: "save" },
         { separator: true },
+        /*
+         * 校验 / 对比：都是"拿当前这份正文去做点别的"，放在文件这一组里
+         * 和保存那一类挨着。校验在设置 → 校验里有总开关（默认关）。
+         */
+        { label: "校验当前文件", act: "checkFile", shortcut: "Ctrl+Shift+K",
+          icon: "spellcheck" },
+        { label: "与另一个文件对比…", act: "compareWithFile", icon: "diff" },
+        { separator: true },
         { label: "关闭标签", act: "closeTab", shortcut: "Ctrl+W", icon: "close" },
         { label: "关闭其他标签", act: "closeOtherTabs", icon: "close" },
         { separator: true },
@@ -148,9 +156,34 @@ function fileMenu(ov) {
     ], ov)
 }
 
-function editMenu(view, ov) {
+/*
+ * 编辑菜单（菜单栏点"编辑"、编辑区里的右键、以及 **Markdown 预览里的右键**都用它）。
+ *
+ * md 是"Markdown 预览"那一条的状态：
+ *   can        当前这份文档能不能预览（不是 .md 就是 false，整条置灰）
+ *   on         现在是不是正在看预览（打勾用）
+ *   canFormat  当前语言有没有可用的格式化器
+ *   preview    **这次是从预览里弹的**（见下面 previewMode 那段）
+ *
+ * 右键菜单是**当下的**菜单，所以这份状态每次弹的时候现算（见 Main.qml 的
+ * openEditorContextMenu / openPreviewContextMenu）—— 换了个 .cpp 标签再右键，
+ * 那一条就自己灰了。
+ */
+function editMenu(view, ov, md) {
     var hasDoc = !!view && view.hasDocument
-    var canEdit = hasDoc && !view.readOnly
+    /*
+     * previewMode：预览里那一份是只读的渲染结果，所以所有"会改正文"的命令
+     * 一律置灰。
+     *
+     * 为什么不靠 view.readOnly 自动判：预览摆在编辑器**上面**，它盖住的那份
+     * 编辑器本身可能是可写的 —— 只按 view.readOnly 判的话，用户会在预览里
+     * 看到一个能点的"粘贴"（点下去改的是被盖住的编辑器，看不见也说不通）。
+     * 复制 / 全选这些**不改正文**的照旧可用（预览最常用的就是选中复制）。
+     */
+    var previewMode = !!(md && md.preview)
+    var canEdit = hasDoc && !view.readOnly && !previewMode
+    var canMd = !!(md && md.can)
+    var onMd = canMd && !!md.on
     return applyOverrides([
         { label: "撤销", act: "undo", shortcut: "Ctrl+Z", icon: "undo",
           disabled: !canEdit || !view.canUndo },
@@ -159,14 +192,21 @@ function editMenu(view, ov) {
         { separator: true },
         { label: "剪切", act: "cut", shortcut: "Ctrl+X", icon: "cut",
           disabled: !canEdit || !view.hasSelection },
-        { label: "复制", act: "copy", shortcut: "Ctrl+C", icon: "copy",
-          disabled: !hasDoc || !view.hasSelection },
+        /*
+         * 复制：预览里也能用 —— 但选中的是**预览里那段文字**，不是编辑器里的
+         * 选区，所以判据不能再用 view.hasSelection（那边永远是假）。
+         * 见 Main.qml 的 openPreviewContextMenu 怎么把它写进 md。
+         */
+        { label: "复制", act: previewMode ? "copyPreview" : "copy",
+          shortcut: "Ctrl+C", icon: "copy",
+          disabled: previewMode ? !(md && md.hasSelection)
+                                : (!hasDoc || !view.hasSelection) },
         { label: "粘贴", act: "paste", shortcut: "Ctrl+V", icon: "paste",
           disabled: !canEdit },
         { separator: true },
-        { label: "全选", act: "selectAll", shortcut: "Ctrl+A", icon: "select-all",
-          disabled: !hasDoc },
-        { label: "复制当前行", act: "copyLine", icon: "copy", disabled: !hasDoc },
+        { label: "全选", act: previewMode ? "selectAllPreview" : "selectAll",
+          shortcut: "Ctrl+A", icon: "select-all", disabled: !hasDoc },
+        { label: "复制当前行", act: "copyLine", icon: "copy", disabled: !canEdit },
         { label: "复制全文", act: "copyAll", icon: "copy", disabled: !hasDoc },
         { separator: true },
         { label: "切换注释", act: "toggleComment", shortcut: "Ctrl+/", icon: "comment",
@@ -175,8 +215,25 @@ function editMenu(view, ov) {
         { label: "复制当前行到下一行", act: "duplicateLine", icon: "plus",
           disabled: !canEdit },
         { separator: true },
+        /*
+         * 格式化（功能见 src/Formatter.h）：只对"认得出来"的语言生效，
+         * 认不出来或者本机没装对应的格式化工具时整条置灰 —— 按下去弹一句
+         * "找不到 clang-format" 那种也是这个功能的正常出口，但灰掉更早一步
+         * 告诉用户"这份文件这条路走不通"。
+         */
+        { label: "格式化代码", act: "formatCode", shortcut: "Ctrl+Shift+F",
+          icon: "format", disabled: !canEdit || !(md && md.canFormat) },
+        /* 粘贴板里的内容按 JSON 重排（不需要任何外部工具，见 Formatter 内置那几样） */
+        { label: "格式化 JSON（全文重排）", act: "formatJson", icon: "format",
+          disabled: !canEdit || !hasDoc },
+        { separator: true },
+        { label: "Markdown 预览" + (canMd ? "" : "（仅 .md）"), act: "toggleMarkdownPreview",
+          shortcut: "Ctrl+Shift+V", icon: "preview",
+          checked: onMd, disabled: !canMd },
+        { separator: true },
+        /* 预览里那条"只读模式"没有意义（预览本来就是只读），跟着置灰 */
         { label: "只读模式", act: "toggleReadOnly", icon: "lock",
-          checked: hasDoc && view.readOnly, disabled: !hasDoc }
+          checked: hasDoc && view.readOnly, disabled: !hasDoc || previewMode }
     ], ov)
 }
 
@@ -479,19 +536,45 @@ function helpMenu(ov) {
  * 只有关闭类命令：保存 / 另存为这些作用在"当前文档"上，而右键点的标签
  * 未必是当前那个，放进来会动错文件。
  */
-function tabMenu(view, index, ov) {
+function tabMenu(view, index, ov, split) {
     var count = (view && view.documents) ? view.documents.length : 0
     var has = index >= 0 && index < count
     /* 快捷键显示值跟用户改过的走（closeTab 在可改键清单里） */
     var closeKey = (ov && typeof ov["closeTab"] === "string" && ov["closeTab"] !== "")
                    ? ov["closeTab"] : "Ctrl+W"
+    /*
+     * split 是当前的分栏状态（"" / "right" / "down"），由 Main.qml 现算传进来：
+     *   canSplit  这份文档能不能分栏（没有打开的文档就不能）
+     *   mode      现在分的是哪种（打勾用）
+     */
+    var s = split || {}
+    var canSplit = !!s.canSplit
+    var mode = s.mode || ""
     return [
         { label: "关闭", act: "closeTab:" + index, shortcut: closeKey, icon: "close",
           disabled: !has },
         { label: "关闭其他", act: "closeOthers:" + index, icon: "close",
           disabled: !has || count < 2 },
         { label: "关闭全部", act: "closeAllTabs", icon: "trash",
-          disabled: count < 1 }
+          disabled: count < 1 },
+        { separator: true },
+        /*
+         * 分栏（同一份文档摆在两栏里，快捷键 Alt+Shift+2 / Alt+Shift+3
+         * 和 vs 那些编辑器一个习惯）。
+         *
+         * 取消分栏只在真分了的时候可用 —— 没分栏时那一条是灰的，
+         * 免得用户点了发现什么都没发生。
+         */
+        { label: "左右分栏", act: "splitRight", shortcut: "Alt+Shift+2",
+          icon: "split-right", checked: mode === "right", disabled: !canSplit },
+        { label: "上下分栏", act: "splitDown", shortcut: "Alt+Shift+3",
+          icon: "split-down", checked: mode === "down", disabled: !canSplit },
+        { label: "取消分栏", act: "splitNone", icon: "close",
+          disabled: !canSplit || mode === "" },
+        { separator: true },
+        /* 文件对比：拿这一份去和另一个文件比（见 src/Diff.h） */
+        { label: "与此文件对比…", act: "compareTab:" + index, icon: "diff",
+          disabled: !has }
     ]
 }
 

@@ -444,6 +444,19 @@ public:
                                bool caseSensitive, bool wholeWord, bool regex);
     Q_INVOKABLE void gotoLine(int line);
 
+    /*
+     * 选中第 row 行 col..endCol 那一段（列号 0 基）——
+     * 校验卡片上点一条问题就走它（跳过去 + 把出问题那几个字选上）。
+     */
+    Q_INVOKABLE void selectRange(int row, int col, int endRow, int endCol);
+
+
+    /*
+     * 整份替换（格式化 / 批量改写用），**可撤销的一步**（见 .cpp 里的说明）。
+     * 失败时调用方不该调它 —— 传进来的必须是"确定要写回去的正文"。
+     */
+    Q_INVOKABLE void setText(const QString &text);
+
     /* ---- 视图 ---- */
     Q_INVOKABLE void zoomIn();
     Q_INVOKABLE void zoomOut();
@@ -571,7 +584,64 @@ public:
      */
     Q_INVOKABLE bool triggerScrollBarContextMenu(bool horizontal, int pos = -1);
 
+    /* ------------------------------------------------------------------
+     * 分栏（同一个文档摆在两个编辑区里，见 qml/components/EditorArea.qml）
+     *
+     * 做法是"**镜像**"而不是"两个视图共用一份 QsciDocument"：
+     *
+     *   两个 EditorViewItem 各自有一份 QsciDocument，一份是**主**（sourceView），
+     *   另一份是**镜像**。主那边正文一变（textChanged），镜像跟着灌一份；
+     *   在镜像里打字也接受，但下一次主的改动会覆盖它 —— 界面上镜像那份是
+     *   只读的（见 mirror 属性），所以这条路实际上走不到。
+     *
+     * 为什么不做成"真正共用一份文档"（QsciDocument 支持挂多个视图）：
+     *   那样要在两个视图之间共享**文档池、修改标记、视图状态、关闭/重命名
+     *   那一整套生命周期**，而这个类现在把这些全放在自己的 m_docs 里
+     *   （40 多处读写）。改成共享池等于把编辑器内核重写一遍，风险远大于
+     *   收益：镜像方案下"改了能立刻在另一边看到"这个用户要的效果是**一样的**，
+     *   代价只是分栏右侧不能编辑（标了只读，界面上不骗人）。
+     * ------------------------------------------------------------------ */
+
+    Q_PROPERTY(int docId READ docId WRITE setDocId NOTIFY boundChanged)
+    Q_PROPERTY(bool mirror READ mirror WRITE setMirror NOTIFY boundChanged)
+    Q_PROPERTY(bool bound READ bound NOTIFY boundChanged)
+
+    /*
+     * "这一份是主编辑器"（由 QML 显式指定，见 .cpp 构造函数里那段说明）。
+     *
+     * 分栏之后工程里有两个 EditorViewItem，而 instance()（"当前编辑器是谁"）
+     * 只能有一个答案 —— 靠"最后构造"来定是不可靠的（实测 QML 的构造顺序
+     * 和声明顺序不一致）。写 QML 的人说哪一份是主栏，就是哪一份。
+     */
+    Q_PROPERTY(bool mainEditor READ mainEditor WRITE setMainEditor NOTIFY boundChanged)
+
+    Q_INVOKABLE void bindTo(EditorViewItem *source);
+    Q_INVOKABLE void unbind();
+
+    /*
+     * 用户最后**在哪个栏里点了 / 打了字**（Main.qml 用它决定命令发给谁）。
+     * 它自己不会变，由 QML 在栏位获得焦点时调 noteFocus()。
+     */
+    Q_INVOKABLE void noteFocus();
+    /* 这个栏是不是最后被操作的那个（Main.qml 拼"当前编辑器"用） */
+    bool hasPaneFocus() const { return m_paneFocus; }
+    void setPaneFocus(bool on);
+
+    /* 分栏那三个属性的读写（说明见上面那组 Q_PROPERTY） */
+    int docId() const { return m_docId; }
+    void setDocId(int id);
+    bool mirror() const { return m_mirror; }
+    void setMirror(bool on);
+    bool bound() const { return m_source != nullptr; }
+    bool mainEditor() const { return m_mainEditor; }
+    void setMainEditor(bool on);
+
 signals:
+    /* 分栏绑定 / 解除（界面据此决定右栏显不显示） */
+    void boundChanged();
+    /* 这个栏被点了（Main.qml 接住：把"当前编辑器"切到它） */
+    void paneFocused();
+
     void paddingChanged();
     void fontChanged();
     void colorsChanged();
@@ -661,6 +731,12 @@ private:
 
     /* 把正文灌进当前文档（不动文档元信息） */
     void setContentCurrent(const QString &text);
+
+    /*
+     * 分栏：把源那个编辑区**当前这一份**搬过来（正文 + 元信息，不搬视图状态）。
+     * 见上面那组 Q_PROPERTY 的说明；由 bindTo() 接的信号驱动。
+     */
+    void syncFromSource();
 
     /* 去掉边框、深色滚动条 */
     void styleChrome();
@@ -784,6 +860,25 @@ private:
     int m_untitledCounter = 0;
     /* 没有打开任何文档时视图挂着的空文档（见 closeDocument 里的说明） */
     QsciDocument *m_scratch = nullptr;
+
+    /* ---- 分栏（见上面那组 Q_PROPERTY 的说明） ---- */
+    /* 这份视图是不是"镜像"（右边那一栏）：是的话正文由 bindTo 那个源推过来 */
+    bool m_mirror = false;
+    /* 源视图（镜像才有；非空时它的 textChanged 会灌到这边来） */
+    QPointer<EditorViewItem> m_source;
+    /* 这个栏是不是最后被操作的那个（Main.qml 据此挑"当前编辑器"） */
+    bool m_paneFocus = false;
+    /* 这一份是不是主编辑器（QML 指定；见 mainEditor 那个 Q_PROPERTY） */
+    bool m_mainEditor = false;
+    /*
+     * 正在把源的正文灌进镜像（或者反过来）。
+     *
+     * 镜像灌正文时会连着发 textChanged / modifiedChanged，那些信号会
+     * 反过来去改源（或者把镜像标成"已修改"）—— 灌的时候挡住这一圈。
+     */
+    bool m_syncing = false;
+    /* QML 给的文档身份号（自检和界面用它认"这是哪一栏"） */
+    int m_docId = 0;
 
     QHash<QString, QsciLexer *> m_lexers;
     QString m_appliedLanguage;

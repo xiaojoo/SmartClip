@@ -1,8 +1,11 @@
+#include "Checker.h"
 #include "ClipboardManager.h"
 #include "ClipboardStore.h"
+#include "Diff.h"
 #include "DocImport.h"
 #include "EditorController.h"
 #include "EditorViewItem.h"
+#include "Formatter.h"
 #include "PinWindow.h"
 #include "Screenshot.h"
 #include "SelfTest.h"
@@ -192,6 +195,26 @@ int main(int argc, char *argv[]) {
     TranslateCards cards(&llm);
 
     /*
+     * 编辑区校验（见 src/Checker.h）：中文用词 / 代码语法。
+     *
+     * 要 llm 是因为它那条"问大模型"的支路走 LlmClient::ask；本地规则那部分
+     * 不依赖网络。开关在设置面板（QSettings 的 check/enabled，默认关）。
+     */
+    Checker checker(&llm);
+
+    /*
+     * 文件对比（见 src/Diff.h）：纯本地算法，谁都不依赖。
+     */
+    DiffEngine differ;
+
+    /*
+     * 代码格式化（见 src/Formatter.h）：认本机装了的外部工具（clang-format /
+     * prettier / black…），没有工具时退回内置那三样（JSON 重排 / XML 缩进 /
+     * 去行尾空白）。设置里可以按语言指定命令。
+     */
+    Formatter fmt;
+
+    /*
      * 朗读（见 src/Speech.h）：翻译卡片上那个「播放」按钮用它把译文念出来。
      *
      * 声音走的是系统自带的语音合成（Windows SAPI），**不是模型念的** ——
@@ -307,6 +330,12 @@ int main(int argc, char *argv[]) {
     qmlRegisterSingletonInstance("SmartClip.Globals", 1, 0, "Speech", &speech);
     /* 文档识别那条路（见 src/DocImport.h）—— 界面上的进度卡片读它 */
     qmlRegisterSingletonInstance("SmartClip.Globals", 1, 0, "Doc", &doc);
+    /* 代码格式化（右键菜单那一条） */
+    qmlRegisterSingletonInstance("SmartClip.Globals", 1, 0, "Fmt", &fmt);
+    /* 编辑区校验（中文用词 / 代码语法） */
+    qmlRegisterSingletonInstance("SmartClip.Globals", 1, 0, "Check", &checker);
+    /* 文件对比 */
+    qmlRegisterSingletonInstance("SmartClip.Globals", 1, 0, "Differ", &differ);
 
     /* QTP0001 = NEW 之后 QML 模块的资源前缀是 /qt/qml/<URI> */
     quick->setSource(QUrl(QStringLiteral("qrc:/qt/qml/SmartClip/Main.qml")));
@@ -718,6 +747,28 @@ int main(int argc, char *argv[]) {
         app.exec();
         /* 没有真跑脚本，也就没有子进程要收；shutdown 是幂等的，顺手调一下 */
         doc.shutdown();
+        return result < 0 ? 9 : result;
+    }
+
+    /*
+     * 新增工具那一节（`--tool-test`）：文件对比 / 格式化 / 校验 / Markdown 预览。
+     *
+     * 和便签 / 翻译 / 识别那几条一样，不显示主窗口、不弹任何窗口 ——
+     * 这几件的判断逻辑全在 C++ 里（src/Diff.h、Formatter.h、Checker.h、
+     * EditorController::markdownHtml），开窗口反而会引入时序问题。
+     */
+    if (SelfTest::toolTestEnabled(argc, argv)) {
+        int result = -1;
+        QTimer::singleShot(200, &app, [&]() {
+            result = SelfTest::runTools(&fmt, &differ, &checker, &llm, quick->rootObject());
+            app.quit();
+        });
+        QTimer::singleShot(30000, &app, []() {
+            qWarning("工具自检超时，强制退出");
+            ::exit(9);
+        });
+        app.exec();
+        llm.shutdown();
         return result < 0 ? 9 : result;
     }
 

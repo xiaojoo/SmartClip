@@ -50,6 +50,15 @@ set(SMARTCLIP_SOURCES
     src/WindowHelper.cpp
     src/EditorController.h
     src/EditorController.cpp
+    # 代码格式化（右键菜单那一条，见 src/Formatter.h）：认外部工具 + 三种内置
+    src/Formatter.h
+    src/Formatter.cpp
+    # 编辑区校验（中文用词 / 代码语法，见 src/Checker.h）：本地规则 + 大模型
+    src/Checker.h
+    src/Checker.cpp
+    # 两份正文的差异（文件对比功能，见 src/Diff.h）
+    src/Diff.h
+    src/Diff.cpp
     src/EditorViewItem.h
     src/EditorViewItem.cpp
     src/Screenshot.h
@@ -97,6 +106,8 @@ set(SMARTCLIP_SOURCES
     src/SelfTestTranslate.cpp
     # 文档识别自检（`--doc-test` 只跑它，见 src/SelfTest.h）：
     src/SelfTestDoc.cpp
+    # 新增工具自检（`--tool-test` 只跑它：对比 / 格式化 / 校验 / Markdown）：
+    src/SelfTestTools.cpp
 )
 
 qt_add_executable(SmartClip ${SMARTCLIP_SOURCES})
@@ -153,8 +164,11 @@ qt_add_qml_module(SmartClip
         qml/components/AppToolTip.qml
         qml/components/DropdownMenu.qml
         qml/components/EditorArea.qml
+        qml/components/MarkdownView.qml
         qml/components/FindBar.qml
         qml/components/AskCard.qml
+        qml/components/CheckCard.qml
+        qml/components/DiffCard.qml
         qml/components/DocCard.qml
         qml/components/FolderTree.qml
         qml/components/SettingsPanel.qml

@@ -78,6 +78,72 @@ Rectangle {
     readonly property bool hasDocument: root.view.hasDocument
     readonly property bool hasTabs: root.hasDocument || root.previewItem !== null
 
+    /* ---- Markdown 预览（见 qml/components/MarkdownView.qml） ---- */
+
+    /* 正文显示的是预览还是源码（由 Main.qml 决定，这里只是接过来摆哪一页） */
+    property bool markdownPreview: false
+    /* 已经渲染好的 HTML（Main.qml 从 Cmd.markdownHtml 取来） */
+    property string markdownHtml: ""
+    /* 渲染结果为空时的提示语 */
+    property string markdownHint: "没有可预览的内容"
+    /* 当前这份文档能不能预览（不是 .md 就是假，标签栏那个开关据此显不显示） */
+    property bool canPreviewMarkdown: false
+
+    /* Markdown 预览里点了一个链接（交给 Main.qml -> Cmd.openExternal） */
+    signal markdownLinkActivated(string link)
+    /* 标签栏最右边那个"源码 / 预览"开关被点了 */
+    signal markdownToggleRequested()
+    /*
+     * 在预览里按了右键。
+     *
+     * 坐标是场景坐标（和编辑区 contextMenuRequested 同一个口径）—— Main.qml
+     * 收到就弹**程序自己那套**下拉菜单（见 openPreviewContextMenu）。
+     */
+    signal markdownContextMenuRequested(real x, real y)
+
+    /* 预览里选中的那段文字（正文那个只读 TextEdit 自己有 selectedText，见 MarkdownView） */
+    readonly property string previewSelectedText: markdownView.selectedText
+    readonly property bool previewHasSelection: markdownView.selectedText !== ""
+    function previewSelectAll() { markdownView.selectAll() }
+
+    /* ---- 分栏（tab 右键菜单里那三条，见 Main.qml 的 setSplit） ---- */
+
+    /*
+     *   ""      不分区（只有一栏）
+     *   "right" 左右两栏
+     *   "down"  上下两栏
+     *
+     * 两栏是**两个 EditorViewItem 实例**：主栏（editorView）永远在编辑，
+     * 另一栏（mirrorPane）由 C++ 那边（EditorViewItem::bindTo）把正文推过来，
+     * 只读显示 —— 在左边打字，右边立刻跟上。想在哪栏改就点哪一栏，命令
+     * 跟着焦点走（见 Main.qml 的 activeView）。
+     *
+     * 为什么不做成"同一个编辑器摆两份"：一个 QQuickItem 只有一个父项，
+     * 在父项之间搬会踩到"视觉父和 QObject 父不一致"的坑（实测编辑器整块
+     * 不可见）；而共享文档池那种做法要动编辑器内核，风险远大于收益。
+     */
+    property string splitMode: ""
+    /* 右（下）栏占多少比例（拖动分隔条改，夹在 0.2 ~ 0.8） */
+    property real splitRatio: 0.5
+    readonly property bool splitting: root.splitMode !== "" && root.view.hasDocument
+    /* 另一栏占多少像素；不分栏时是 0 */
+    readonly property real splitSize: {
+        if (!splitting || !contentArea)
+            return 0
+        return root.splitMode === "down" ? contentArea.height * (1 - splitRatio)
+                                         : contentArea.width * (1 - splitRatio)
+    }
+
+    /* 主栏 / 镜像栏（Main.qml 拿它决定命令发给谁） */
+    readonly property var mainView: editorView
+    readonly property var mirrorView: mirrorPane
+    /* 某一栏被点了（Main.qml 接住，把"当前编辑器"切过去） */
+    signal paneFocusRequested(var pane)
+
+    /* 分栏要的绑定（镜像 <- 主栏）由 Main.qml 调，这里只做转发 */
+    function bindMirror() { mirrorPane.bindTo(editorView) }
+    function unbindMirror() { mirrorPane.unbind() }
+
     IconProvider { id: icons }
 
     /*
@@ -398,7 +464,48 @@ Rectangle {
                  * 已经取消 —— 三条命令在"文件"菜单里都有，快捷键也还是
                  * Ctrl+N / Ctrl+W，标签右键菜单里还有关闭那一组。
                  * 标签栏因此整条留给标签本身，不再被按钮挤掉一截。
+                 *
+                 * 现在只留最右边这一个：Markdown 的"源码 / 预览"开关
+                 * （见 MarkdownView.qml 和 Main.qml 的 toggleMarkdownPreview）。
+                 * 它得有个看得见的位置 —— 只挂在菜单上的话，"打开 md 就是
+                 * 渲染后的样子"这件事用户根本发现不了；快捷键
+                 * Ctrl+Shift+V 提示在这条的 tooltip 上。
                  */
+                Rectangle {
+                    id: mdToggle
+
+                    Layout.preferredWidth: 28
+                    Layout.preferredHeight: 22
+                    Layout.alignment: Qt.AlignVCenter
+                    radius: 5
+                    visible: root.canPreviewMarkdown
+                    color: root.markdownPreview ? root.accentColor
+                                                : (mdHit.containsMouse ? "#3a3d41"
+                                                                       : "transparent")
+
+                    AppIcon {
+                        anchors.centerIn: parent
+                        provider: icons
+                        /* 预览开着 = 现在看的是一篇文章（用 markdown 那个图标） */
+                        kind: root.markdownPreview ? "markdown" : "preview"
+                        size: 15
+                        tint: root.markdownPreview ? "#ffffff" : root.textMain
+                    }
+
+                    MouseArea {
+                        id: mdHit
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: root.markdownToggleRequested()
+                    }
+
+                    AppToolTip {
+                        hovered: mdHit.containsMouse
+                        text: root.markdownPreview ? "回到源码（Ctrl+Shift+V）"
+                                                   : "预览 Markdown（Ctrl+Shift+V）"
+                    }
+                }
             }
 
             Rectangle {
@@ -581,44 +688,73 @@ Rectangle {
                 }
             }
 
-            /* ---- 正文编辑器（原生 QScintilla） ---- */
-            EditorView {
-                id: editorView
+            /*
+             * 主栏**只是一个占位壳**：它的几何就是"这块正文区"（不分栏时是整块，
+             * 分栏时是左 / 上半边），编辑器本体在里面 anchors.fill。
+             *
+             * 为什么要这一层：不分栏时这一层和 contentArea 一样大、位置也一样，
+             * 所以编辑器的 2px 内缩和卡片圆角**和加这个功能之前完全一致**
+             * （自检里那几条几何断言量到的就是这个）。分栏时它按 splitSize
+             * 缩一点，编辑器跟着缩 —— 不需要把编辑器搬来搬去。
+             */
+            Item {
+                id: mainPane
 
-                anchors.fill: parent
+                anchors.left: parent.left
+                anchors.top: parent.top
+                anchors.bottom: parent.bottom
+                width: Math.max(120, parent.width
+                                     - (root.splitMode === "down" ? 0 : root.splitSize))
+                height: Math.max(60, parent.height
+                                     - (root.splitMode === "down" ? root.splitSize : 0))
+                visible: !root.markdownPreview
 
-                /*
-                 * 和卡片边缘留出内边距。
-                 *
-                 * 编辑器是原生子控件，它自己的矩形角是直角：贴着卡片的角就会把
-                 * contentArea（radius: 10）画出来的圆角盖成直角。四边留一点就行，
-                 * 留多少只看**那边有没有滚动条** —— 滚动条是贴在编辑器边缘上的：
-                 *
-                 *   右边 / 底边各 2px：竖向、横向滚动条就在右边缘 / 下边缘上，
-                 *  让开一个圆角（10px）等于让滚动条离卡片边一个圆角，白空一条。
-                 *  2px 既保证方角压不到卡片的圆角上（两边底色本来就是同一个，
-                 *  见下面 paperColor: root.editorBg），又给坐标取整留了余量
-                 *  （EditorViewItem::applyGeometry 里是 qRound）。
-                 *  实测（截图逐像素比对）：2px 和原来 10px 画出来的圆角一模一样。
-                 *
-                 *   左边也收到 2px：编辑器最左边那一条就是行号栏，左边留多少，
-                 *  行号就离卡片左边缘多远（用户要的是"序号贴紧左边"）。
-                 *  正文不贴卡片左边缘这件事改由行号栏 + 折叠栏的宽度顶着，
-                 *  不再靠这里的左边距（见下面 paddingLeft 的说明）。
-                 */
-                readonly property int cardLeftInset: 2
-                readonly property int cardRightInset: 2
-                readonly property int cardBottomInset: 2
+                /* ---- 正文编辑器（原生 QScintilla） ---- */
+                EditorView {
+                    id: editorView
 
-                anchors.leftMargin: cardLeftInset
-                anchors.rightMargin: cardRightInset
-                anchors.bottomMargin: cardBottomInset
+                    /*
+                     * 这一份是**主编辑器**："当前编辑器是谁"（EditorViewItem::instance）
+                     * 就指它。分栏之后工程里有两个 EditorViewItem，靠"谁最后构造"
+                     * 来定并不可靠（QML 的构造顺序和声明顺序不一致 —— 实测镜像
+                     * 那个反而在后），所以由这里显式指定。
+                     */
+                    mainEditor: true
 
-                /*
-                 * 没有标签时**必须真的隐藏**：原生子窗口不受 QML 的
-                 * 层叠影响，只要 show 着就会盖在欢迎页上面。
-                 */
-                visible: root.view.hasDocument
+                    anchors.fill: parent
+
+                    /*
+                     * 和卡片边缘留出内边距。
+                     *
+                     * 编辑器是原生子控件，它自己的矩形角是直角：贴着卡片的角就会把
+                     * contentArea（radius: 10）画出来的圆角盖成直角。四边留一点就行，
+                     * 留多少只看**那边有没有滚动条** —— 滚动条是贴在编辑器边缘上的：
+                     *
+                     *   右边 / 底边各 2px：竖向、横向滚动条就在右边缘 / 下边缘上，
+                     *  让开一个圆角（10px）等于让滚动条离卡片边一个圆角，白空一条。
+                     *  2px 既保证方角压不到卡片的圆角上（两边底色本来就是同一个，
+                     *  见下面 paperColor: root.editorBg），又给坐标取整留了余量
+                     *  （EditorViewItem::applyGeometry 里是 qRound）。
+                     *  实测（截图逐像素比对）：2px 和原来 10px 画出来的圆角一模一样。
+                     *
+                     *   左边也收到 2px：编辑器最左边那一条就是行号栏，左边留多少，
+                     *  行号就离卡片左边缘多远（用户要的是"序号贴紧左边"）。
+                     *  正文不贴卡片左边缘这件事改由行号栏 + 折叠栏的宽度顶着，
+                     *  不再靠这里的左边距（见下面 paddingLeft 的说明）。
+                     */
+                    readonly property int cardLeftInset: 2
+                    readonly property int cardRightInset: 2
+                    readonly property int cardBottomInset: 2
+
+                    anchors.leftMargin: cardLeftInset
+                    anchors.rightMargin: cardRightInset
+                    anchors.bottomMargin: cardBottomInset
+
+                    /*
+                     * 没有标签时**必须真的隐藏**：原生子窗口不受 QML 的
+                     * 层叠影响，只要 show 着就会盖在欢迎页上面。
+                     */
+                    visible: root.view.hasDocument
 
                 /*
                  * 正文区的左右留白（Scintilla 的 SCI_SETMARGINLEFT / RIGHT）。
@@ -640,17 +776,129 @@ Rectangle {
                  * cardRightInset 那 2px）；正文的右边距改由竖滚动条顶着 ——
                  * 竖条出现时它自己占掉那一条。
                  */
-                paddingLeft: 2
-                paddingRight: 0
+                    paddingLeft: 2
+                    paddingRight: 0
 
-                fontPixelSize: root.editorFontSize
-                textColor: "#d6d7da"
-                paperColor: root.editorBg
-                gutterColor: root.editorBg
-                lineNumberColor: root.lineNumberColor
+                    fontPixelSize: root.editorFontSize
+                    textColor: "#d6d7da"
+                    paperColor: root.editorBg
+                    gutterColor: root.editorBg
+                    lineNumberColor: root.lineNumberColor
 
-                /* 切换标签时把"全部高亮"重新刷一遍 */
-                onDocumentsChanged: if (find.opened) find.refreshHighlight()
+                    /* 切换标签时把"全部高亮"重新刷一遍 */
+                    onDocumentsChanged: if (find.opened) find.refreshHighlight()
+
+                    /* 点进来 = 之后的命令（工具栏 / 菜单 / 快捷键）发给这一栏 */
+                    onPaneFocused: root.paneFocusRequested(editorView)                }
+            }
+
+            /* ---- Markdown 预览（只读渲染，见 MarkdownView.qml） ---- */
+            MarkdownView {
+                id: markdownView
+
+                anchors.fill: parent
+                /* 和源码页同样的 2px 内缩：切来切去时正文不跳位置 */
+                anchors.margins: 2
+                visible: root.markdownPreview
+                html: root.markdownHtml
+                emptyHint: root.markdownHint
+                onLinkActivated: (link) => root.markdownLinkActivated(link)
+                onContextMenuRequested: (x, y) => root.markdownContextMenuRequested(x, y)
+            }
+
+            /*
+             * 分栏的另一栏（右 / 下）：**镜像**，只在分栏时显示。
+             *
+             * 它和主栏是两个独立的 EditorViewItem：正文由 C++ 那边
+             * （EditorViewItem::bindTo）从主栏推过来，这边只读。用户要的
+             * "改一边另一边立刻跟着变"两种做法都一样，但这样不用动编辑器内核。
+             */
+            Item {
+                id: splitPane
+
+                anchors.right: parent.right
+                anchors.bottom: parent.bottom
+                width: Math.max(0, root.splitMode === "down" ? parent.width : root.splitSize)
+                height: Math.max(0, root.splitMode === "down" ? root.splitSize : parent.height)
+                anchors.left: root.splitMode === "down" ? parent.left : undefined
+                anchors.top: root.splitMode === "down" ? parent.top : undefined
+                visible: !root.markdownPreview && root.splitting
+
+                /*
+                 * 分隔条：6px 的抓取区（鼠标移上去 / 拖动时变强调色）。
+                 * 横向分栏时它贴在右栏的左边缘（x = -3），纵向分栏时贴在
+                 * 下栏的上边缘（y = -3）—— 正好落在两栏中间那条缝上。
+                 */
+                Rectangle {
+                    id: splitHandle
+
+                    width: root.splitMode === "down" ? parent.width : 6
+                    height: root.splitMode === "down" ? 6 : parent.height
+                    x: root.splitMode === "down" ? 0 : -3
+                    y: root.splitMode === "down" ? -3 : 0
+                    color: handleHit.pressed || handleHit.containsMouse
+                           ? root.accentColor : root.borderColor
+                    opacity: handleHit.pressed || handleHit.containsMouse ? 0.9 : 0.45
+
+                    MouseArea {
+                        id: handleHit
+
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: root.splitMode === "down" ? Qt.SizeVerCursor
+                                                               : Qt.SizeHorCursor
+
+                        property real pressPos: 0
+                        property real pressRatio: 0
+
+                        onPressed: (mouse) => {
+                            var p = mapToItem(contentArea, mouse.x, mouse.y)
+                            pressPos = root.splitMode === "down" ? p.y : p.x
+                            pressRatio = root.splitRatio
+                        }
+                        onPositionChanged: (mouse) => {
+                            if (!pressed || !contentArea)
+                                return
+                            var p = mapToItem(contentArea, mouse.x, mouse.y)
+                            var total = root.splitMode === "down" ? contentArea.height
+                                                                 : contentArea.width
+                            if (total <= 0)
+                                return
+                            var delta = (root.splitMode === "down" ? p.y : p.x) - pressPos
+                            /* 夹在 0.2 ~ 0.8：哪一栏都不许被拖到看不见 */
+                            root.splitRatio = Math.max(0.2, Math.min(0.8,
+                                                                   pressRatio + delta / total))
+                        }
+                    }
+                }
+
+                EditorView {
+                    id: mirrorPane
+
+                    /*
+                     * 镜像那一栏：**不是**主编辑器（"当前编辑器是谁"永远指主栏，
+                     * 见 editorView 上面那段），只跟着主栏显示。
+                     */
+                    mirror: true
+
+                    anchors.fill: parent
+                    /* 给分隔条让开那 3px，正文不压在它下面 */
+                    anchors.leftMargin: root.splitMode === "down" ? 2 : 5
+                    anchors.rightMargin: 2
+                    anchors.topMargin: root.splitMode === "down" ? 5 : 0
+                    anchors.bottomMargin: 2
+
+                    fontPixelSize: root.editorFontSize
+                    textColor: "#d6d7da"
+                    paperColor: root.editorBg
+                    gutterColor: root.editorBg
+                    lineNumberColor: root.lineNumberColor
+                    paddingLeft: 2
+                    paddingRight: 0
+
+                    /* 点进来 = 之后的命令发给这一栏（它只读，但选中/查找照用） */
+                    onPaneFocused: root.paneFocusRequested(mirrorPane)
+                }
             }
         }
     }

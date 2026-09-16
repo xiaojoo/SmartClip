@@ -37,7 +37,7 @@
  *   * 命令拼法：档位词接在最后、路径带引号、python 找不到时的退路；
  *   * 笔记落盘：正文带标题、图片真的写进 assets/、能在库里查到。
  *
- * 自检会动 QSettings 里 doc/* 那几个键（要试设置和失败路径），跑完**按原样
+ * 自检会动 QSettings 里 doc 那一组键（要试设置和失败路径），跑完**按原样
  * 写回** —— 用户自己的配置不会被自检改掉。
  */
 
@@ -707,7 +707,14 @@ int SelfTest::runDoc(ClipboardStore *store) {
             docCheck(QFileInfo::exists(asset), "插图落到 assets/ 下了", asset);
             if (QFileInfo::exists(asset)) {
                 QFile file(asset);
-                file.open(QIODevice::ReadOnly);
+                /*
+                 * open() 是 [[nodiscard]]：不看返回值编译器要报 C4834。
+                 * 这里也**确实该看** —— 打不开的话下面 readAll() 是空的，
+                 * 断言会挂在"字节不一致"上，而真正的原因是文件没打开，
+                 * 报错方向就偏了。
+                 */
+                const bool opened = file.open(QIODevice::ReadOnly);
+                docCheck(opened, "能把落盘的插图重新打开", asset);
                 docCheck(file.readAll() == tinyPng(), "插图和脚本给的那份字节一致");
                 file.close();
             }

@@ -4,15 +4,20 @@
 
 #include <QAbstractNativeEventFilter>
 #include <QAction>
+#include <QClipboard>
 #include <QCoreApplication>
 #include <QDesktopServices>
 #include <QDialog>
 #include <QDir>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QGuiApplication>
+#include <QImage>
 #include <QInputDialog>
 #include <QKeySequence>
+#include <QRegularExpression>
 #include <QSettings>
+#include <QTextDocument>
 #include <QUrl>
 #include <QWidget>
 
@@ -46,6 +51,43 @@ const GlobalHotkeyEntry kGlobalHotkeys[] = {
     /* 翻译卡片 / 便签都是"把一个工具从桌面上叫出来"，同样值得有系统级热键 */
     {0x5C03, "translate"},
 };
+
+/*
+ * Markdown 预览那份 HTML 的样式（见 EditorController::markdownToPreviewHtml）。
+ *
+ * 给的是 QTextDocument 的 defaultStyleSheet —— 也就是**渲染时**用的样式，
+ * 而不是渲染完再往上糊一层（toHtml() 会把 defaultStyleSheet 原样带出去，
+ * 所以预览那边的 Text 拿到的就已经是这份配色了）。
+ *
+ * 为什么每一处颜色都要写死：QML 的 Text 只认行内的这些属性，它**不读**
+ * QTextDocument 那一套调色板。默认样式表是一份白纸黑字，留着不管的话，
+ * 深色界面上就是一片黑字（几乎等于什么都没显示）。颜色值和界面其它地方
+ * 对齐：正文 / 标题用 #d6d7da 系，次要文字 #9aa0a6，代码块底 #26282c。
+ *
+ * 段间距用 em 而不是 px：字号是用户在设置里能改的，跟着字号缩放才协调。
+ */
+const char *const kMarkdownCss = R"CSS(
+body { color: #d6d7da; }
+p { color: #d6d7da; margin-top: 0.45em; margin-bottom: 0.45em; }
+h1, h2, h3, h4, h5, h6 { color: #e8e8e8; font-weight: bold;
+                         margin-top: 0.9em; margin-bottom: 0.4em; }
+h1 { font-size: 1.7em; }
+h2 { font-size: 1.45em; }
+h3 { font-size: 1.25em; }
+h4 { font-size: 1.12em; }
+h5, h6 { font-size: 1em; }
+a { color: #4c96d8; }
+code { font-family: Consolas, "Courier New", monospace; color: #d7ba7d; }
+pre { font-family: Consolas, "Courier New", monospace; color: #d6d7da;
+      background-color: #26282c; }
+blockquote { color: #9aa0a6; margin-left: 1.2em; }
+li { color: #d6d7da; }
+table { border-width: 1px; border-style: solid; border-color: #4b4d4f; }
+th { background-color: #2b2d30; color: #e8e8e8; font-weight: bold;
+     border-width: 1px; border-style: solid; border-color: #4b4d4f; }
+td { border-width: 1px; border-style: solid; border-color: #4b4d4f; }
+hr { color: #4b4d4f; }
+)CSS";
 
 #if defined(Q_OS_WIN)
 
@@ -264,6 +306,15 @@ const ShortcutEntry kShortcutTable[] = {
     {"findPrev",      "查找上一个", "查找", "Shift+F3"},
     {"goto",          "转到行",     "查找", "Ctrl+G"},
     {"toggleComment", "切换注释",   "编辑", "Ctrl+/"},
+    /* Markdown 预览开关（见 qml/components/MarkdownView.qml） */
+    {"toggleMarkdownPreview", "Markdown 预览", "编辑", "Ctrl+Shift+V"},
+    /* 代码格式化（右键菜单那一条，见 src/Formatter.h） */
+    {"formatCode",    "格式化代码", "编辑", "Ctrl+Shift+F"},
+    /* 编辑区校验（中文用词 / 代码语法，见 src/Checker.h） */
+    {"checkFile",     "校验当前文件", "编辑", "Ctrl+Shift+K"},
+    /* 分栏（同一份文档摆在两栏里，见 qml/components/EditorArea.qml） */
+    {"splitRight",    "左右分栏",   "视图", "Alt+Shift+2"},
+    {"splitDown",     "上下分栏",   "视图", "Alt+Shift+3"},
     {"zoomIn",        "放大",       "视图", "Ctrl+="},
     {"zoomOut",       "缩小",       "视图", "Ctrl+-"},
     {"zoomReset",     "重置缩放",   "视图", "Ctrl+0"},
@@ -532,6 +583,238 @@ void EditorController::revealInExplorer(const QString &path) {
         return;
 
     QDesktopServices::openUrl(QUrl::fromLocalFile(dir));
+}
+
+/*
+ * Markdown 预览：把原文（加上这份文档所在目录拼出来的绝对图片路径）交给
+ * QTextDocument 渲染，取回**它自己吐出来的那份 HTML**。
+ *
+ * 为什么不自己拼 HTML：QTextDocument 的 markdown 读入器 + toHtml 走的是
+ * 同一份文档模型 —— 读进来什么样、吐出来就是什么样，标签是它自己写的，
+ * 永远配平。拿第三方 md->html 或者手写替换，迟早在某段怪格式上吐出一份
+ * 半截标签，Text 那侧就整段不显示。
+ *
+ * toHtml() 出来的是 Qt 的"受控 HTML 子集"（只有 p / span / table / img /
+ * a 那几样 + 一份基础 CSS），所以不用担心用户文件里塞了什么怪东西 ——
+ * 它的原始 HTML 块会被当成纯文本，而不是当成标签执行。
+ */
+
+/*
+ * QTextDocument 读 markdown 时，遇到 ![](xxx.png) 会**自己去加载那张图** ——
+ * 加载不到就把整张图丢掉（HTML 里连 <img> 都没有）。默认那套加载走的是
+ * QTextDocument 的资源缓存（要提前 addResource），它不认我们拼出来的
+ * file:// 路径，所以预览里图片一律看不见（实测）。
+ *
+ * 这个子类只干一件事：把资源加载接到**磁盘**上 —— 是个本地文件就用
+ * QImage 读出来，读不到返回空（QTextDocument 会当成"图没了"，不影响别的）。
+ * 图片引用仍然在 markdown 里就改写成绝对路径（见调用处），这里只是让它
+ * 真的能读出来。
+ */
+class MarkdownPreviewDocument final : public QTextDocument {
+public:
+    explicit MarkdownPreviewDocument(QObject *parent = nullptr) : QTextDocument(parent) {}
+
+protected:
+    QVariant loadResource(int type, const QUrl &name) override {
+        if (type == QTextDocument::ImageResource) {
+            const QString local = name.isLocalFile() ? name.toLocalFile() : name.toString();
+            QImage image;
+            if (!local.isEmpty() && image.load(local))
+                return image;
+        }
+        return QTextDocument::loadResource(type, name);
+    }
+};
+
+QString EditorController::markdownToPreviewHtml(const QString &markdown,
+                                                const QString &baseDir) {
+    /*
+     * 1) 相对图片路径 -> 绝对路径。
+     *
+     * 笔记里的引用是 `![](assets/xxx.png)` —— 相对的是**这份 md 所在的那个目录**。
+     * 笔记目录和程序工作目录没有任何关系，不在这里手动拼绝对路径的话，
+     * QTextDocument 会按 JOB 的当前目录去解析，预览里就全是裂图（踩过）。
+     * 渲染完之后文档自己的 baseUrl 一律清成空（见下面），所以路径必须在这一步
+     * 就落成绝对的。
+     */
+    static const QRegularExpression kImage(
+        QStringLiteral(R"(!\[([^\]]*)\]\(\s*(<[^>]*>|[^)\s]+)((?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?\s*)\))"));
+
+    const QString base = baseDir.trimmed();
+    const bool haveBase = !base.isEmpty();
+
+    QString source = markdown;
+    if (haveBase) {
+        /*
+         * 从后往前替换：改一处不会让前面那些匹配的下标失效。
+         * 全局匹配是一次性拿全的，所以就算不改下标其实也不会错位，
+         * 倒着走只是把这件事做得再明显一点。
+         */
+        QList<QRegularExpressionMatch> hits;
+        auto it = kImage.globalMatch(markdown);
+        while (it.hasNext())
+            hits.append(it.next());
+        for (int i = hits.size() - 1; i >= 0; --i) {
+            const QRegularExpressionMatch &m = hits.at(i);
+            QString raw = m.captured(2);
+            if (raw.startsWith(QLatin1Char('<')) && raw.endsWith(QLatin1Char('>')))
+                raw = raw.mid(1, raw.size() - 2);
+            /* 已经写死成绝对路径 / URL 的，原样不动 */
+            if (raw.isEmpty() || raw.contains(QLatin1String("://"))
+                || raw.startsWith(QLatin1String("data:")))
+                continue;
+            const QString abs = QDir(base).absoluteFilePath(raw);
+            source.replace(m.capturedStart(2), m.capturedLength(2),
+                           QStringLiteral("<")
+                               + QUrl::fromLocalFile(abs).toString(QUrl::FullyEncoded)
+                               + QStringLiteral(">"));
+        }
+    }
+
+    /*
+     * 2) 渲染，然后把配色**插进 head 里的那段 <style>**。
+     *
+     * setDefaultStyleSheet 只在 QTextDocument 自己用的时候生效：toHtml() 出来
+     * 的那份 HTML 里**没有**它（实测：head 里只有一段 `p, li { white-space:
+     * pre-wrap; }`）。而 QML 那边是个 Text/TextArea，只认行内样式表 ——
+     * 不把配色写进去，预览就是默认的白纸黑字，在深色界面上等于什么都看不见。
+     *
+     * 插在 **</head> 之前**，而不是塞到那一段 <style> 里面：head 里那段是我们
+     * 现在拿到的这个字符串的一部分，往里插要处理它自己的转义；另起一段
+     * <style> 更简单也更稳（浏览器 / Qt 的富文本都按后者覆盖前者来算）。
+     */
+    /* 子类：图片从磁盘读（见上面 MarkdownPreviewDocument 的说明） */
+    MarkdownPreviewDocument doc;
+    doc.setMarkdown(source);
+    doc.setBaseUrl(QUrl(QString()));    /* 上面已经落成绝对路径，这里不再兜底解析 */
+
+    QString html = doc.toHtml();
+    const QString styleTag =
+        QStringLiteral("<style type=\"text/css\">") + QString::fromLatin1(kMarkdownCss)
+        + QStringLiteral("</style>");
+    const int headEnd = html.indexOf(QStringLiteral("</head>"));
+    if (headEnd >= 0)
+        html.insert(headEnd, styleTag);
+    else
+        html.prepend(styleTag);     /* 没有 head（不该发生）：至少别把配色丢了 */
+
+    /*
+     * 兜底：图片。
+     *
+     * Qt 的 markdown 读入器**会把图片丢掉**（实测：`![](a.png)` 读进文档之后
+     * toHtml() 里连 <img> 都没有，只留一个空段落；上面那个 loadResource 也救
+     * 不回来，因为它压根不去解析那个片段 —— 整个 <img> 在 Qt 6.11 的 markdown
+     * 读入器里就没落地）。所以笔记里的插图只能我们自己补。
+     *
+     * 位置是**近似**的：补出来的图在整篇末尾单列一块（"文档里的插图"），
+     * 而不是嵌在正文那一行下面 —— 读入器把图整个丢了，原文里那个位置已经没有
+     * 锚点可用了。列表 + 说明至少让用户看得见图，而不是一片空白。
+     */
+    {
+        QList<QRegularExpressionMatch> hits;
+        auto it = kImage.globalMatch(source);
+        while (it.hasNext())
+            hits.append(it.next());
+
+        QString figures;
+        for (const QRegularExpressionMatch &m : hits) {
+            QString raw = m.captured(2);
+            if (raw.startsWith(QLatin1Char('<')) && raw.endsWith(QLatin1Char('>')))
+                raw = raw.mid(1, raw.size() - 2);
+            if (raw.isEmpty())
+                continue;
+
+            /*
+             * 拼出最终要写进 src 的那条 URL。没给 baseDir 时相对路径原样保留，
+             * 但它没有基准目录可解析 —— 补出来也是裂图，所以跳过。
+             */
+            QString url;
+            if (raw.contains(QLatin1String("://")) || raw.startsWith(QLatin1String("data:")))
+                url = raw;
+            else if (haveBase)
+                url = QUrl::fromLocalFile(QDir(base).absoluteFilePath(raw))
+                          .toString(QUrl::FullyEncoded);
+            if (url.isEmpty())
+                continue;
+
+            const QString alt = m.captured(1);
+            /*
+             * width 给个上限：笔记里的截图常是整屏的，原尺寸会把预览撑爆。
+             * QML 那边的 Text/TextArea 认这个属性。
+             */
+            figures += QStringLiteral("<p><img src=\"%1\" width=\"520\" />%2</p>")
+                           .arg(url.toHtmlEscaped(),
+                                alt.isEmpty()
+                                    ? QString()
+                                    : QStringLiteral("<br /><i>%1</i>").arg(alt.toHtmlEscaped()));
+        }
+        if (!figures.isEmpty()) {
+            const QString block = QStringLiteral("<hr /><p><b>文档里的插图</b></p>") + figures;
+            const int bodyEnd = html.lastIndexOf(QStringLiteral("</body>"));
+            if (bodyEnd >= 0)
+                html.insert(bodyEnd, block);
+            else
+                html += block;
+        }
+    }
+    return html;
+}
+
+
+/*
+ * 预览里点链接（MarkdownView 的 linkActivated -> Main.qml -> 这里）。
+ *
+ * 只放行这几种协议，其余一律拒绝：预览的内容来自用户自己的文件，
+ * 理论上不会有别的东西，但"渲染器放出来什么就照着执行什么"不是个好习惯。
+ * 返回有没有真的交出去（自检拿它钉这条白名单）。
+ */
+bool EditorController::openExternal(const QString &url) {
+    const QString trimmed = url.trimmed();
+    if (trimmed.isEmpty())
+        return false;
+
+    /*
+     * 纯本地路径（"C:/x/y.md" 这种）：QUrl 会把它认成 scheme "c"，
+     * 按下面的白名单会直接被拒。先按"这是不是一个真实存在的本地路径"试一次。
+     */
+    const QUrl asUrl(trimmed, QUrl::StrictMode);
+    const QString scheme = asUrl.scheme().toLower();
+
+    static const QStringList kAllowed{
+        QStringLiteral("http"), QStringLiteral("https"),
+        QStringLiteral("mailto"), QStringLiteral("file")};
+
+    if (!scheme.isEmpty() && kAllowed.contains(scheme)) {
+        if (scheme == QLatin1String("file") && asUrl.isLocalFile())
+            return QDesktopServices::openUrl(QUrl::fromLocalFile(asUrl.toLocalFile()));
+        return QDesktopServices::openUrl(asUrl);
+    }
+
+    /* 没有协议头：当成本地路径（存在才开，免得对着一串乱码弹系统报错框） */
+    if (scheme.isEmpty() || scheme.size() == 1) {
+        const QFileInfo info(trimmed);
+        if (info.exists())
+            return QDesktopServices::openUrl(QUrl::fromLocalFile(info.absoluteFilePath()));
+    }
+    return false;
+}
+
+/*
+ * 预览入口（QML 调的就是这个）。
+ *
+ * 原文是空的就直接返回空串，连渲染都不做：QML 那边拿到空串会显示
+ * "没有可预览的内容"，这也让"空文件"和"渲染失败"在界面上是同一句话 ——
+ * 而不是一块什么都没有的空白（用户分不清是卡住了还是本来就没内容）。
+ */
+QString EditorController::markdownHtml(const QString &markdown, const QString &baseDir) {
+    if (markdown.trimmed().isEmpty())
+        return QString();
+    return markdownToPreviewHtml(markdown, baseDir);
+}
+
+void EditorController::copyText(const QString &text) {
+    if (auto *clip = QGuiApplication::clipboard())
+        clip->setText(text);
 }
 
 /*

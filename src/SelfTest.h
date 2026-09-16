@@ -16,6 +16,9 @@ class TranslateCards;
 class LlmClient;
 class Speech;
 class DocImport;
+class Formatter;
+class DiffEngine;
+class Checker;
 
 /*
  * 自检模式：`SmartClip.exe --self-test`
@@ -51,6 +54,15 @@ bool translateTestEnabled(int argc, char **argv);
 
 /* `--doc-test`：只跑文档识别那一节（见 runDoc） */
 bool docTestEnabled(int argc, char **argv);
+
+/*
+ * `--tool-test`：只跑"新增工具"那一节（文件对比 / 格式化 / 校验 / Markdown
+ * 预览，见 runTools）。
+ *
+ * 和便签 / 翻译 / 识别那几条同一个用意：这几件新东西的判断逻辑全在 C++ 里，
+ * 不用开主窗口就能验，改它们的时候不必把 SelfTest.cpp 那几千行跑一遍。
+ */
+bool toolTestEnabled(int argc, char **argv);
 
 /*
  * `--doc-e2e`：文档识别**真跑一遍**（造一份 PDF -> 调真脚本 -> 落成笔记）。
@@ -164,5 +176,21 @@ int runDocQueue(DocImport *doc, ClipboardStore *store, const QString &pythonExe,
  */
 int docPassed();
 int docFailed();
+
+/*
+ * 新增工具那一节的自检：文件对比 / 格式化 / 校验 / Markdown 预览。
+ *
+ * 三个对象都由 main.cpp 传进来（它们是 QML 单例，界面和自检必须是**同一份**
+ * —— 自己 new 一个的话，自检改的设置界面看不到，界面上开着的开关自检也读不到）。
+ * 任何一个传空，对应的那一节就跳过。
+ *
+ * qmlRoot 是 Main.qml 的根对象：预览那份右键菜单、以及"打开 .md 之后能不能
+ * 预览"这些只有 QML 那侧答得出来（见 editMenuPreviewActs / canPreviewMarkdown），
+ * 传空就跳过那一节。返回失败项数（0 = 全过）。
+ */
+int runTools(Formatter *fmt, DiffEngine *differ, Checker *check, LlmClient *llm = nullptr,
+             QObject *qmlRoot = nullptr);
+int toolsPassed();
+int toolsFailed();
 
 }  // namespace SelfTest

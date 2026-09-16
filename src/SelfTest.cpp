@@ -251,6 +251,13 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
         return result.toList();
     };
 
+    /* 读编辑区右键菜单的条目清单（见 Main.qml 的 editMenuActs，同上） */
+    auto editMenuActs = [qmlRoot]() {
+        QVariant result;
+        QMetaObject::invokeMethod(qmlRoot, "editMenuActs", Q_RETURN_ARG(QVariant, result));
+        return result.toList();
+    };
+
     /* 读设置菜单的条目清单（见 Main.qml 的 settingsMenuActs，同上） */
     auto settingsMenuActs = [qmlRoot]() {
         QVariant result;
@@ -1867,6 +1874,62 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
         check(viewBottom <= cardH + 0.5 && viewRight <= cardW + 0.5,
               QStringLiteral("编辑器没有溢出卡片（不压状态栏、不出画布）"), geom);
 
+        /*
+         * ============ 分栏（tab 右键那三条） ============
+         *
+         * 钉两件事：
+         *   1) 右键菜单里那三条命令**接得上**（dispatch 之后 editor.splitMode
+         *      真的变了）—— 菜单是数据、dispatch 是执行，两边名字写错一个字
+         *      在界面上就是"点了没反应"；
+         *   2) 分栏之后**镜像那一栏真的拿到了同一份正文**（bindMirror 把文本推
+         *      过去了）—— 只改布局不推正文的话，右栏会一直空着。
+         */
+        {
+            /*
+             * 用**真文件**分栏：上面那个是 newDocument() 出来的空白标签，
+             * 两边都是 0 字，比出来"相等"也说明不了什么。
+             */
+            check(view->openFile(srcPath) >= 0,
+                  QStringLiteral("分栏用例：先打开一份有内容的文件"));
+
+            dispatch(QStringLiteral("splitRight"));
+            for (int i = 0; i < 3; ++i)
+                QCoreApplication::processEvents();
+
+            const QString mode = uiState().value(QStringLiteral("splitMode")).toString();
+            check(mode == QLatin1String("right"),
+                  QStringLiteral("dispatch(splitRight) 之后真的在左右分栏"), mode);
+
+            const QString mirrorText =
+                uiState().value(QStringLiteral("mirrorText")).toString();
+            const QString mainText = view->currentText();
+            check(!mirrorText.isEmpty() && mirrorText == mainText,
+                  QStringLiteral("镜像栏拿到了主栏的正文（两边一模一样）"),
+                  QStringLiteral("主 %1 字 / 镜像 %2 字")
+                      .arg(mainText.size()).arg(mirrorText.size()));
+
+            /*
+             * 再验一次"主栏换了文档，镜像跟着换"：新建一个空白标签（主栏变成
+             * 空文档），镜像也该变空。
+             *
+             * 这里**不改成"改正文看镜像跟不跟"**：那会把文档标成"已修改"，
+             * 后面 closeAllTabs 就会弹「保存 / 不保存」那块卡片等用户回答 ——
+             * 自检里没有用户，整串就卡在那儿（实测：后面十几条"标签还在"）。
+             */
+            dispatch(QStringLiteral("new"));
+            for (int i = 0; i < 3; ++i)
+                QCoreApplication::processEvents();
+            check(view->currentText().isEmpty()
+                      && uiState().value(QStringLiteral("mirrorText")).toString().isEmpty(),
+                  QStringLiteral("主栏换成空白标签之后，镜像栏也跟着空了"));
+
+            dispatch(QStringLiteral("splitNone"));
+            for (int i = 0; i < 3; ++i)
+                QCoreApplication::processEvents();
+            check(uiState().value(QStringLiteral("splitMode")).toString().isEmpty(),
+                  QStringLiteral("dispatch(splitNone) 之后回到单栏"));
+        }
+
         dispatch(QStringLiteral("closeAllTabs"));
     }
 
@@ -2020,14 +2083,21 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
     check(view->filePath() == QFileInfo(srcPath).absoluteFilePath(),
           QStringLiteral("留下的是下标 1 那个文件标签（不是当前标签）"), view->filePath());
 
-    /* 菜单条目：三条，下标跟着"被右键的那个标签"走（这里问的是下标 1） */
+    /*
+     * 菜单条目：关闭那一组 + 分栏那一组 + 与此文件对比。
+     *
+     * 下标跟着"被右键的那个标签"走（这里问的是下标 1）—— 关闭/关闭其他那两条
+     * 必须带 :1，分栏和对比是"对当前编辑器 / 当前文档"的动作，不带下标。
+     */
     {
         QString acts;
         const QVariantList list = tabMenuActs(1);
         for (const QVariant &a : list)
             acts += (acts.isEmpty() ? QString() : QStringLiteral(" | ")) + a.toString();
-        check(acts == QStringLiteral("closeTab:1 | closeOthers:1 | closeAllTabs"),
-              QStringLiteral("tab 菜单 = 关闭 / 关闭其他 / 关闭全部，下标是点中的那个"),
+        check(acts == QStringLiteral("closeTab:1 | closeOthers:1 | closeAllTabs"
+                                     " | separator | splitRight | splitDown | splitNone"
+                                     " | separator | compareTab:1"),
+              QStringLiteral("tab 菜单 = 关闭那一组 + 分栏那一组 + 与此文件对比，下标是点中的那个"),
               acts);
     }
 
@@ -2055,9 +2125,25 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
         check(qAbs(mx - probeX) < 0.5 && qAbs(my - probeY) < 0.5,
               QStringLiteral("菜单左上角紧贴鼠标点（300,120）"),
               QStringLiteral("实际 (%1, %2)").arg(mx).arg(my));
-        check(qAbs(contentH - 92.0) < 0.5,
-              QStringLiteral("菜单里就是 tab 那三条（3×28 + 8 内边距）"),
-              QStringLiteral("内容高 %1").arg(contentH));
+        /*
+         * 内容高度 = 条目数 × 行高 + 分隔线 + 内边距。
+         *
+         * 不写死 92：tab 菜单现在多了分栏和"与此文件对比"那几条（见
+         * js/EditorMenus.js 的 tabMenu）。这里按**实际条目**算一遍 ——
+         * 钉的是"菜单确实按每项 28px 排出来的"，条目增删不用改这一行。
+         */
+        const int tabEntryCount = tabMenuActs(0).size();
+        int tabSeparators = 0;
+        for (const QVariant &a : tabMenuActs(0)) {
+            if (a.toString() == QLatin1String("separator"))
+                ++tabSeparators;
+        }
+        const double expectH = (tabEntryCount - tabSeparators) * 28.0 + tabSeparators * 9.0 + 8.0;
+        check(qAbs(contentH - expectH) < 0.5,
+              QStringLiteral("菜单按每项 28px 排出来（条目数对得上）"),
+              QStringLiteral("内容高 %1（期望 %2，条目 %3 + 分隔线 %4）")
+                  .arg(contentH).arg(expectH).arg(tabEntryCount - tabSeparators)
+                  .arg(tabSeparators));
     }
 
     /*
@@ -2900,10 +2986,26 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
         check(qAbs(mx - editProbeX) < 0.5 && qAbs(my - editProbeY) < 0.5,
               QStringLiteral("右键菜单左上角紧贴鼠标点（620,260）"),
               QStringLiteral("实际 (%1, %2)").arg(mx).arg(my));
-        /* 12 条命令 + 4 条分隔线：12*28 + 4*9 + 上下各 4px 内缩 = 380 */
-        check(qAbs(contentH - 380.0) < 0.5,
-              QStringLiteral("弹的就是\"编辑\"菜单那一份（12 项 + 4 分隔线）"),
-              QStringLiteral("内容高 %1").arg(contentH));
+        /*
+         * 高度按**实际条目**算（12 条命令 + 4 条分隔线，现在又多了格式化 /
+         * 校验 / 预览那几条，见 js/EditorMenus.js 的 editMenu）。
+         * 每项 28px、分隔线 9px、上下各 4px 内缩 —— 钉的是"菜单按这套尺寸排
+         * 出来了、条目数和菜单栏那份一致"，增删条目不用改这一行。
+         */
+        const QVariantList editActs = editMenuActs();
+        int editItems = 0;
+        int editSeps = 0;
+        for (const QVariant &a : editActs) {
+            if (a.toString() == QLatin1String("separator"))
+                ++editSeps;
+            else
+                ++editItems;
+        }
+        const double expectEditH = editItems * 28.0 + editSeps * 9.0 + 8.0;
+        check(qAbs(contentH - expectEditH) < 0.5,
+              QStringLiteral("弹的就是\"编辑\"菜单那一份（条目数和总高对得上）"),
+              QStringLiteral("内容高 %1（期望 %2，条目 %3 + 分隔线 %4）")
+                  .arg(contentH).arg(expectEditH).arg(editItems).arg(editSeps));
         check(ui.value(QStringLiteral("menuHasIcons")).toBool(),
               QStringLiteral("右键菜单条目也带图标（和菜单栏一致）"));
     }

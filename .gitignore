@@ -11,3 +11,6 @@ build_verify/
 /venv/
 # 跑随包脚本时 Python 自己生成的字节码缓存（resources/scripts/ 下会冒出来）
 __pycache__/
+# 截图那条路的调试痕迹（Screenshot.cpp 自己写的调试文件，落在**工作目录**下，
+# 也就是仓库根）。不该跟着提交 —— 它是用来查"取消截图时闪一下边框"的。
+shot-trace.log

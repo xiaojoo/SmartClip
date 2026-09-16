@@ -214,6 +214,23 @@ public:
      */
     Q_INVOKABLE void probe();
 
+    /*
+     * 发一条**自定义提示词**的请求（通用的那一档，不写死"你是翻译"）。
+     *
+     * 为什么单开一个入口而不是让调用方拼 translate：translate 的 system 提示词
+     * 是"只输出译文"那套规矩，硬塞一个别的任务进去会让模型两套指令打架。
+     * 现在用它的是编辑区校验（src/Checker.cpp：中文用词 / 代码语法），
+     * 它要的是"按固定格式输出问题清单"。
+     *
+     * 回调契约和 translate 一模一样：返回 token，结果从 finished/failed 回来。
+     * busyStatus 是这期间状态栏上那句话（"正在校验…"）。
+     */
+    Q_INVOKABLE QString ask(const QString &systemPrompt, const QString &userText,
+                            const QString &busyStatus = QString());
+
+    /* 当前有几个请求在飞（校验和翻译可能同时在跑，busy 不能谁先回来谁关掉） */
+    int inFlight() const { return m_inFlight; }
+
     /* 启动 / 停掉本地推理服务进程（local 模式） */
     Q_INVOKABLE bool startLocal();
     Q_INVOKABLE void stopLocal();
@@ -277,6 +294,9 @@ private:
         /*
          * 识别那几条请求也要能在本地模型加载期间排队（见上面那段），
          * 所以这里带上图：image 非空 = 这是一条识别请求，persona 是它的角色词。
+         *
+         * persona == "ask" 是第三种（见 ask()）：那时 source 里寄存的是
+         * **system 提示词**（不是语言名），重新发出去时要原样还给 ask。
          */
         QString image;
         QString persona;
@@ -288,6 +308,11 @@ private:
 
     void setStatus(const QString &text);
     void setBusy(bool on);
+    /*
+     * 在飞请求的计数守卫（定义在 .cpp 里）：构造 +1、析构 -1，归零时收 busy。
+     * 三条请求路径（post / postVision / ask）在发出去之前各建一个。
+     */
+    struct InFlightGuard;
     void persist(const QString &key, const QVariant &value);
     void appendLocalLog(const QString &chunk);
     /* 本地服务起来之后轮询 /models，能通了就报"已就绪" */
@@ -317,6 +342,14 @@ private:
     QList<PendingRequest> m_pending;
 
     bool m_busy = false;
+    /*
+     * 在飞的请求数（ask / translate / recognize 都算）。
+     *
+     * 为什么不是一条 bool：校验发出去了、用户又点了一下翻译，两条请求同时在跑 ——
+     * 先回来的那条把 busy 置假，界面上转圈就没了，可另一条还在等。
+     * 所以 busy 改成"计数归零才算不忙"（见 send() 的回调里那一段）。
+     */
+    int m_inFlight = 0;
     QString m_status;
     QString m_localLog;
     int m_nextToken = 1;

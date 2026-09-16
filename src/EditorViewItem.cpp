@@ -252,7 +252,18 @@ EditorViewItem::EditorViewItem(QQuickItem *parent) : QQuickItem(parent) {
     setFlag(ItemHasContents, false);
 
     m_store = s_store;
-    s_instance = this;
+    /*
+     * s_instance（"当前编辑器是谁"）**不在这里抢**。
+     *
+     * 原来写的是"谁最后构造谁就是当前编辑器"，分栏之后这条规矩就错了：
+     * QML 把两个 EditorViewItem（editorView / mirrorPane）建出来的**顺序不保证**
+     * 和声明顺序一致（实测过：镜像那个反而在后），于是 s_instance 会落在
+     * 只读的镜像上 —— 自检 700 多项里 61 项当场变红（量到的全是那块没文档、
+     * 宽高为负的镜像）。
+     *
+     * 现在由 QML 显式指定：主栏那份写 `mainEditor: true`（见下面的 setter），
+     * 谁是主编辑器一目了然，和创建顺序无关。
+     */
 }
 
 EditorViewItem::~EditorViewItem() {
@@ -403,6 +414,13 @@ void EditorViewItem::ensureWrapped() {
             return;
         applyMargins();
         emit statsChanged();
+        /*
+         * 分栏：源那边正文一变就推给镜像（直接调，不走队列 —— 用户要的是
+         * "在左边打一个字，右边立刻跟上"）。m_syncing 是防回环的闸门：
+         * 镜像灌正文时也会发这个信号，那一次必须挡住。
+         */
+        if (!m_syncing && m_source)
+            m_source->syncFromSource();
     });
 
     connect(m_sci, &QsciScintilla::linesChanged, this, [this]() {
@@ -410,7 +428,7 @@ void EditorViewItem::ensureWrapped() {
         emit statsChanged();
     });
 
-    connect(m_sci, &QsciScintilla::cursorPositionChanged, this, [this](int, int) {
+        connect(m_sci, &QsciScintilla::cursorPositionChanged, this, [this](int, int) {
         if (Doc *d = currentDoc())
             d->cursorPos = long(m_sci->SendScintilla(QsciScintillaBase::SCI_GETCURRENTPOS));
         emit cursorChanged();
@@ -429,6 +447,8 @@ void EditorViewItem::ensureWrapped() {
         emit cursorChanged();
         emit undoStateChanged();
     });
+
+    /* 分栏之后"用户在哪一栏干活"由 eventFilter 里的 MouseButtonPress 报（见那里） */
 
     /*
      * 先保持隐藏。
@@ -1867,6 +1887,17 @@ bool EditorViewItem::eventFilter(QObject *watched, QEvent *event) {
         }
     }
 
+    /*
+     * 鼠标按下 / 键盘焦点进来 = "用户在这一栏里干活"（分栏之后命令发给谁就看它）。
+     *
+     * 用 eventFilter 接 MouseButtonPress，不用 Scintilla 的信号：后者没有
+     * "被点了一下"这种东西，而且点在空白处（光标没动）时 cursorPositionChanged
+     * 也不会发。这里**不吃掉**事件（返回 false 的走法在下面统一处理）。
+     */
+    if (event->type() == QEvent::MouseButtonPress && watched == m_sci && m_sci
+        && isVisible())
+        emit paneFocused();
+
     if (event->type() == QEvent::ContextMenu && m_sci && isVisible() && isEnabled()) {
         auto *ce = static_cast<QContextMenuEvent *>(event);
 
@@ -2936,6 +2967,197 @@ void EditorViewItem::closeAll() {
         closeDocument(m_docs.size() - 1);
 }
 
+/* ------------------------------------------------------------------ */
+/* 分栏：镜像一个源编辑区（见 EditorViewItem.h 里那段说明）              */
+/* ------------------------------------------------------------------ */
+
+void EditorViewItem::setDocId(int id) {
+    if (m_docId == id)
+        return;
+    m_docId = id;
+    emit boundChanged();
+}
+
+void EditorViewItem::setMainEditor(bool on) {
+    if (m_mainEditor == on)
+        return;
+    m_mainEditor = on;
+    /*
+     * 主编辑器 = "当前编辑器"（instance()）。分栏之后镜像那份永远不是主栏，
+     * 所以这里只认 on == true 的调用（镜像写 mainEditor: true 是配置错误，
+     * 不认）。
+     */
+    if (on)
+        s_instance = this;
+    emit boundChanged();
+}
+
+void EditorViewItem::setMirror(bool on) {
+    if (m_mirror == on)
+        return;
+    m_mirror = on;
+    /*
+     * 镜像这一栏**只读**：正文由源那边推过来。
+     *
+     * 不禁用输入法 / 不让点（那样连选中复制都做不了），只是不让改 ——
+     * 用户想在右边改就直接把焦点切过去（QML 那边会把"当前编辑器"换掉，
+     * 命令自然落到它身上）。
+     */
+    if (m_sci)
+        m_sci->SendScintilla(QsciScintillaBase::SCI_SETREADONLY, on ? 1L : 0L);
+    emit boundChanged();
+    emit readOnlyChanged();
+}
+
+void EditorViewItem::bindTo(EditorViewItem *source) {
+    if (m_source == source)
+        return;
+    if (m_source)
+        disconnect(m_source, nullptr, this, nullptr);
+    m_source = source;
+    if (!source) {
+        emit boundChanged();
+        return;
+    }
+
+    /*
+     * 源那边正文一变就推过来。
+     *
+     * 正文那一路是**直接连接**的（见上面 textChanged 里那处：用户要的是
+     * "左边打一个字右边立刻跟上"）。这里这组只兜元信息那一类变化 ——
+     * 重命名 / 切标签 / 源那一栏被藏起来，用 QueuedConnection 排到下一轮
+     * 更安全（那些信号是在文档池正在改的时候发出来的）。
+     */
+    connect(source, &EditorViewItem::documentsChanged, this, [this]() { syncFromSource(); },
+            Qt::QueuedConnection);
+    connect(source, &EditorViewItem::currentChanged, this, [this]() { syncFromSource(); },
+            Qt::QueuedConnection);
+    connect(source, &QQuickItem::visibleChanged, this,
+            [this]() { syncFromSource(); }, Qt::QueuedConnection);
+
+    setMirror(true);
+    emit boundChanged();
+    syncFromSource();
+}
+
+void EditorViewItem::unbind() {
+    if (m_source)
+        disconnect(m_source, nullptr, this, nullptr);
+    m_source = nullptr;
+    setMirror(false);
+    closeAll();
+    emit boundChanged();
+}
+
+void EditorViewItem::syncFromSource() {
+    if (!m_source) {
+        closeAll();
+        return;
+    }
+
+    /*
+     * 把源的**当前那一份**搬到这边来。
+     *
+     * 只搬正文 + 元信息（路径 / 语言 / 编码 / 换行符），**不搬视图状态**
+     * （光标、滚动）：两栏各滚各的是正常的（用户就是想让它们看不同的位置 ——
+     * 比如一边对着函数定义、一边对着调用处）。
+     */
+    const int count = m_source->m_docs.size();
+    const int index = m_source->m_current;
+
+    if (count == 0 || index < 0 || index >= count) {
+        closeAll();
+        return;
+    }
+
+    /* 镜像自己的文档池跟上源的条数（两边一一对应，切标签时下标才对得上） */
+    while (m_docs.size() > count)
+        closeDocument(m_docs.size() - 1);
+    while (m_docs.size() < count)
+        newDocument();
+
+    const Doc &src = m_source->m_docs.at(index);
+
+    /*
+     * 正文本体：只有真变了才灌（灌一次要重建整份文档，很贵）。
+     *
+     * 比的是**源那份文档的文本**，不是镜像自己的：镜像里那份是上一次灌进去的
+     * 快照，拿它比就够了。
+     */
+    const QString srcText = m_source->currentText();
+    m_syncing = true;
+    if (m_current != index)
+        activateDocument(index);
+    if (currentText() != srcText)
+        setContentCurrent(srcText);
+
+    /*
+     * 光标也跟着主栏走（但**不抢焦点**）。
+     *
+     * 不跟的话分栏没什么用：一边滚到函数定义、另一边还停在文件开头。
+     * 这里用 SCI_GOTOPOS + SCI_SCROLLCARET，而不是 requestEditorFocus() ——
+     * 灌一次正文就把焦点抢过来的话，用户在主栏打一个字、焦点跳到右栏，
+     * 下一个字就打进镜像里（镜像只读，等于丢字）。
+     */
+    if (m_sci) {
+        const long line = long(m_source->cursorLine());
+        const long col = long(m_source->cursorColumn());
+        const long lineStart =
+            m_sci->SendScintilla(QsciScintillaBase::SCI_POSITIONFROMLINE, line);
+        if (lineStart >= 0) {
+            const long lineLen = m_sci->SendScintilla(QsciScintillaBase::SCI_LINELENGTH, line);
+            m_sci->SendScintilla(QsciScintillaBase::SCI_GOTOPOS,
+                                 lineStart + qBound(0L, col, qMax(0L, lineLen)));
+            m_sci->SendScintilla(QsciScintillaBase::SCI_SCROLLCARET);
+        }
+    }
+
+    /* 元信息：路径 / 语言 / 编码 / 换行符 / 修改标记 */
+    const QString srcEol = m_source->eolMode();
+    if (Doc *d = currentDoc()) {
+        d->filePath = src.filePath;
+        d->modified = src.modified;
+        d->untitledNo = src.untitledNo;
+        if (d->language != src.language) {
+            d->language = src.language;
+            applyLanguageLexer();
+        }
+        d->encoding = src.encoding;
+    }
+    /* 换行符在 Scintilla 里（不在 Doc 里），所以走 setter */
+    if (eolMode() != srcEol)
+        setEolMode(srcEol);
+    m_syncing = false;
+
+    emit documentsChanged();
+    emit statsChanged();
+    emit modifiedChanged();
+    emit currentChanged();
+}
+
+void EditorViewItem::noteFocus() {
+    /*
+     * 只是"点到这一栏了"，不做别的：Main.qml 那个 Connections 接住 paneFocused，
+     * 把"当前编辑器"换成它（于是工具栏 / 菜单 / 快捷键都作用在这一栏上）。
+     */
+    emit paneFocused();
+}
+
+void EditorViewItem::setPaneFocus(bool on) {
+    /*
+     * 分栏之后"当前编辑器"要跟着焦点走：这个类里所有命令（撤销 / 查找 /
+     * 格式化）都不带"发给哪一栏"这个参数，外面（QML）也拿不到 C++ 的静态指针，
+     * 所以在这里顺手把 s_instance 指到刚被点的那一栏上 —— 别的代码问
+     * `EditorViewItem::instance()` 时拿到的就是"用户正在用的那个"。
+     *
+     * 不分栏时只有一栏，这一句等于什么都没做（本来就是它）。
+     */
+    if (on)
+        s_instance = this;
+    m_paneFocus = on;
+}
+
+
 void EditorViewItem::activateDocument(int index) {
     if (index < 0 || index >= m_docs.size() || index == m_current)
         return;
@@ -3510,6 +3732,78 @@ void EditorViewItem::gotoLine(int line) {
     m_sci->SendScintilla(QsciScintillaBase::SCI_GOTOLINE, target - 1);
     m_sci->SendScintilla(QsciScintillaBase::SCI_SCROLLCARET);
     emit cursorChanged();
+}
+
+/*
+ * 选中第 row 行从 col 到 endCol 那一段（列号 0 基）。
+ *
+ * 校验卡片上点一条问题就走这里：光标跳到那一行**并且把出问题的那几个字选中**，
+ * 用户一眼就能看见说的是哪儿（只跳行不选中的话，一行里几十个字还得自己找）。
+ * Scintilla 的位置是**绝对字符位置**，所以从行号换算一次（SCI_POSITIONFROMLINE）。
+ */
+void EditorViewItem::selectRange(int row, int col, int endRow, int endCol) {
+    if (!m_sci || !hasDocument())
+        return;
+    const long total = m_sci->SendScintilla(QsciScintillaBase::SCI_GETLINECOUNT);
+    const long line = qBound(1L, (long)row, qMax(1L, total)) - 1;
+    const long lineEnd = qBound(1L, (long)endRow, qMax(1L, total)) - 1;
+
+    const long from = m_sci->SendScintilla(QsciScintillaBase::SCI_POSITIONFROMLINE, line);
+    const long to = m_sci->SendScintilla(QsciScintillaBase::SCI_POSITIONFROMLINE, lineEnd);
+    const long lineLen = m_sci->SendScintilla(QsciScintillaBase::SCI_LINELENGTH, line);
+    const long endLen = m_sci->SendScintilla(QsciScintillaBase::SCI_LINELENGTH, lineEnd);
+
+    /*
+     * 列号夹回这一行的长度：模型给的列号可能越界（它数的是"第几个字"，
+     * 和 UTF-8 的字节数不是一回事），越界就退成"选到行尾"，
+     * 而不是把选区甩到下一行去。
+     */
+    const long start = from + qBound(0L, (long)col, qMax(0L, lineLen));
+    const long stop = to + qBound(0L, (long)endCol, qMax(0L, endLen));
+
+    m_sci->SendScintilla(QsciScintillaBase::SCI_SETSEL, start, qMax(start + 1, stop));
+    m_sci->SendScintilla(QsciScintillaBase::SCI_SCROLLCARET);
+    emit cursorChanged();
+}
+
+/*
+ * 整份替换（格式化 / 批量改写用）。
+ *
+ * 走 SCI_BEGINUNDOACTION / ENDUNDOACTION 包成一个 **可撤销的一步**：
+ * 用户按 Ctrl+Z 一次就回到替换之前，而不是一步一个字地退。
+ * 光标位置也还原（替换之后文档全变了，原来的位置没有意义，就从头上开始）。
+ */
+void EditorViewItem::setText(const QString &text) {
+    if (!m_sci || !hasDocument())
+        return;
+
+    m_bulkLoading = true;
+    m_sci->SendScintilla(QsciScintillaBase::SCI_BEGINUNDOACTION);
+    m_sci->SendScintilla(QsciScintillaBase::SCI_SETTEXT, text.toUtf8().constData());
+    m_sci->SendScintilla(QsciScintillaBase::SCI_ENDUNDOACTION);
+    m_bulkLoading = false;
+    /*
+     * 这一句**不能加**：SCI_EMPTYUNDOBUFFER 会把整个撤销栈清掉，
+     * 包括刚包好的这一步 —— 用户按 Ctrl+Z 就退不回格式化之前了。
+     * 想要的是"这一步可撤销"，所以历史照留。
+     */
+
+    m_sci->SendScintilla(QsciScintillaBase::SCI_GOTOPOS, 0L);
+    applyMargins();
+    updateHorizontalScroll();
+
+    emit statsChanged();
+    emit modifiedChanged();
+    /*
+     * 只有真改了才标"已修改"：格式化算一次内容改动（用户要自己存盘），
+     * 但"格式化完发现其实一样"那种不该把文件标脏。
+     */
+    if (Doc *d = currentDoc()) {
+        if (!d->modified) {
+            d->modified = true;
+            emit documentsChanged();
+        }
+    }
 }
 
 /* ------------------------------------------------------------------ */

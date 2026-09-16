@@ -95,11 +95,30 @@ Popup {
     readonly property real keyColumnX: 250
     readonly property real keyCellInset: 6
 
+    /*
+     * 格式化工具表（"格式化"那一栏里一行一个语言）。
+     *
+     * 存成属性而不是直接在 Repeater 里调 Fmt.toolList()：Q_INVOKABLE 是个方法，
+     * QML 不会因为它依赖的东西变了就重算（绑定只在属性变化时重求值）。
+     * Fmt 那边改完会发 toolsChanged，接住重新取一份（见下面的 Connections）。
+     */
+    property var fmtTools: []
+
+    Component.onCompleted: refreshFormatTools()
+
+    Connections {
+        target: Fmt
+        function onToolsChanged() { root.refreshFormatTools() }
+    }
+
     /* 栏目表：左边"操作步骤"那一列 */
-    readonly property var navItems: [
-        { key: "shortcuts", label: "快捷键", icon: "gear" },
+    readonly property var navItems: [        { key: "shortcuts", label: "快捷键", icon: "gear" },
         { key: "storage",   label: "存储",   icon: "folder" },
         { key: "translate", label: "翻译",   icon: "translate" },
+        /* 校验（中文用词 / 代码语法）—— 它有独立开关，所以单开一栏 */
+        { key: "check",     label: "校验",   icon: "spellcheck" },
+        /* 格式化：认本机装了哪些格式化工具、按语言指定命令 */
+        { key: "format",    label: "格式化", icon: "format" },
         { key: "document",  label: "识别",   icon: "ocr" },
         { key: "about",     label: "关于",   icon: "info" }
     ]
@@ -138,6 +157,17 @@ Popup {
      */
     function refreshDocRunner() {
         docRunnerField.text = Doc.runner
+    }
+
+    /*
+     * 格式化那一栏：改完某个语言的命令之后，把那一行刷成 C++ 侧规范化过的值。
+     *
+     * 不刷的话，用户填了 "  clang-format  "（前后带空格）界面上看着没变，
+     * 但落盘的是 trim 过的 —— 两边不一致，下次打开又"变"了一次。
+     * Repeater 的条目本轮还没重建，所以推到下一拍。
+     */
+    function refreshFormatTools() {
+        fmtTools = Fmt.toolList()
     }
 
     /*
@@ -1912,6 +1942,217 @@ Popup {
                             font.pixelSize: 11
                             text: Doc.runnerProblem() === "" ? "识别程序就绪。"
                                                              : ("用不了：" + Doc.runnerProblem())
+                        }
+                    }
+
+                    /* ============ 校验（中文用词 / 代码语法） ============ */
+                    Column {
+                        anchors.fill: parent
+                        anchors.margins: 14
+                        spacing: 9
+                        visible: root.section === "check"
+
+                        Text {
+                            text: "编辑区校验"
+                            color: root.textBright
+                            font.pixelSize: 14
+                            font.bold: true
+                        }
+
+                        /*
+                         * 开关。**默认关**：这个功能要联网、要花 token，
+                         * 不打招呼就替用户发请求不合适。
+                         */
+                        Rectangle {
+                            width: parent.width
+                            height: 40
+                            radius: 6
+                            color: root.rowHover
+                            border.width: 1
+                            border.color: root.borderColor
+
+                            Row {
+                                anchors.left: parent.left
+                                anchors.leftMargin: 12
+                                anchors.verticalCenter: parent.verticalCenter
+                                spacing: 10
+
+                                /* 勾选框（自己画，和界面其它地方一套观感） */
+                                Rectangle {
+                                    width: 16
+                                    height: 16
+                                    radius: 3
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    color: Check.enabled ? root.accentColor : "transparent"
+                                    border.width: 1
+                                    border.color: Check.enabled ? root.accentColor
+                                                                : root.borderColor
+
+                                    Text {
+                                        anchors.centerIn: parent
+                                        visible: Check.enabled
+                                        text: "✓"
+                                        color: "#ffffff"
+                                        font.pixelSize: 11
+                                    }
+
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: Check.enabled = !Check.enabled
+                                    }
+                                }
+
+                                Text {
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    text: "开启校验（中文用词 / 代码语法）"
+                                    color: root.textColor
+                                    font.pixelSize: 12
+                                }
+                            }
+                        }
+
+                        Text {
+                            width: parent.width
+                            wrapMode: Text.WordWrap
+                            color: root.mutedColor
+                            font.pixelSize: 11
+                            text: "关闭时（默认）只跑本地规则：括号配对、中英文标点混用、"
+                                  + "重复字、的地得、行尾空白 —— 毫秒出结果、不联网、不花钱。"
+                                  + "开启之后会**另外**把正文发给下面的模型，"
+                                  + "让它查用词和语法（模型报的每一条都会先在正文里核对位置，"
+                                  + "对不上的直接丢掉）。"
+                        }
+
+                        Text {
+                            width: parent.width
+                            wrapMode: Text.WordWrap
+                            color: Check.llmReady ? root.accentColor : "#d7a85b"
+                            font.pixelSize: 11
+                            text: Check.llmReady
+                                  ? ("模型就绪：" + (Llm.model !== "" ? Llm.model : "（本地）"))
+                                  : "模型还没配好（见左边「翻译」那一栏）—— 开着校验也只会跑本地规则。"
+                        }
+
+                        Text {
+                            width: parent.width
+                            wrapMode: Text.WordWrap
+                            color: root.mutedColor
+                            font.pixelSize: 11
+                            text: "用法：编辑区里按右键 → 「校验中文 / 代码」，或者按 "
+                                  + Cmd.shortcutFor("checkFile")
+                                  + "。结果是一张卡片，点其中一条会跳到正文里并把出问题的那一段选上。"
+                        }
+
+                        Text {
+                            width: parent.width
+                            wrapMode: Text.WordWrap
+                            color: root.mutedColor
+                            font.pixelSize: 11
+                            text: "正文字数超过 1.2 万时只跑本地规则：那种长度下模型数的行号会不准，"
+                                  + "而我们宁可少报几条，也不给你一堆点不到的假问题。"
+                        }
+                    }
+
+                    /* ============ 格式化 ============ */
+                    Column {
+                        anchors.fill: parent
+                        anchors.margins: 14
+                        spacing: 9
+                        visible: root.section === "format"
+
+                        Text {
+                            text: "代码格式化"
+                            color: root.textBright
+                            font.pixelSize: 14
+                            font.bold: true
+                        }
+
+                        Text {
+                            width: parent.width
+                            wrapMode: Text.WordWrap
+                            color: root.mutedColor
+                            font.pixelSize: 11
+                            text: "编辑器里按右键 → 「格式化代码」（或 "
+                                  + Cmd.shortcutFor("formatCode")
+                                  + "）。Qt / QScintilla 本身不带格式化器，所以这里认本机装了"
+                                  + "哪些工具；没装的可以下面填完整路径，或者用内置那几样"
+                                  + "（JSON 重排 / XML 缩进 / 去行尾空白，不需要装任何东西）。"
+                        }
+
+                        Text {
+                            width: parent.width
+                            wrapMode: Text.WordWrap
+                            color: root.mutedColor
+                            font.pixelSize: 11
+                            text: "命令里可以用 {file} 占位（会被换成临时文件路径）；"
+                                  + "不写占位就自动追加在末尾。留空 = 用默认那一行。"
+                        }
+
+                        /* 每个语言一行：状态 + 命令输入框 */
+                        Repeater {
+                            model: root.fmtTools
+
+                            delegate: Row {
+                                id: fmtRow
+                                required property var modelData
+
+                                spacing: 8
+
+                                Text {
+                                    width: 92
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    text: fmtRow.modelData.label
+                                    color: root.textColor
+                                    font.pixelSize: 12
+                                }
+
+                                /* 装没装那个工具：一个小圆点 + 工具名 */
+                                Rectangle {
+                                    width: 8
+                                    height: 8
+                                    radius: 4
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    color: fmtRow.modelData.available ? "#7bc47f" : root.mutedColor
+                                }
+
+                                Text {
+                                    width: 110
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    text: fmtRow.modelData.tool
+                                          + (fmtRow.modelData.available ? "" : "（没找到）")
+                                    color: fmtRow.modelData.available ? root.mutedColor
+                                                                      : "#d7a85b"
+                                    font.pixelSize: 11
+                                    elide: Text.ElideRight
+                                }
+
+                                TextField {
+                                    width: 300
+                                    height: 24
+                                    text: fmtRow.modelData.command
+                                    placeholderText: fmtRow.modelData.defaultCommand
+                                    color: root.textColor
+                                    placeholderTextColor: root.mutedColor
+                                    font.pixelSize: 11
+                                    selectByMouse: true
+                                    leftPadding: 6
+                                    rightPadding: 6
+                                    onEditingFinished: {
+                                        Fmt.setToolFor(fmtRow.modelData.id, text)
+                                        /* 落盘之后这一行的 modelData 会重建，
+                                           把正在编辑的那个框刷成规范化的值 */
+                                        Qt.callLater(root.refreshFormatTools)
+                                    }
+                                    onTextChanged: if (!activeFocus) cursorPosition = 0
+                                    background: Rectangle {
+                                        color: "#26282b"
+                                        border.color: root.borderColor
+                                        border.width: 1
+                                        radius: 4
+                                    }
+                                }
+                            }
                         }
                     }
 

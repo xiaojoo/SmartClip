@@ -43,7 +43,7 @@
  *   * 截图识别：识别用哪个模型（留空退回主模型）、图片按多模态格式发出去、
  *     回来的"原文 ---- 译文"拆得开（见第 10 节）。
  *
- * 自检会动 QSettings 里 translate/card/* 和 translate/apiBase 这几个键（要试
+ * 自检会动 QSettings 里 translate/card 那一组键和 translate/apiBase（要试
  * 状态和失败路径），跑完**按原样写回** —— 用户自己的配置不会被自检改掉。
  */
 

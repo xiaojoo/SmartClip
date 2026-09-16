@@ -89,6 +89,149 @@ Rectangle {
      */
     readonly property var view: editor.view
 
+    /* ------------------------------------------------------------------
+     * Markdown 预览（见 qml/components/MarkdownView.qml）
+     * ---------------------------------------------------------------- */
+
+    /* 预览开着没（正文区显示渲染结果还是源码） */
+    property bool markdownPreview: false
+    /* 渲染好的 HTML（给 MarkdownView 的 html 属性） */
+    property string markdownHtml: ""
+    /* 渲染结果为空时那句提示 */
+    property string markdownHint: "没有可预览的内容"
+    /*
+     * 上次退出时是不是在看预览。
+     *
+     * 打开下一份 md 时按这个偏好开局 —— 用户既然在看文章，切一份多半还是
+     * 想接着看（见 applyMarkdownPreference）。
+     */
+    property bool markdownPreviewPreferred: false
+
+    /* 当前这份文档能不能预览 Markdown（标签栏那个开关显不显示） */
+    readonly property bool canPreviewMarkdown: {
+        if (!view || !view.hasDocument)
+            return false
+        var path = String(view.filePath || "")
+        if (path === "")
+            return false
+        return /\.(md|markdown|mdown|mkd|mdtext)$/i.test(path)
+    }
+
+    /*
+     * 按当前文档重算预览该不该开着，并重新渲染一遍。
+     *
+     * 每次切换都重渲染（不做缓存）：一份 md 几毫秒，而"改了源码预览不跟着变"
+     * 是更难查也更烦人的 bug。触发点：换文档、正文变了、存盘了、用户点开关。
+     */
+    function applyMarkdownPreference() {
+        if (!canPreviewMarkdown) {
+            markdownPreview = false
+            markdownHtml = ""
+            return
+        }
+        markdownPreview = markdownPreviewPreferred
+        refreshMarkdown()
+    }
+
+    /* 重新渲染一遍（预览没开就清空，省得留着上一份的内容） */
+    function refreshMarkdown() {
+        if (!canPreviewMarkdown || !markdownPreview) {
+            markdownHtml = ""
+            return
+        }
+        var path = String(view.filePath || "")
+        var dir = path !== "" ? path.substring(0, path.lastIndexOf("/")) : ""
+        markdownHtml = Cmd.markdownHtml(view.currentText(), dir)
+        markdownHint = markdownHtml === "" ? "这份文档是空的" : ""
+    }
+
+    /*
+     * 开 / 关预览（标签栏那个开关、菜单里那一条、Ctrl+Shift+V 都走这里）。
+     * 偏好也跟着记：下次打开 md 按这次的选择开局。
+     */
+    function toggleMarkdownPreview() {
+        if (!canPreviewMarkdown)
+            return
+        markdownPreview = !markdownPreview
+        markdownPreviewPreferred = markdownPreview
+        Cmd.remember("markdownPreview", markdownPreview ? "1" : "0")
+        if (markdownPreview)
+            refreshMarkdown()
+        else
+            view.requestEditorFocus()
+    }
+
+    /* ------------------------------------------------------------------
+     * "当前编辑器"：分栏之后命令要发给用户正在用的那一栏
+     * ---------------------------------------------------------------- */
+
+    /*
+     * 分栏时有两栏。编辑器那边记着"最后被点的是哪一栏"（EditorViewItem 的
+     * paneFocus），这里现问它 —— 不做成属性是因为"点一下右边"到"菜单命令执行"
+     * 之间可能没有信号，现问永远是最新的。
+     */
+    function activeView() {
+        if (editor.splitting && editor.mirrorView && editor.mirrorView.hasPaneFocus())
+            return editor.mirrorView
+        return view
+    }
+
+    /* 某一栏被点了：标记只能有一个（两栏都标着的话命令会落到先问到的那个） */
+    function notePaneFocus(pane) {
+        if (editor.mainView)
+            editor.mainView.paneFocus = false
+        if (editor.mirrorView)
+            editor.mirrorView.paneFocus = false
+        if (pane)
+            pane.paneFocus = true
+    }
+
+    /* ------------------------------------------------------------------
+     * 分栏（tab 右键菜单那三条，见 js/EditorMenus.js 的 tabMenu）
+     * ---------------------------------------------------------------- */
+
+    /* tab 右键菜单里那三条的可用状态 */
+    function splitState() {
+        return { canSplit: view.hasDocument, mode: editor.splitMode }
+    }
+
+    /*
+     * 开 / 关 / 换分栏方向。
+     *
+     * 两件事必须一起做：布局（editor.splitMode）和绑定（editor.bindMirror ——
+     * 把主栏的正文推给镜像栏）。只做一半的话就是"分了两栏，右边一直空着"。
+     */
+    function setSplit(mode) {
+        var next = (editor.splitMode === mode) ? "" : mode
+        if (next !== "" && !view.hasDocument)
+            return
+        editor.splitMode = next
+        Cmd.remember("splitMode", next)
+        if (next === "")
+            editor.unbindMirror()
+        else
+            editor.bindMirror()
+        /* 切完把焦点还给主编辑器：用户刚看完菜单，接着多半要打字 */
+        Qt.callLater(function () { if (view.hasDocument) view.requestEditorFocus() })
+    }
+
+    /* 启动时只**记下**分栏模式：那时还没有文档，真绑等第一个文档打开 */
+    function restoreSplit() {
+        var mode = Cmd.recall("splitMode", "")
+        if (mode === "right" || mode === "down")
+            editor.splitMode = mode
+    }
+
+    /* 文档池变了：分栏该绑的绑上（启动恢复那条路走到这里才算完成） */
+    function syncSplitWithDocuments() {
+        if (editor.splitMode === "")
+            return
+        if (view.hasDocument)
+            editor.bindMirror()
+        else
+            editor.unbindMirror()
+    }
+
     // ---- 左侧列表宽度（可由中间间隙拖动调整） ----
     property real folderTreeWidth: 300
     /*
@@ -822,7 +965,8 @@ Rectangle {
      * 条目见 js/EditorMenus.js 的 tabMenu（关闭 / 关闭其他 / 关闭全部）。
      */
     function openTabMenu(index, anchor, x, y) {
-        ddMenu.openAtPoint(anchor, x, y, Menus.tabMenu(view, index, shortcutOverrides()))
+        ddMenu.openAtPoint(anchor, x, y,
+                           Menus.tabMenu(view, index, shortcutOverrides(), splitState()))
     }
 
     /* name -> 当前生效的快捷键。菜单里写的是出厂默认值，改过键的要以这份为准 */
@@ -841,8 +985,55 @@ Rectangle {
      *
      * 走的是和 openTabMenu 完全同一份构造：断言里看到的条目就是菜单里弹出的条目。
      */
+    /*
+     * 编辑区右键菜单里各条的动作名（自检核对用，见 src/SelfTest.cpp）。
+     *
+     * 走的是和 openEditorContextMenu 完全同一份构造 —— 断言里看到的条目
+     * 就是菜单里弹出的条目。
+     */
+    function editMenuActs() {
+        var items = Menus.editMenu(view, shortcutOverrides(), {
+            can: canPreviewMarkdown,
+            on: markdownPreview,
+            canFormat: currentFormatEngine() !== ""
+        })
+        var out = []
+        for (var i = 0; i < items.length; ++i)
+            out.push(items[i] && items[i].act !== undefined ? String(items[i].act)
+                                                            : "separator")
+        return out
+    }
+
+    /*
+     * 预览里那份右键菜单的每一条（自检核对用：`分隔` 还是 `act:0/1`）。
+     *
+     * 走的是和 openPreviewContextMenu **完全同一份构造** —— 断言里看到的
+     * 就是预览里右键弹出的那份。它和编辑区那份的区别只在于 preview: true
+     * （见 js/EditorMenus.js 的 editMenu），所以这里也把 preview 写死成 true。
+     */
+    function editMenuPreviewActs() {
+        var items = Menus.editMenu(view, shortcutOverrides(), {
+            can: canPreviewMarkdown,
+            on: markdownPreview,
+            canFormat: currentFormatEngine() !== "",
+            preview: true,
+            hasSelection: editor.previewHasSelection
+        })
+        var out = []
+        for (var i = 0; i < items.length; ++i) {
+            var it = items[i]
+            if (!it || it.act === undefined) {
+                out.push("separator")
+                continue
+            }
+            out.push(String(it.act) + (it.disabled ? ":0" : ":1"))
+        }
+        return out
+    }
+
     function tabMenuActs(index) {
-        var items = Menus.tabMenu(view, index === undefined ? 0 : index, shortcutOverrides())
+        var items = Menus.tabMenu(view, index === undefined ? 0 : index,
+                                  shortcutOverrides(), splitState())
         var out = []
         for (var i = 0; i < items.length; ++i)
             out.push(items[i] && items[i].act !== undefined ? String(items[i].act) : "separator")
@@ -999,7 +1190,209 @@ Rectangle {
      * anchor 传 null：坐标直接按宿主坐标用（见 DropdownMenu.openAtPoint）。
      */
     function openEditorContextMenu(x, y) {
-        ddMenu.openAtPoint(null, x, y, Menus.editMenu(view, shortcutOverrides()))
+        ddMenu.openAtPoint(null, x, y, Menus.editMenu(view, shortcutOverrides(), {
+            can: canPreviewMarkdown,
+            on: markdownPreview,
+            canFormat: currentFormatEngine() !== ""
+        }))
+    }
+
+    /*
+     * Markdown 预览里的右键菜单。
+     *
+     * 和编辑区那条**同一份构造**（Menus.editMenu），只是多传 preview: true：
+     * 预览里那份是只读的渲染结果，所以"会改正文"的命令（撤销 / 剪切 / 粘贴 /
+     * 删除行 / 格式化…）一律置灰，只留复制 / 全选 / 复制全文这些不改正文的 ——
+     * 预览里右键最常用的就是"选中一段复制走"。
+     *
+     * 坐标口径和编辑区那条一样：(x, y) 是场景坐标，anchor 传 null 直接按宿主
+     * 坐标用（见 DropdownMenu.openAtPoint）。
+     */
+    function openPreviewContextMenu(x, y) {
+        ddMenu.openAtPoint(null, x, y, Menus.editMenu(view, shortcutOverrides(), {
+            can: canPreviewMarkdown,
+            on: markdownPreview,
+            canFormat: currentFormatEngine() !== "",
+            preview: true,
+            hasSelection: editor.previewHasSelection
+        }))
+    }
+
+    /* 自检用：模拟在预览里点右键（坐标是场景坐标，和真右键同一条路） */
+    function simulatePreviewRightClick(x, y) {
+        openPreviewContextMenu(x, y)
+        return ddMenu.opened
+    }
+
+    /* 把预览里选中的那段复制到剪贴板（菜单里"复制"那条走它） */
+    function copyPreviewSelection() {
+        var t = editor.previewSelectedText
+        if (t === "")
+            return
+        Cmd.copyText(t)
+    }
+
+    /* 全选预览里的正文（只读控件也能全选，选完可以复制） */
+    function selectAllPreview() {
+        editor.previewSelectAll()
+    }
+
+    /*
+     * 当前这份文件能不能格式化 / 会用哪个工具（右键菜单那两条的可用状态）。
+     *
+     * 问的是 C++ 那侧（Fmt，见 src/Formatter.h）：只有它知道本机装没装
+     * clang-format / prettier。菜单是**弹出那一刻**现算的，所以刚装完工具
+     * 重开一次菜单就通了。
+     */
+    function currentFormatEngine() {
+        if (!view.hasDocument)
+            return ""
+        return Fmt.engineLabel(view.language, view.filePath)
+    }
+
+    /* ------------------------------------------------------------------
+     * 代码格式化（右键菜单 / Ctrl+Shift+F，见 src/Formatter.h）
+     * ---------------------------------------------------------------- */
+
+    /*
+     * 格式化当前编辑器里的正文。
+     *
+     * 三件事按顺序做，**任何一步失败都不动正文**：
+     *   1. 问 C++ 有没有可用的格式化器（本机工具 / 内置那几样）；
+     *   2. 拿正文去格式化；
+     *   3. 成功才写回去（EditorView.setText 把整份替换包成一步，能撤销）。
+     *
+     * 失败时报的是 lastError（"本机没装 clang-format…" / "第 3 行：标签没闭合"），
+     * 而不是一句笼统的"格式化失败" —— 用户得知道下一步该干嘛。
+     */
+    function formatCurrent() {
+        var v = activeView()
+        if (!v || !v.hasDocument)
+            return
+        if (v.readOnly) {
+            notify("格式化", "这一栏是只读的（分栏的镜像那一栏）。要点它一下、"
+                             + "让命令落到它身上，或者回主栏去改。")
+            return
+        }
+        var engine = Fmt.engineLabel(v.language, v.filePath)
+        if (engine === "") {
+            notify("格式化", "这个语言没有可用的格式化器。\n\n"
+                             + "装一个（C/C++ 装 clang-format，JS/JSON 装 prettier，"
+                             + "Python 装 black），或者在设置 → 格式化里指定路径。")
+            return
+        }
+        var before = v.currentText()
+        var after = Fmt.format(before, v.language, v.filePath)
+        if (after === before) {
+            if (Fmt.lastError !== "")
+                notify("格式化失败", Fmt.lastError)
+            else
+                notify("格式化", "已经是格式化好的样子了（用的是 " + engine + "）。")
+            return
+        }
+        v.setText(after)
+    }
+
+    /* 把 JSON 重排一遍（不依赖任何外部工具，见 Formatter 的内置那几样） */
+    function formatCurrentAsJson() {
+        var v = activeView()
+        if (!v || !v.hasDocument || v.readOnly)
+            return
+        var before = v.currentText()
+        var after = Fmt.format(before, "json", v.filePath)
+        if (after === before) {
+            notify("格式化 JSON", Fmt.lastError !== "" ? Fmt.lastError : "已经是排好的 JSON 了。")
+            return
+        }
+        v.setText(after)
+    }
+
+    /* ------------------------------------------------------------------
+     * 校验（中文用词 / 代码语法，见 src/Checker.h）
+     * ---------------------------------------------------------------- */
+
+    function runCheck() {
+        if (!view.hasDocument) {
+            notify("校验", "先打开一份文件。")
+            return
+        }
+        /*
+         * 校验**始终针对主栏那一份**（view），不是 activeView()：分栏时镜像栏
+         * 只是同一份正文的影子，校验两遍没有意义，而且结果里的行号要能对应上
+         * 那个"跳过去"的动作（跳的是主栏）。
+         */
+        checkCard.docTitle = view.displayName
+        checkCard.parentTransient = window
+        checkCard.placeInParent()
+        checkCard.show()
+        Check.check(view.currentText(), view.language, view.filePath)
+    }
+
+    /* 卡片上点一条问题：跳到正文那一行，并把出问题那一段选中 */
+    function jumpToIssue(row, col, endCol) {
+        if (!view.hasDocument)
+            return
+        view.gotoLine(row)
+        view.selectRange(row, col, row, Math.max(col + 1, endCol))
+        view.requestEditorFocus()
+    }
+
+    /* 卡片上"复制结果"：把问题清单拼成一段文字进剪贴板 */
+    function copyCheckResult() {
+        var lines = []
+        lines.push("校验结果：" + Check.resultSummary())
+        var items = Check.issues
+        for (var i = 0; i < items.length; ++i) {
+            lines.push("  第 " + items[i].row + " 行  " + items[i].message
+                       + (items[i].snippet !== "" ? "   「" + items[i].snippet + "」" : ""))
+        }
+        if (items.length === 0)
+            lines.push("  （没有发现问题）")
+        Cmd.copyText(lines.join("\n"))
+    }
+
+    /* ------------------------------------------------------------------
+     * 文件对比（见 src/Diff.h）
+     * ---------------------------------------------------------------- */
+
+    function compareCurrentWithFile() {
+        compareTabWithFile(view.currentIndex)
+    }
+
+    /*
+     * 拿第 index 个标签去和用户挑的另一个文件比。
+     *
+     * 这一份用**编辑器里的正文**（可能有未保存的改动，用户想看的正是"我现在
+     * 这份和那个文件差在哪"）；另一份从磁盘读（它没开在编辑器里，看不到内存）。
+     */
+    function compareTabWithFile(index) {
+        var docs = view.documents
+        var doc = (index >= 0 && index < docs.length) ? docs[index] : null
+        if (!doc) {
+            notify("文件对比", "先打开一份文件。")
+            return
+        }
+        var other = Cmd.chooseFileDialog(
+            "选择要比对的文件",
+            "文本文件 (*.txt *.md *.cpp *.h *.py *.js *.json);;所有文件 (*.*)")
+        if (other === "")
+            return
+        var otherText = Differ.readFile(other)
+        if (Differ.lastError !== "") {
+            notify("文件对比", Differ.lastError)
+            return
+        }
+        /* 第 index 个标签的正文：先切到它读一份，再切回来 */
+        var wasIndex = view.currentIndex
+        view.activateDocument(index)
+        var thisText = view.currentText()
+        if (wasIndex !== index && wasIndex >= 0)
+            view.activateDocument(wasIndex)
+
+        Differ.compare(thisText, otherText, doc.filePath, other)
+        diffCard.parentTransient = window
+        diffCard.placeInParent()
+        diffCard.show()
     }
 
     /*
@@ -1391,19 +1784,42 @@ Rectangle {
         if (act === "quit") { Win.quitApp(); return }
         if (act === "clearsearch") { searchText = ""; topBar.clearSearch(); return }
 
-        /* ---- 编辑 ---- */
-        if (act === "undo") { view.undo(); return }
-        if (act === "redo") { view.redo(); return }
-        if (act === "cut") { view.cut(); return }
-        if (act === "copy") { view.copy(); return }
-        if (act === "paste") { view.paste(); return }
-        if (act === "selectAll") { view.selectAll(); return }
-        if (act === "copyLine") { view.copyCurrentLine(); return }
-        if (act === "copyAll") { view.copyAll(); return }
-        if (act === "deleteLine") { view.deleteLine(); return }
-        if (act === "duplicateLine") { view.duplicateLine(); return }
-        if (act === "toggleComment") { view.toggleComment(commentPrefix()); return }
+        /* ---- 编辑（发给"当前编辑器"，见 activeView） ---- */
+        if (act === "undo") { activeView().undo(); return }
+        if (act === "redo") { activeView().redo(); return }
+        if (act === "cut") { activeView().cut(); return }
+        if (act === "copy") { activeView().copy(); return }
+        if (act === "paste") { activeView().paste(); return }
+        if (act === "selectAll") { activeView().selectAll(); return }
+        if (act === "copyLine") { activeView().copyCurrentLine(); return }
+        if (act === "copyAll") { activeView().copyAll(); return }
+        if (act === "deleteLine") { activeView().deleteLine(); return }
+        if (act === "duplicateLine") { activeView().duplicateLine(); return }
+        if (act === "toggleComment") { activeView().toggleComment(commentPrefix()); return }
         if (act === "toggleReadOnly") { view.readOnly = !view.readOnly; return }
+        if (act === "formatCode") { formatCurrent(); return }
+        if (act === "formatJson") { formatCurrentAsJson(); return }
+        if (act === "toggleMarkdownPreview") { toggleMarkdownPreview(); return }
+        if (act === "checkFile") { runCheck(); return }
+        /*
+         * 预览里右键菜单那两条（见 js/EditorMenus.js 的 editMenu 与上面的
+         * openPreviewContextMenu）：它们作用在**预览那个只读控件**上，
+         * 不是编辑器，所以单独两个动作名，不复用 copy / selectAll。
+         */
+        if (act === "copyPreview") { copyPreviewSelection(); return }
+        if (act === "selectAllPreview") { selectAllPreview(); return }
+
+        /* ---- 文件对比 ---- */
+        if (act === "compareWithFile") { compareCurrentWithFile(); return }
+        if (act.indexOf("compareTab:") === 0) {
+            compareTabWithFile(parseInt(act.substring(11)))
+            return
+        }
+
+        /* ---- 分栏 ---- */
+        if (act === "splitRight") { setSplit("right"); return }
+        if (act === "splitDown") { setSplit("down"); return }
+        if (act === "splitNone") { setSplit(""); return }
 
         /* ---- 查找 ---- */
         if (act === "find") { showFind(false); return }
@@ -1601,6 +2017,14 @@ Rectangle {
              * （让开一点点才是卡片下方两角圆角的保命条件，见 EditorArea.editorCardState）。
              */
             editorCard: editor.editorCardState(),
+            /* 分栏（自检核对 dispatch 和镜像绑定） */
+            splitMode: editor.splitMode,
+            /* Markdown 预览（自检核对开关和那份右键菜单） */
+            markdownPreview: window.markdownPreview,
+            previewSelection: editor.previewSelectedText,
+            canPreviewMarkdown: window.canPreviewMarkdown,
+            previewFile: window.view ? String(window.view.filePath) : "",
+            mirrorText: editor.mirrorView ? editor.mirrorView.currentText() : "",
 
             /*
              * 查找栏几何（自检量"两个输入框一样长、圆角、左右有间隙"）。
@@ -1728,6 +2152,17 @@ Rectangle {
         newestFirst = Cmd.recall("treeNewestFirst", "1") === "1"
 
         /*
+         * Markdown 预览那个偏好（上次退出时看的是预览还是源码）。
+         *
+         * 只读偏好，不在这里 applyMarkdownPreference()：这一步跑在恢复标签之前，
+         * 当时还没有任何文档，算了也是白算 —— 真正落地是文档变了的时候。
+         */
+        markdownPreviewPreferred = Cmd.recall("markdownPreview", "0") === "1"
+
+        /* 分栏也按上次的样子回来（只记模式，真绑等第一个文档打开） */
+        restoreSplit()
+
+        /*
          * 展开状态：设置里存的是"哪些文件夹开着"（一行一个 key）。
          *
          * 注意顺序：refresh() 要先跑 —— "第一次启动默认展开今天那一组"要知道
@@ -1838,7 +2273,55 @@ Rectangle {
         function onSaved(path) {
             if (path !== "")
                 Qt.callLater(function () { Store.rescan() })
+            /* 存过盘之后正文那份文件变了，预览跟着刷新一遍 */
+            if (window.markdownPreview)
+                Qt.callLater(function () { window.refreshMarkdown() })
         }
+
+        /*
+         * 正文长度变了（打字 / 粘贴 / 撤销都会走到 statsChanged）：
+         * 预览开着就重渲染。
+         *
+         * 用 statsChanged 而不是"专门的正文变化信号"：这个类里跟正文内容有关
+         * 的通知就它一个（行列 / 字数 / 撤销状态那一组）。重渲染很便宜
+         * （一份 md 几毫秒），多触发几次只是白花点 CPU；漏一次用户看到的就是
+         * "改了源码预览不跟着变"。
+         */
+        function onStatsChanged() {
+            if (window.markdownPreview && editor.view.hasDocument)
+                window.refreshMarkdown()
+        }
+
+        /*
+         * 文档池变了（打开 / 关闭 / 切标签）：分栏要跟着开 / 关，
+         * Markdown 预览也要按新文档重算。
+         */
+        function onDocumentsChanged() {
+            window.syncSplitWithDocuments()
+            window.applyMarkdownPreference()
+        }
+
+        /* 换了文档（切标签）：预览按当前这份重算（从 md 切到 .cpp 时自动关掉） */
+        function onCurrentChanged() {
+            window.applyMarkdownPreference()
+        }
+
+        /* 某一栏被点了：把"当前编辑器"切过去（状态栏那几项跟着变） */
+        function onPaneFocused() { window.notePaneFocus(editor.view) }
+
+    }
+
+    /*
+     * 分栏时**镜像那一栏**被点了（主栏那个是上面 Connections 里的）。
+     * 两栏都要接，否则点右边那一栏时命令还落在主栏上。
+     */
+    Connections {
+        target: editor.mirrorView
+        function onPaneFocused() { window.notePaneFocus(editor.mirrorView) }
+    }
+
+    Connections {
+        target: editor.view
 
         function onErrorOccurred(message) {
             /*
@@ -1902,6 +2385,28 @@ Rectangle {
         view: window.view
         entries: window.shortcutItems
         onCommandRequested: (act) => window.dispatch(act)
+    }
+
+    /*
+     * 校验结果卡片（见 qml/components/CheckCard.qml）。
+     *
+     * 和下拉菜单 / 设置面板同类：**独立的原生窗口**。它内容比那两块多
+     * （一列问题、每条要能点），所以不做成 Popup，而是一个 Window
+     * （理由见 CheckCard.qml 开头那段）。
+     */
+    CheckCard {
+        id: checkCard
+        parentTransient: window
+        onJumpRequested: (row, col, endCol) => window.jumpToIssue(row, col, endCol)
+        onRerunRequested: window.runCheck()
+        onCopyRequested: window.copyCheckResult()
+    }
+
+    /* 文件对比卡片（见 qml/components/DiffCard.qml） */
+    DiffCard {
+        id: diffCard
+        parentTransient: window
+        onCopyPatchRequested: Cmd.copyText(Differ.unifiedDiff())
     }
 
     /*
@@ -2479,6 +2984,18 @@ Rectangle {
                  */
                 onTabContextMenuRequested: (index, anchor, x, y) =>
                     window.openTabMenu(index, anchor, x, y)
+
+                /* ---- Markdown 预览（见 qml/components/MarkdownView.qml） ---- */
+                markdownPreview: window.markdownPreview
+                markdownHtml: window.markdownHtml
+                markdownHint: window.markdownHint
+                canPreviewMarkdown: window.canPreviewMarkdown
+                onMarkdownToggleRequested: window.toggleMarkdownPreview()
+                onMarkdownLinkActivated: (link) => Cmd.openExternal(link)
+                onMarkdownContextMenuRequested: (x, y) => window.openPreviewContextMenu(x, y)
+
+                /* ---- 分栏（见 setSplit / notePaneFocus） ---- */
+                onPaneFocusRequested: (pane) => window.notePaneFocus(pane)
             }
         }
 

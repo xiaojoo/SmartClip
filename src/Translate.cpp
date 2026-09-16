@@ -326,6 +326,24 @@ void LlmClient::setBusy(bool on) {
     emit busyChanged();
 }
 
+/*
+ * 在飞计数 +1，并且**保证**在函数返回前还回去。
+ *
+ * 把 +1 / -1 配成一对放在同一个作用域里：post() / postVision() / ask() 这三条
+ * 路上有好几个提前 return 的失败分支，散着写迟早漏掉一个（漏掉一次 busy 就
+ * 永远挂在"忙"上，之后再也不会变成可点）。这个守卫在析构时兜底。
+ */
+struct LlmClient::InFlightGuard {
+    LlmClient *self;
+    explicit InFlightGuard(LlmClient *s) : self(s) { ++self->m_inFlight; }
+    ~InFlightGuard() {
+        if (self->m_inFlight > 0 && --self->m_inFlight == 0)
+            self->setBusy(false);
+    }
+    InFlightGuard(const InFlightGuard &) = delete;
+    InFlightGuard &operator=(const InFlightGuard &) = delete;
+};
+
 QString LlmClient::translate(const QString &text, const QString &target, const QString &source) {
     const QString token = QStringLiteral("t%1").arg(++m_nextToken);
     post(token, text, target, source, false);
@@ -353,6 +371,69 @@ QString LlmClient::recognize(const QString &imageDataUrl, const QString &target,
     postVision(token, imageDataUrl, target, source,
                wantTranslate ? QString::fromLatin1(kPersonaOcrTranslate)
                              : QString::fromLatin1(kPersonaOcr));
+    return token;
+}
+
+QString LlmClient::ask(const QString &systemPrompt, const QString &userText,
+                       const QString &busyStatus) {
+    const QString token = QStringLiteral("a%1").arg(++m_nextToken);
+
+    auto failLater = [this, token](const QString &reason) {
+        if (m_inFlight > 0 && --m_inFlight == 0)
+            setBusy(false);
+        setStatus(reason);
+        QTimer::singleShot(0, this, [this, token, reason]() { emit failed(token, reason); });
+    };
+
+    if (userText.trimmed().isEmpty()) {
+        failLater(QStringLiteral("没有要交给模型的内容"));
+        return token;
+    }
+    if (chatUrl().isEmpty()) {
+        failLater(QStringLiteral("还没配置接口地址（设置 → 翻译）"));
+        return token;
+    }
+    if (m_mode == QLatin1String("api") && m_model.trimmed().isEmpty()) {
+        failLater(QStringLiteral("还没填模型名（设置 → 翻译）"));
+        return token;
+    }
+    /* 本地模式还没起来：和翻译那条一样排队等它加载完（见 post 里那段说明） */
+    if (m_mode == QLatin1String("local") && !localRunning()) {
+        PendingRequest pending;
+        pending.token = token;
+        pending.text = userText;
+        pending.source = systemPrompt;   /* 见 flushPending：ask 那条靠它带回提示词 */
+        pending.persona = QStringLiteral("ask");
+        m_pending.append(pending);
+        setBusy(true);
+        setStatus(QStringLiteral("正在启动本地模型…"));
+        if (!startLocal())
+            failPending(m_status);
+        return token;
+    }
+
+    QJsonArray messages;
+    messages.append(QJsonObject{{QStringLiteral("role"), QStringLiteral("system")},
+                                {QStringLiteral("content"), systemPrompt}});
+    messages.append(QJsonObject{{QStringLiteral("role"), QStringLiteral("user")},
+                                {QStringLiteral("content"), userText}});
+
+    QJsonObject body{
+        {QStringLiteral("model"), m_model.trimmed()},
+        {QStringLiteral("messages"), messages},
+        /*
+         * 温度给 0：校验要的是"同一份正文两次跑出同样的结果"。
+         * 翻译那条用 0.2 是另一回事（稍微松一点译文更自然）。
+         */
+        {QStringLiteral("temperature"), 0},
+        {QStringLiteral("stream"), false},
+    };
+
+    /* 这条已经在飞了（见 InFlightGuard）：和 post 里那处同一个位置 */
+    const InFlightGuard guard(this);
+    send(token, busyStatus.trimmed().isEmpty() ? QStringLiteral("正在请求模型…")
+                                               : busyStatus,
+         body, false);
     return token;
 }
 
@@ -436,8 +517,11 @@ void LlmClient::post(const QString &token, const QString &text, const QString &t
         {QStringLiteral("stream"), false},
     };
 
+    /* 这条已经在飞了（见 InFlightGuard）：+1/-1 配成一对，下面所有 return 都安全 */
+    const InFlightGuard guard(this);
     send(token, probe ? QStringLiteral("正在测试…") : QStringLiteral("翻译中…"), body, probe);
 }
+
 
 /*
  * 识别那条路：把图（png 的 data URL）和一句"要干什么"发给视觉模型。
@@ -535,6 +619,8 @@ void LlmClient::postVision(const QString &token, const QString &imageDataUrl,
         {QStringLiteral("stream"), false},
     };
 
+    /* 这条已经在飞了（见 InFlightGuard） */
+    const InFlightGuard guard(this);
     send(token, wantTranslate ? QStringLiteral("正在识别并翻译…") : QStringLiteral("正在识别…"),
          body, false);
 }
@@ -561,7 +647,15 @@ void LlmClient::send(const QString &token, const QString &busyStatus, const QJso
     QNetworkReply *reply = m_net->post(request, QJsonDocument(body).toJson(QJsonDocument::Compact));
     connect(reply, &QNetworkReply::finished, this, [this, reply, token, probe]() {
         reply->deleteLater();
-        setBusy(false);
+        /*
+         * 在飞的请求数减一，**归零才算不忙**。
+         *
+         * 原来这里是无条件 setBusy(false)：翻译和识别（现在还有校验）同时在跑的
+         * 时候，先回来的那条会把忙碌状态撤掉，界面上的转圈提前消失、
+         * 按钮也提前变成可点的 —— 但另一条其实还在等。
+         */
+        if (m_inFlight > 0 && --m_inFlight == 0)
+            setBusy(false);
 
         const QByteArray raw = reply->readAll();
         const QJsonObject root = QJsonDocument::fromJson(raw).object();
@@ -693,11 +787,18 @@ void LlmClient::flushPending() {
     m_pending.clear();
     for (const PendingRequest &request : waiting) {
         /* image 非空 = 这是一条识别请求（见 PendingRequest 的说明） */
-        if (!request.image.isEmpty())
+        if (!request.image.isEmpty()) {
             postVision(request.token, request.image, request.target, request.source,
                        request.persona);
-        else
+        } else if (request.persona == QLatin1String("ask")) {
+            /*
+             * 自定义提示词那条（见 ask）：排进队时把 system 提示词寄存在
+             * source 里（所以它没过 post 那道"翻译"的规矩），重新起来时原样还回去。
+             */
+            ask(request.source, request.text, QStringLiteral("正在请求模型…"));
+        } else {
             post(request.token, request.text, request.target, request.source, request.probe);
+        }
     }
 }
 

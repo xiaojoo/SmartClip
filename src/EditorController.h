@@ -107,6 +107,41 @@ public:
                                 const QString &text);
 
     /*
+     * Markdown -> 一份**受控的小 HTML**（正文区那个"预览"用的，见
+     * qml/components/MarkdownView.qml）。
+     *
+     * 写在 C++ 这侧的三个理由：
+     *   1) 真正的 markdown 渲染器在 QTextDocument（QML 那个 Text.MarkdownText
+     *      只认一个子集：表格 / 行内代码 / 删除线都不认）；
+     *   2) 顺手把图片引用按**这份文档所在的目录**改写成绝对 file:// 路径 ——
+     *      笔记里的 `![](assets/xxx.png)` 是相对路径，不按基准目录解析的话
+     *      预览里全是裂图；
+     *   3) 配色和字体在这里写死（见 .cpp 里的 kCss），和界面深色主题对齐，
+     *      不靠 QML 那边再猜一遍。
+     *
+     * baseDir 传这份文档所在的目录（用来拼图片的绝对路径；空串 = 不解析）。
+     * 返回空串 = 没有内容可渲染。
+     */
+    Q_INVOKABLE QString markdownHtml(const QString &markdown, const QString &baseDir);
+
+    /*
+     * 交给系统默认程序打开一个链接 / 路径（预览里点链接用）。
+     *
+     * 只放行 http / https / mailto / file：预览的 HTML 是从用户自己的文件
+     * 渲染出来的，理论上不该有别的协议，但这里再挡一道 —— 免得哪天渲染器
+     * 放出来一个 shell: 之类的东西被顺手执行了。
+     */
+    Q_INVOKABLE bool openExternal(const QString &url);
+
+    /*
+     * 把一段文字放进系统剪贴板。
+     *
+     * 校验结果的"复制结果"、对比的"复制补丁"走这里 —— QML 侧没有直接写
+     * 剪贴板的接口（TextEdit.copy() 只管选中的文字）。
+     */
+    Q_INVOKABLE void copyText(const QString &text);
+
+    /*
      * 在系统文件管理器里定位一个文件 / 打开一个目录。
      *
      * 传文件就打开它所在的目录，传目录就打开这个目录 —— 用户想看看
@@ -199,6 +234,12 @@ signals:
 
 private:
     void registerShortcuts();
+
+    /*
+     * markdownHtml() 的本体：相对图片路径改写 + QTextDocument 渲染，
+     * 返回那份受控 HTML（说明见上面的 markdownHtml）。
+     */
+    static QString markdownToPreviewHtml(const QString &markdown, const QString &baseDir);
 
     /* 把 QSettings 里存过的组合键盖回 QAction */
     void restoreShortcuts();
