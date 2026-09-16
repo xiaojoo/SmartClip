@@ -1,5 +1,6 @@
 #include "Formatter.h"
 
+#include <QDateTime>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -88,21 +89,12 @@ QString builtinKindForLanguage(const QString &language) {
 }
 
 /*
- * 命令行里第一段程序在不在。
+ * "命令行里第一段程序在不在"的缓存有效期（毫秒）。
  *
- * 用 QStandardPaths::findExecutable 查，不真去跑它 —— 那两个 inPlace 的工具
- * 跑一次就会**就地改文件**，拿"测试"按钮去试会动用户的正文。
- * 写了路径的（C:/tools/clang-format.exe）就直接看那个文件在不在。
+ * 见 Formatter::programFound 的说明：够短，用户去装完工具再回来就会重查；
+ * 够长，设置面板里连点一串输入框触发的那些刷新不会重复扫 PATH。
  */
-bool programFound(const QString &command) {
-    const QStringList parts = QProcess::splitCommand(command);
-    if (parts.isEmpty())
-        return false;
-    const QString program = parts.first();
-    if (program.contains(QLatin1Char('/')) || program.contains(QLatin1Char('\\')))
-        return QFileInfo::exists(program);
-    return !QStandardPaths::findExecutable(program).isEmpty();
-}
+constexpr qint64 kFoundCacheMs = 2000;
 
 QString programName(const QString &command) {
     return QProcess::splitCommand(command).value(0);
@@ -124,6 +116,45 @@ Formatter::Formatter(QObject *parent) : QObject(parent) {}
 /* 支持情况                                                            */
 /* ------------------------------------------------------------------ */
 
+/*
+ * 命令行里第一段程序在不在。
+ *
+ * 用 QStandardPaths::findExecutable 查，不真去跑它 —— 那两个 inPlace 的工具
+ * 跑一次就会**就地改文件**，拿"测试"按钮去试会动用户的正文。
+ * 写了路径的（C:/tools/clang-format.exe）就直接看那个文件在不在。
+ *
+ * ===========================================================================
+ * 为什么结果要缓存
+ * ===========================================================================
+ * findExecutable 是按 PATHEXT 把整条 PATH 扫一遍：本机 PATH 有 99 个目录，
+ * 查一个**没装**的程序（设置里标着"（没找到）"的那几行）就要十几毫秒，而
+ * toolList() 一次要查 15 个条目 —— 实测一轮 ≈190ms，全压在 GUI 线程上。
+ *
+ * 这条路以前是"谁问都现算"（设置面板刷新、右键菜单弹出、状态栏那句…），
+ * 于是设置里从这一行点到下一行，界面就要冻两下（见 setToolFor 的说明）。
+ * 缓存 2 秒不改变"装了工具就能用"：2 秒远短于"去装一个工具再回来"的时间，
+ * 但足够把连点触发的那串刷新、以及同一轮里的重复查询（clang-format 要查 3 次、
+ * prettier 5 次）全吃掉。
+ *
+ * 带路径的命令不缓存：那只是一次 QFileInfo::exists，而且用户可能正往那儿拷文件。
+ */
+bool Formatter::programFound(const QString &command) const {
+    const QString program = programName(command);
+    if (program.isEmpty())
+        return false;
+    if (program.contains(QLatin1Char('/')) || program.contains(QLatin1Char('\\')))
+        return QFileInfo::exists(program);
+
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    const auto cached = m_foundCache.constFind(program);
+    if (cached != m_foundCache.constEnd() && now - cached.value().second < kFoundCacheMs)
+        return cached.value().first;
+
+    const bool found = !QStandardPaths::findExecutable(program).isEmpty();
+    m_foundCache.insert(program, qMakePair(found, now));
+    return found;
+}
+
 QString Formatter::builtinKindFor(const QString &language) const {
     return builtinKindForLanguage(language);
 }
@@ -134,10 +165,24 @@ QString Formatter::toolFor(const QString &language) const {
 
 void Formatter::setToolFor(const QString &language, const QString &command) {
     const QString trimmed = command.trimmed();
+    const QString key = QStringLiteral("format/tool/") + language;
+
+    /*
+     * 值没变：不落盘、不发信号。
+     *
+     * 输入框的 editingFinished 是"失焦"就发（Qt 文档原话：Return/Enter 按下或
+     * 输入框失去焦点 —— 不要求"改过内容"），所以用户在设置里从这一行点到下一行，
+     * 每一行都会走到这里。原来无论变没变都落盘 + emit toolsChanged，而
+     * toolsChanged 那头连着一次全表刷新（扫一遍 PATH + Repeater 整表重建），
+     * "点一下输入框顿一下"的账主要就是这么来的（见 programFound 的实测数字）。
+     */
+    if (QSettings().value(key).toString().trimmed() == trimmed)
+        return;
+
     if (trimmed.isEmpty())
-        QSettings().remove(QStringLiteral("format/tool/") + language);
+        QSettings().remove(key);
     else
-        QSettings().setValue(QStringLiteral("format/tool/") + language, trimmed);
+        QSettings().setValue(key, trimmed);
     emit toolsChanged();
 }
 

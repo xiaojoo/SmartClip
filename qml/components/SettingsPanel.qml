@@ -174,11 +174,12 @@ Popup {
     }
 
     /*
-     * 格式化那一栏：改完某个语言的命令之后，把那一行刷成 C++ 侧规范化过的值。
+     * 格式化那一栏：整表重取一份（工具表 + 每行的命令与"装没装"）。
      *
-     * 不刷的话，用户填了 "  clang-format  "（前后带空格）界面上看着没变，
-     * 但落盘的是 trim 过的 —— 两边不一致，下次打开又"变"了一次。
-     * Repeater 的条目本轮还没重建，所以推到下一拍。
+     * 只在**设置真的改了**的时候走（C++ 的 toolsChanged；值没变那边不发信号），
+     * 因为它换的是整个 fmtTools —— Repeater 会把每一行都销毁重建。
+     * 失焦那一瞬间的显示规范化不走这条路（那太贵，见下面输入框的
+     * onEditingFinished）：一行输入框失焦就重建 15 行，点一下卡一下。
      */
     function refreshFormatTools() {
         fmtTools = Fmt.toolList()
@@ -2259,9 +2260,22 @@ Popup {
                                     rightPadding: 6
                                     onEditingFinished: {
                                         Fmt.setToolFor(fmtRow.modelData.id, text)
-                                        /* 落盘之后这一行的 modelData 会重建，
-                                           把正在编辑的那个框刷成规范化的值 */
-                                        Qt.callLater(root.refreshFormatTools)
+                                        /*
+                                         * 只把**这一行**刷成 C++ 侧规范化过的值（用户填了
+                                         * "  clang-format  "，落盘的是 trim 过的，界面得跟着）。
+                                         *
+                                         * 为什么不是原来的 Qt.callLater(root.refreshFormatTools)：
+                                         * 那是把整个 fmtTools 换成新的一份 model —— Repeater
+                                         * 会把 15 行全销毁重建，而这一步恰好发生在"点进另一个
+                                         * 输入框"的那一瞬（点中的那个框也一起被重建掉，焦点落空，
+                                         * 于是要么顿一下、要么得再点一次）。加上 toolList() 每轮
+                                         * 要扫一遍 PATH（本机实测约 190ms），一次点击就是几百毫秒。
+                                         *
+                                         * 现在只读这一行的 QSettings 值：不换 model、不重建、
+                                         * 不扫 PATH。命令**真改了**时 C++ 会发 toolsChanged，
+                                         * 那条路（上面 Connections）仍然会整表刷新 —— 那时候该刷。
+                                         */
+                                        text = Fmt.toolFor(fmtRow.modelData.id)
                                     }
                                     onTextChanged: if (!activeFocus) cursorPosition = 0
                                     background: Rectangle {

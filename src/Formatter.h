@@ -1,6 +1,8 @@
 #pragma once
 
+#include <QHash>
 #include <QObject>
+#include <QPair>
 #include <QString>
 #include <QStringList>
 #include <QVariantList>
@@ -116,6 +118,20 @@ private:
                            QString *outEngine) const;
 
     QString builtinKindFor(const QString &language) const;
+
+    /*
+     * 命令里第一段程序在不在（"本机装没装 clang-format"）。
+     *
+     * 带缓存，理由见 .cpp 里那段说明：这条路会被设置面板和右键菜单反复调，
+     * 一次 toolList() 要查十几个程序名，而每查一个"没装"的都要扫整条 PATH。
+     */
+    bool programFound(const QString &command) const;
+
+    /*
+     * programFound 的缓存：key = 程序名（带路径的不进这里），
+     * value = (查没查到, 查询时刻的毫秒数)。
+     */
+    mutable QHash<QString, QPair<bool, qint64> > m_foundCache;
 
     /* 上一次的失败原因 / 用的工具（format() 每次进来都会重写） */
     mutable QString m_lastError;
