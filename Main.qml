@@ -648,7 +648,7 @@ Rectangle {
     }
 
     /*
-     * 设置 → 翻译：选本地推理程序 / 模型文件（kind 是 "exe" / "model"）。
+     * 设置 → 模型：选本地推理程序 / 模型文件（kind 是 "exe" / "model"）。
      *
      * 走和"选择保存位置…"同一条路：**先让设置面板让开**再开文件框。面板是
      * 置顶的原生窗口，不让开的话 Windows 的文件选择框会被它整块盖住（用户
@@ -1875,7 +1875,7 @@ Rectangle {
         if (act === "storage") { showStorage(); return }
         /* 设置面板的"翻译"栏：模型怎么配（翻译卡片上的提示会指到这儿） */
         if (act === "settingsTranslate") { settingsPanel.show("translate"); return }
-        /* 设置 → 翻译里那两个「选择…」（面板先让开，再开系统文件框） */
+        /* 设置 → 模型里那两个「选择…」（面板先让开，再开系统文件框） */
         if (act === "translateChooseExe") { chooseTranslateLocalFile("exe"); return }
         if (act === "translateChooseModel") { chooseTranslateLocalFile("model"); return }
         if (act === "translateChooseMmproj") { chooseTranslateLocalFile("mmproj"); return }

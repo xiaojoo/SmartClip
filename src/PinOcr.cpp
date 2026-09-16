@@ -394,7 +394,7 @@ QString PinOcr::defaultRunnerCommand() {
 QString PinOcr::runnerProblem(const QString &command) {
     const QString cmd = command.trimmed();
     if (cmd.isEmpty())
-        return QStringLiteral("还没填 PP-OCR 程序（设置 → 翻译 → 图上选字）");
+        return QStringLiteral("还没填 PP-OCR 程序（设置 → 模型 → 图上选字）");
 
     /* 第一段是程序名，可能带引号 */
     QString program = cmd;

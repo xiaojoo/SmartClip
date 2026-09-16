@@ -390,11 +390,11 @@ QString LlmClient::ask(const QString &systemPrompt, const QString &userText,
         return token;
     }
     if (chatUrl().isEmpty()) {
-        failLater(QStringLiteral("还没配置接口地址（设置 → 翻译）"));
+        failLater(QStringLiteral("还没配置接口地址（设置 → 模型）"));
         return token;
     }
     if (m_mode == QLatin1String("api") && m_model.trimmed().isEmpty()) {
-        failLater(QStringLiteral("还没填模型名（设置 → 翻译）"));
+        failLater(QStringLiteral("还没填模型名（设置 → 模型）"));
         return token;
     }
     /* 本地模式还没起来：和翻译那条一样排队等它加载完（见 post 里那段说明） */
@@ -468,11 +468,11 @@ void LlmClient::post(const QString &token, const QString &text, const QString &t
         return;
     }
     if (chatUrl().isEmpty()) {
-        failLater(QStringLiteral("还没配置接口地址（设置 → 翻译）"));
+        failLater(QStringLiteral("还没配置接口地址（设置 → 模型）"));
         return;
     }
     if (m_mode == QLatin1String("api") && m_model.trimmed().isEmpty()) {
-        failLater(QStringLiteral("还没填模型名（设置 → 翻译）"));
+        failLater(QStringLiteral("还没填模型名（设置 → 模型）"));
         return;
     }
     /*
@@ -548,11 +548,11 @@ void LlmClient::postVision(const QString &token, const QString &imageDataUrl,
         return;
     }
     if (chatUrl().isEmpty()) {
-        failLater(QStringLiteral("还没配置接口地址（设置 → 翻译）"));
+        failLater(QStringLiteral("还没配置接口地址（设置 → 模型）"));
         return;
     }
     if (m_mode == QLatin1String("api") && visionModel().isEmpty()) {
-        failLater(QStringLiteral("还没填识别用的模型名（设置 → 翻译）"));
+        failLater(QStringLiteral("还没填识别用的模型名（设置 → 模型）"));
         return;
     }
     /* 本地模型还没起来：和翻译一样排队等它加载完（见 post 里那段说明） */
@@ -715,7 +715,7 @@ bool LlmClient::startLocal() {
     if (localRunning())
         return true;
     if (m_localExe.trimmed().isEmpty() || m_localModel.trimmed().isEmpty()) {
-        setStatus(QStringLiteral("还没填本地推理程序或模型文件（设置 → 翻译）"));
+        setStatus(QStringLiteral("还没填本地推理程序或模型文件（设置 → 模型）"));
         return false;
     }
 

@@ -172,7 +172,7 @@ Window {
             Layout.rightMargin: 14
             Layout.topMargin: 6
             visible: Check.enabled && !Check.llmReady
-            text: "大模型还没配好（设置 → 翻译）：现在只跑本地规则。"
+            text: "大模型还没配好（设置 → 模型）：现在只跑本地规则。"
             color: root.warnColor
             font.pixelSize: 11
             wrapMode: Text.WordWrap

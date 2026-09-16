@@ -58,6 +58,14 @@ class Checker final : public QObject {
     Q_PROPERTY(QString status READ status NOTIFY statusChanged)
     /* 大模型那条支路能不能用（没配好接口就只跑本地规则，界面要说清楚） */
     Q_PROPERTY(bool llmReady READ llmReady NOTIFY llmStateChanged)
+    /*
+     * 「校验」那一栏顶上那行"现在用的是哪个模型"。
+     *
+     * 和 llmReady 是**同一套判据**（本地模式看程序 + 模型文件，接口模式看地址 +
+     * 模型名），所以那句话不会和"到底走不走模型"打架。界面直接显示这行，
+     * 不自己在 QML 里拼（见 Checker.cpp 里 modelSummary 的说明）。
+     */
+    Q_PROPERTY(QString modelSummary READ modelSummary NOTIFY llmStateChanged)
 
 public:
     explicit Checker(LlmClient *llm = nullptr, QObject *parent = nullptr);
@@ -69,6 +77,7 @@ public:
     bool busy() const { return m_busy; }
     QString status() const { return m_status; }
     bool llmReady() const;
+    QString modelSummary() const;
 
     /*
      * 让它去校验这份正文（当前标签的）。

@@ -494,6 +494,13 @@ Checker::Checker(LlmClient *llm, QObject *parent)
                 });
         connect(m_llm, &LlmClient::settingsChanged, this,
                 [this]() { emit llmStateChanged(); });
+        /*
+         * 本地服务起 / 停也要发一次：那句"（已启动）/（没启动）"是 modelSummary
+         * 拼出来的，界面得跟着刷新 —— 不然用户在「模型」那一栏点了启动，
+         * 切回「校验」看到的还是"没启动"。
+         */
+        connect(m_llm, &LlmClient::localRunningChanged, this,
+                [this]() { emit llmStateChanged(); });
     }
 }
 
@@ -508,11 +515,59 @@ void Checker::setEnabled(bool on) {
 bool Checker::llmReady() const {
     if (!m_llm)
         return false;
-    /* 接口地址 + 模型名都填了才算配好（和 LlmClient::post 的判据一致） */
-    const bool apiConfigured = !m_llm->apiBase().trimmed().isEmpty()
-                               && (m_llm->mode() != QLatin1String("api")
-                                   || !m_llm->model().trimmed().isEmpty());
-    return apiConfigured;
+    /*
+     * 两种模式要的东西不一样，**别混着看**：
+     *
+     *   本地模式：要的是"程序 + 模型文件"（接口地址是 127.0.0.1:端口，永远非空，
+     *             拿它当判据等于永远"就绪" —— 原来就是这样，用户切到本地模型
+     *             之后界面上照样报接口那个模型名）；
+     *   接口模式：要的是"接口地址 + 模型名"（和 LlmClient::ask 的判据一致）。
+     *
+     * 注意这里判的是**配好了没有**，不是"服务起没起来"：本地那个没起来时
+     * LlmClient::ask 会自己把它拉起来（见那里"配好一次，以后不用手点启动"），
+     * 所以起没起来只影响界面上那句提示，不影响能不能走模型。
+     */
+    if (m_llm->mode() == QLatin1String("local"))
+        return !m_llm->localExe().trimmed().isEmpty()
+               && !m_llm->localModel().trimmed().isEmpty();
+    return !m_llm->apiBase().trimmed().isEmpty()
+           && !m_llm->model().trimmed().isEmpty();
+}
+
+/*
+ * 「校验」那一栏顶上那行状态："现在用的是哪个模型"。
+ *
+ * 为什么这行在 C++ 拼、而不是 QML 里拼：判据（llmReady / wantsModel）就在这个
+ * 类里，"哪句话配哪个状态"放一起才不会打架。以前 QML 里写的是
+ * "模型就绪：" + Llm.model —— Llm.model 是**接口模式**的模型名，出厂默认
+ * "deepseek-chat"：用户切到本地模型（自己的 gguf）之后，这行照样报
+ * deepseek-chat，本地那个起没起来也不说，等于凭空写死了一个没在用的模型。
+ */
+QString Checker::modelSummary() const {
+    if (!m_llm)
+        return QString();
+
+    if (m_llm->mode() == QLatin1String("local")) {
+        if (!llmReady())
+            return QStringLiteral("本地模型还没配好（见左边「模型」那一栏）"
+                                  "—— 开着校验也只会跑本地规则。");
+        /* 只显示文件名：模型那一栏里那条路径整条太长，这里只是"用的是哪个" */
+        const QString path = m_llm->localModel().trimmed();
+        const int cut = qMax(path.lastIndexOf(QLatin1Char('/')),
+                             path.lastIndexOf(QLatin1Char('\\')));
+        const QString name = cut >= 0 ? path.mid(cut + 1) : path;
+        return QStringLiteral("模型：本地 · %1%2")
+            .arg(name,
+                 m_llm->localRunning()
+                     ? QStringLiteral("（已启动）")
+                     : QStringLiteral("（没启动 —— 跑校验时会自动起来，加载要几秒到几十秒）"));
+    }
+
+    if (!llmReady())
+        return QStringLiteral("接口模型还没配好（见左边「模型」那一栏）"
+                              "—— 开着校验也只会跑本地规则。");
+    return QStringLiteral("模型：接口 · %1（%2）")
+        .arg(m_llm->model().trimmed(), m_llm->apiBase().trimmed());
 }
 
 void Checker::setBusy(bool on) {
@@ -654,7 +709,7 @@ int Checker::check(const QString &text, const QString &language, const QString &
         return localCount;
     }
     if (!llmReady()) {
-        setStatus(QStringLiteral("还没配好大模型（设置 → 翻译），只跑了本地规则：%1 条问题")
+        setStatus(QStringLiteral("还没配好大模型（设置 → 模型），只跑了本地规则：%1 条问题")
                       .arg(localCount));
         return localCount;
     }

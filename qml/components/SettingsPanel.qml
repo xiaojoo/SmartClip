@@ -56,6 +56,14 @@ Popup {
     /* 显示的栏目：shortcuts / storage / translate / about */
     property string section: "shortcuts"
 
+    /*
+     * 换栏目 = 回到顶部。
+     *
+     * 右栏从"直接铺满"改成了 Flickable（见下面 content 的说明）：上一栏滚到一半
+     * 的位置会留在 contentY 上，点进下一栏第一眼就是半截内容。
+     */
+    onSectionChanged: content.contentY = 0
+
     /* 顶部标题栏文案（"=" 栏目名），以及它在拖拽时的偏移 */
     property real dragDeltaX: 0
     property real dragDeltaY: 0
@@ -114,7 +122,13 @@ Popup {
     /* 栏目表：左边"操作步骤"那一列 */
     readonly property var navItems: [        { key: "shortcuts", label: "快捷键", icon: "gear" },
         { key: "storage",   label: "存储",   icon: "folder" },
-        { key: "translate", label: "翻译",   icon: "translate" },
+        /*
+         * 这一栏不叫「翻译」而叫「模型」：它配的是**一个** LLM，翻译卡片和
+         * 编辑区校验都用它（见这一栏开头那段、还有「校验」里那句"见左边…"）。
+         * 叫「翻译」的话，用户在校验那一栏看到"去配模型"就得猜是哪儿。
+         * key 还是 translate（C++ / 自检那边按 key 找栏目，改 key 是另一件事）。
+         */
+        { key: "translate", label: "模型",   icon: "translate" },
         /* 校验（中文用词 / 代码语法）—— 它有独立开关，所以单开一栏 */
         { key: "check",     label: "校验",   icon: "spellcheck" },
         /* 格式化：认本机装了哪些格式化工具、按语言指定命令 */
@@ -168,6 +182,26 @@ Popup {
      */
     function refreshFormatTools() {
         fmtTools = Fmt.toolList()
+    }
+
+    /*
+     * 右栏当前这一栏**内容自然高度**（不含上下各 14px 的留白）。
+     *
+     * 六栏的容器 Column 都只锚上 / 左 / 右、不定高，所以 implicitHeight 就是
+     * 内容真实需要多少像素 —— Flickable 的 contentHeight 拿它加两边的留白。
+     * 快捷键那一栏返回 0：它自己是个 ListView（高度绑在父级上，见 keyList），
+     * 再套一层滚动会变成两个滚动条抢同一段滚动距离。
+     */
+    function sectionContentHeight() {
+        switch (section) {
+        case "storage":   return storageColumn.implicitHeight
+        case "translate": return translateColumn.implicitHeight
+        case "document":  return documentColumn.implicitHeight
+        case "check":     return checkColumn.implicitHeight
+        case "format":    return formatColumn.implicitHeight
+        case "about":     return aboutSectionColumn.implicitHeight
+        }
+        return 0
     }
 
     /*
@@ -334,6 +368,34 @@ Popup {
     }
 
     IconProvider { id: icons }
+
+    /*
+     * 面板里所有输入框都用这个，而不是直接用 TextField。
+     *
+     * 为的是关掉 Qt 自带的那个**浅色**文本右键菜单（Undo / Redo / Cut / Copy /
+     * Paste / Delete / Select All）：Fusion 风格的 TextField 自己挂了一个 ——
+     * `ContextMenu.menu: TextEditingContextMenu { editor: control }`，白底英文，
+     * 和这套深色界面完全不搭；这一屏也没有非右键不可的操作（复制 / 粘贴 / 撤销
+     * 用键盘 Ctrl+C / Ctrl+V / Ctrl+Z，输入框里左键拖选照旧）。
+     *
+     * 为什么不是"盖一层只收右键的 MouseArea"（那样写过一版，**没用**）：
+     * 这个菜单是 **QContextMenuEvent** 弹出来的（见 Qt 文档 ContextMenu 那一页：
+     * "show a context menu upon a platform-specific event, such as a right click
+     * or the context menu key"），它不走"鼠标按下 -> 谁 acceptedButtons 认领"
+     * 那条路，盖在最上层也拦不住。官方给的口子就是把这个 Menu 置空。
+     *
+     * 注意：ContextMenu 是 Qt 6.9 才有的公共附加类型（这个浅色菜单本身也是 6.9
+     * 才加的），和上面 acceptedButtons 一样 —— 这套代码现在实际按 Qt >= 6.9 走。
+     */
+    component PanelField: TextField {
+        ContextMenu.menu: null
+        /*
+         * 再挂一个空的 requested：Qt 文档里那句是"If no menu is set, but this
+         * signal is connected, the context menu event will be accepted and will
+         * not propagate" —— 连"事件继续往上冒"这条后路一起堵掉。
+         */
+        ContextMenu.onRequested: (position) => { }
+    }
 
     background: Rectangle {
         color: root.bgColor
@@ -534,10 +596,44 @@ Popup {
                 }
     
                 /* ---- 右栏：具体操作 ---- */
-                Item {
+                /*
+                 * 右栏是个 Flickable。
+                 *
+                 * 面板高度跟着宿主窗口算（见上面 width / height 那两行），宿主一矮，
+                 * **任何一栏**的内容都会比可视区高。原来那几栏是直接铺在 Item 上
+                 * （Column { anchors.fill: parent }），高出来的部分被窗口边缘切掉，
+                 * 想滚也没得滚 —— 用户截图报的"格式化那一栏底下的语言看不见"就是这个。
+                 *
+                 * contentHeight 取**当前这一栏**的自然高度（sectionContentHeight），
+                 * 不是所有栏里最高的那一栏：否则在短栏目里也能往下滚出一片空白。
+                 * 内容比可视区矮时 Math.max 把它压回 height，滚动条自己也就不显示了
+                 * （ThinScrollBar 的 visible 是 size < 1.0）。
+                 *
+                 * clip 必须开着：Flickable 默认不裁剪，滚上去的部分会画到标题栏上。
+                 *
+                 * acceptedButtons 置空：这一栏只认**滚轮 / 滚动条**，不认"按住左键
+                 * 拖动翻页"。翻译 / 识别那几栏里全是 TextField（API Key、模型路径…），
+                 * Flickable 默认会把子项的鼠标拖动抢走 —— 想拖选一段文字，结果整页
+                 * 往上跑（Qt 自己在 6.9 的说明里也说鼠标拖动翻页"不合预期"，
+                 * acceptedButtons 就是为这个加的；置 Qt.NoButton = 关掉拖动）。
+                 *
+                 * interactive 那条路走不通：把它设 false 会把**滚轮**也一起关掉
+                 * （实测过了，滚轮纹丝不动）—— 那样等于回到"不能滚"的老毛病。
+                 *
+                 * 六栏的容器 Column 因此都只锚上 / 左 / 右、不定高（快捷键那栏除外）：
+                 * 定了高就等于又按可视区裁一次，内容照样长不出来。
+                 */
+                Flickable {
                     id: content
                     width: parent.width - sidebar.width - 1
                     height: parent.height
+                    clip: true
+                    acceptedButtons: Qt.NoButton
+                    contentWidth: width
+                    contentHeight: Math.max(height, root.sectionContentHeight() + 28)
+                    boundsBehavior: Flickable.StopAtBounds
+                    flickableDirection: Flickable.VerticalFlick
+                    ScrollBar.vertical: ThinScrollBar { }
     
                     /* ============ 快捷键 ============ */
                     Column {
@@ -893,7 +989,10 @@ Popup {
                      * 顺带给两个入口：换保存位置、把别的文件夹挂上来看。
                      */
                     Column {
-                        anchors.fill: parent
+                        id: storageColumn
+                        anchors.top: parent.top
+                        anchors.left: parent.left
+                        anchors.right: parent.right
                         anchors.margins: 14
                         spacing: 10
                         visible: root.section === "storage"
@@ -1105,15 +1204,18 @@ Popup {
                         }
                     }
 
-                    /* ============ 翻译（LLM 模型怎么配） ============ */
+                    /* ============ 模型（LLM 怎么配：翻译卡片和编辑区校验共用） ============ */
                     Column {
-                        anchors.fill: parent
+                        id: translateColumn
+                        anchors.top: parent.top
+                        anchors.left: parent.left
+                        anchors.right: parent.right
                         anchors.margins: 14
                         spacing: 9
                         visible: root.section === "translate"
 
                         Text {
-                            text: "翻译 / AI 模型"
+                            text: "模型（翻译 / 校验都用它）"
                             color: root.textBright
                             font.pixelSize: 14
                             font.bold: true
@@ -1124,9 +1226,11 @@ Popup {
                             wrapMode: Text.WordWrap
                             color: root.mutedColor
                             font.pixelSize: 11
-                            text: "翻译卡片（左侧图标条上那个地球图标，或 Ctrl+Alt+T）用这里的模型翻译。"
-                                  + "接口按 OpenAI 兼容格式填 —— OpenAI / DeepSeek / 通义 / Kimi / "
-                                  + "Ollama / LM Studio 都是这个格式；密钥只存在本机设置里。"
+                            text: "翻译卡片（左侧图标条上那个地球图标，或 Ctrl+Alt+T）和编辑区校验"
+                                  + "（左边「校验」那一栏）用的是同一个模型 —— 在这里配一次，"
+                                  + "两边都跟着变。接口按 OpenAI 兼容格式填："
+                                  + "OpenAI / DeepSeek / 通义 / Kimi / Ollama / LM Studio 都是这个格式；"
+                                  + "密钥只存在本机设置里。"
                         }
 
                         /* ---- 两种模式：现成的 API 服务 / 本机自己启动一个 ---- */
@@ -1205,7 +1309,7 @@ Popup {
                                         font.pixelSize: 12
                                     }
 
-                                    TextField {
+                                    PanelField {
                                         id: apiField
                                         width: 420
                                         height: 26
@@ -1272,7 +1376,7 @@ Popup {
                                     color: root.mutedColor
                                     font.pixelSize: 12
                                 }
-                                TextField {
+                                PanelField {
                                     id: exeField
                                     width: 320
                                     height: 26
@@ -1326,7 +1430,7 @@ Popup {
                                     color: root.mutedColor
                                     font.pixelSize: 12
                                 }
-                                TextField {
+                                PanelField {
                                     id: modelField
                                     width: 320
                                     height: 26
@@ -1380,7 +1484,7 @@ Popup {
                                     color: root.mutedColor
                                     font.pixelSize: 12
                                 }
-                                TextField {
+                                PanelField {
                                     id: mmprojField
                                     width: 320
                                     height: 26
@@ -1434,7 +1538,7 @@ Popup {
                                     color: root.mutedColor
                                     font.pixelSize: 12
                                 }
-                                TextField {
+                                PanelField {
                                     id: portField
                                     width: 90
                                     height: 26
@@ -1641,7 +1745,7 @@ Popup {
                                     color: root.mutedColor
                                     font.pixelSize: 12
                                 }
-                                TextField {
+                                PanelField {
                                     id: ocrRunnerField
                                     width: 420
                                     height: 26
@@ -1681,7 +1785,10 @@ Popup {
 
                     /* ============ 识别（文档 / 图片 -> Markdown） ============ */
                     Column {
-                        anchors.fill: parent
+                        id: documentColumn
+                        anchors.top: parent.top
+                        anchors.left: parent.left
+                        anchors.right: parent.right
                         anchors.margins: 14
                         spacing: 10
                         visible: root.section === "document"
@@ -1834,7 +1941,7 @@ Popup {
                                 color: root.mutedColor
                                 font.pixelSize: 12
                             }
-                            TextField {
+                            PanelField {
                                 id: docPythonField
                                 width: 420
                                 height: 26
@@ -1901,7 +2008,7 @@ Popup {
                                 color: root.mutedColor
                                 font.pixelSize: 12
                             }
-                            TextField {
+                            PanelField {
                                 id: docRunnerField
                                 width: 420
                                 height: 26
@@ -1947,7 +2054,10 @@ Popup {
 
                     /* ============ 校验（中文用词 / 代码语法） ============ */
                     Column {
-                        anchors.fill: parent
+                        id: checkColumn
+                        anchors.top: parent.top
+                        anchors.left: parent.left
+                        anchors.right: parent.right
                         anchors.margins: 14
                         spacing: 9
                         visible: root.section === "check"
@@ -2024,14 +2134,20 @@ Popup {
                                   + "对不上的直接丢掉）。"
                         }
 
+                        /*
+                         * 「现在用的是哪个模型」—— 这行由 C++ 侧拼（Checker::modelSummary）。
+                         *
+                         * 原来这里是 QML 里拼的 "模型就绪：" + Llm.model：那是**接口
+                         * 模式**的模型名，出厂默认 "deepseek-chat"，用户切到本地模型
+                         * 之后照样报它，本地那个起没起来也不说。判据（llmReady）在
+                         * Checker 里，所以那句话也放那儿，免得两处各写一套。
+                         */
                         Text {
                             width: parent.width
                             wrapMode: Text.WordWrap
                             color: Check.llmReady ? root.accentColor : "#d7a85b"
                             font.pixelSize: 11
-                            text: Check.llmReady
-                                  ? ("模型就绪：" + (Llm.model !== "" ? Llm.model : "（本地）"))
-                                  : "模型还没配好（见左边「翻译」那一栏）—— 开着校验也只会跑本地规则。"
+                            text: Check.modelSummary
                         }
 
                         Text {
@@ -2056,7 +2172,10 @@ Popup {
 
                     /* ============ 格式化 ============ */
                     Column {
-                        anchors.fill: parent
+                        id: formatColumn
+                        anchors.top: parent.top
+                        anchors.left: parent.left
+                        anchors.right: parent.right
                         anchors.margins: 14
                         spacing: 9
                         visible: root.section === "format"
@@ -2127,7 +2246,7 @@ Popup {
                                     elide: Text.ElideRight
                                 }
 
-                                TextField {
+                                PanelField {
                                     width: 300
                                     height: 24
                                     text: fmtRow.modelData.command
@@ -2158,7 +2277,10 @@ Popup {
 
                     /* ============ 关于 ============ */
                     Column {
-                        anchors.fill: parent
+                        id: aboutSectionColumn
+                        anchors.top: parent.top
+                        anchors.left: parent.left
+                        anchors.right: parent.right
                         anchors.margins: 14
                         spacing: 10
                         visible: root.section === "about"
@@ -2284,5 +2406,6 @@ Popup {
                 }
             }
         }
+
     }
 }
