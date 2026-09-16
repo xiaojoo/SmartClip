@@ -92,6 +92,20 @@ Rectangle {
             objectName: "markdownBody"
 
             /*
+             * 宽度**必须自己钉住**，不能留给 ScrollView 去设。
+             *
+             * 交给它设的话：正文先按自己的 implicitWidth 排一遍（实测 629px），
+             * ScrollView 之后才把宽度改成视口宽（1132px）→ 整篇按新宽度**重排**。
+             * 这一下重排就是用户看到的"滚动条手柄先变短、内容跳一下，过一会儿
+             * 又正常"：内容高度变了 → 手柄长度跟着变 → 正文位置跟着动。
+             * 打开笔记的前几十毫秒正好是用户开始滚轮的时候，撞上就一直在抖。
+             *
+             * 绑成 availableWidth 之后，第一遍排版就是最终宽度：高度一次到位，
+             * 手柄不动、正文不跳。
+             */
+            width: scroller.availableWidth
+
+            /*
              * 只读 + 可以用鼠标选（见文件头那段：这就是选它不选 Text 的原因）。
              * readOnly 的 TextEdit 不接受键盘输入，但选中和复制照样能用。
              */
@@ -126,6 +140,50 @@ Rectangle {
              * （只读 + 有链接时它照样处理点击）。
              */
             onLinkActivated: (link) => root.linkActivated(link)
+
+            /*
+             * 滚轮：**一格一步、立刻到位**，不要 Qt 那段缓动滑行。
+             *
+             * 不接这一手的话，Qt 把每一格滚轮摊成一段减速动画：实测一格 72px
+             * 要走 21 帧（约 330ms）。手停了内容还在滑；连滚时每一格都在上一段
+             * 动画中途重新起步（开头几帧快、尾巴 1px 地挪），合起来就是内容
+             * 忽快忽慢地"弹"。源码那一栏（QScintilla）是一格一步的干脆手感，
+             * 预览这里对齐它。
+             *
+             * 挂在正文控件上而不是外面：Qt 的输入处理器比控件自己的 wheelEvent
+             * 先拿到事件 —— 挂在外层会被 ScrollView 内部那个 Flickable 先吃掉。
+             *
+             * 只接管滚轮：拖拽、右侧滚动条、键盘都不动。
+             */
+            WheelHandler {
+                acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
+
+                onWheel: (event) => {
+                    const f = scroller.contentItem
+                    if (!f)
+                        return
+
+                    const maxY = Math.max(0, f.contentHeight - f.height)
+
+                    if (event.pixelDelta.y !== 0) {
+                        /* 触控板 / 精密滚轮给的就是像素：1:1 跟手 */
+                        f.contentY = Math.max(0, Math.min(f.contentY - event.pixelDelta.y, maxY))
+                    } else {
+                        /*
+                         * 一格 = 三行（和系统 / 编辑器一致）。行高按"正文总高 /
+                         * 段数"现算，不写死像素：正文里字号是相对的
+                         * （h1 1.7em、h2 1.45em…），写死的话标题多的文档一步
+                         * 会跨太多。
+                         */
+                        const lineHeight = body.lineCount > 0
+                                           ? body.contentHeight / body.lineCount
+                                           : body.font.pixelSize * 1.5
+                        const notches = event.angleDelta.y / 120
+                        f.contentY = Math.max(0, Math.min(f.contentY - notches * 3 * lineHeight, maxY))
+                    }
+                    event.accepted = true
+                }
+            }
         }
     }
 
