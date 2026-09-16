@@ -242,22 +242,68 @@ int main(int argc, char *argv[]) {
      *   所以之前 QScintilla 只能退化成独立顶层窗口 —— 靠手算坐标跟随，会"分家"，
      *   QML 的 radius 也裁不到它。
      *
-     *   QWidget(主窗口，无边框+透明)
+     *   QWidget(主窗口，无边框 + 不透明，圆角靠遮罩裁)
      *     ├── QQuickWidget(整个 QML 界面)
      *     └── QsciScintilla(编辑器，同一层级 → 圆角/裁剪/QML 层级都成立)
      */
     QWidget host;
     host.setWindowFlags(Qt::Window | Qt::FramelessWindowHint);
-    host.setAttribute(Qt::WA_TranslucentBackground);
-    host.setAutoFillBackground(false);
+    /*
+     * 主窗口**不透明**、底色就是界面底色 —— 不是 WA_TranslucentBackground。
+     *
+     * 这里踩过一次，记下来免得改回去（自检"最大化/还原：来回切四次，窗口一次都没露白"
+     * 钉的就是它）：原来这个窗口是**半透明**的（WA_TranslucentBackground，四角靠
+     * 透明露桌面），结果**每次最大化**都有一帧窗口是空的 —— 那一帧屏幕上看到的是
+     * 窗口**底下的东西**。底下正好是个白底网页时，用户看到的就是"白色的背影一闪"
+     * （实测：抓那一帧的像素，亮度 ~250、取样条 96% 是白的；把那一帧存下来一看，
+     * 里面是浏览器那张白底网页。还原方向基本不白，白的是最大化那一下）。
+     *
+     * 为什么半透明的窗口会"空一帧"：窗口的尺寸一变，系统要重建它那张表面，
+     * 而新表面画上内容之前是空的；半透明窗口的"空"= 透过去看底下，不透明窗口的
+     * "空"= 露出自己的底色。所以这一条的正解不是"想办法提前画一帧"（那是在跟
+     * 系统的表面重建赛跑），而是**让"空"看起来也是对的**：换成不透明 + 深色底。
+     *
+     * 顺带把"压暗 -> 回全亮"那次淡入也修对了（见 Main.qml 的 interfaceRoot）：
+     * 半透明窗口上降透明度 = 整块界面变半透明、露出桌面；不透明窗口上降透明度
+     * 才是注释里写的那个效果（压暗再回全亮）。
+     *
+     * 四角的圆角不受影响：真正负责裁圆角的是 WindowHelper 的**遮罩**
+     * （setMask -> Windows 的 SetWindowRgn），透明那层只是"顺手"，
+     * 自检里有一条量过"遮罩落上了、左上角真的被裁掉"。
+     */
+    host.setAutoFillBackground(true);
+    {
+        QPalette hostPal = host.palette();
+        /* 和 contentRoot 之外那圈底同色（见 Main.qml），换窗口尺寸时露的就是它 */
+        hostPal.setColor(QPalette::Window, QColor(0x31, 0x33, 0x35));
+        host.setPalette(hostPal);
+    }
     host.setWindowTitle(QStringLiteral("SmartClip — 剪贴板"));
 
     auto *quick = new QQuickWidget(&host);
     quick->setResizeMode(QQuickWidget::SizeRootObjectToView);
     /*
+     * 关掉这块控件的多重采样（MSAA）。
+     *
+     * 为什么：QQuickWidget 的离屏渲染目标尺寸**跟着窗口走**，而 Qt 默认会给它
+     * 带 MSAA —— 4K 下那意味着"颜色缓冲 + 深度模板缓冲再乘 4"，两三百 MB 的
+     * 渲染目标，每次窗口尺寸变化都要重建。实测（build\window-trace.log 里那几条
+     * "内容控件摆到 … 之前/之后"）：不关的时候，第一次按 4K 建这个目标要 ~140ms，
+     * 关掉之后只剩 QML 自己的同步 + 渲染（~20ms）—— 用户看到的就是最大化那一下
+     * "卡 0.15 秒"。
+     *
+     * 这块界面是纯 2D（文字 / 圆角卡片 / 图标），MSAA 本来也没什么用；
+     * 真要锯齿了，QML 那边还有 Item 级的抗锯齿可用。
+     */
+    {
+        QSurfaceFormat fmt = quick->format();
+        fmt.setSamples(0);
+        quick->setFormat(fmt);
+    }
+    /*
      * 不要给 QQuickWidget 设 WA_TranslucentBackground —— 实测那样整块会变黑。
-     * 窗口透明由 QWidget 的 WA_TranslucentBackground + QML 根元素
-     * color: "transparent" 加上圆角遮罩共同实现。
+     * 清成透明色是对的：QML 根元素是 color: "transparent"，空出来的地方就露
+     * 宿主窗口那层深色底（见上面 host 的调色板），不会露桌面。
      */
     quick->setClearColor(Qt::transparent);
 

@@ -62,6 +62,15 @@ Popup {
     /* 父级那一条所在行的 y（对齐的目标值，只用于自检对照） */
     property real submenuRowY: 0
 
+    /*
+     * "弹窗已经露出来之后，位置又被改过"的次数（自检读，见 Main.qml 的 uiState）。
+     *
+     * 规矩：位置在 openFor / openAtPoint 里一次定死，开出来之后只许长、不许挪。
+     * 挪一下在 Windows 上就是"旧画面按新位置合成一帧"（闪）。正常恒为 0；
+     * 一旦不是 0，就是"按最坏展开尺寸预留位置"那份账算漏了（见 openSubmenu）。
+     */
+    property int openShifts: 0
+
     signal selected(string act)
 
     readonly property color bgColor:     "#3c3f41"
@@ -135,6 +144,66 @@ Popup {
     /* 主菜单那块面板实际画出来的高度 */
     readonly property real menuHeight: Math.min(entriesHeight, maxMenuHeight)
     readonly property bool scrollable: entriesHeight > menuHeight + 1
+
+    /*
+     * ======================================================================
+     * "最坏能展开到多大" —— 开菜单之前就要按它把位置定死
+     * ======================================================================
+     *
+     * 起因（自检"弹窗：展开子菜单时弹窗的左上角一动不动"钉的就是它）：
+     * 位置原来是**展开子菜单那一刻**才夹的 —— 顶出宿主下沿就整体往上挪一下。
+     * 而"露着的时候改位置"在 Windows 上必然闪：系统先拿窗口的旧画面按新位置
+     * 合成一帧，Qt 下一帧才画新内容（便签菜单那边为同一条把主栏和子面板拆成了
+     * 两块窗口，见 qml/notes/NoteMenu.qml 里那段实测记录）。
+     *
+     * 所以规矩改成：**位置在 openFor / openAtPoint 里一次定死，开出来之后只许
+     * 长高长宽、不许挪**。既然不知道用户会点开哪一个子菜单，就按"这一份菜单里
+     * 最坏的那个"预留：
+     *
+     *   高度 = max(主栏高, 带子菜单的每一行里 (那一行的位置 + 那一栏的高度) 的最大值)
+     *   宽度 = 有子菜单条目时两栏并排那么宽，否则就是主栏宽
+     *
+     * 代价（写在明处）：宿主窗口比较矮时，菜单会**一开始**就摆到"最坏情况也装得下"
+     * 的位置（可能被顶到宿主顶上），而不是先挂在它那一栏下面、等展开子菜单再跳上去。
+     * 换来的是整场菜单里窗口一动不动 —— 不动就没有"旧画面按新位置合成"那一帧。
+     *
+     * 这里的算式要和 openSubmenu 里摆子栏那几行**对得上**（同一套 paneHeight /
+     * itemHeight / separatorHeight / panePadding），对不上就会退回"展开时挪一下"
+     * 那条路 —— 那时 openShifts 会记账，自检会红。
+     */
+    function worstExpandedHeight(items) {
+        var worst = paneHeight(items)
+        if (!items)
+            return worst
+        var rowTop = panePadding
+        for (var i = 0; i < items.length; ++i) {
+            var entry = items[i]
+            var isSub = entry && entry.submenu === true && entry.items && entry.items.length > 0
+            if (isSub) {
+                var subH = Math.min(paneHeight(entry.items), maxMenuHeight)
+                worst = Math.max(worst, rowTop + subH)
+            }
+            rowTop += (entry && entry.separator) ? separatorHeight : itemHeight
+        }
+        return worst
+    }
+
+    /* 这一份菜单里有没有"能展开"的条目（决定宽度要不要按两栏预留） */
+    function hasSubmenuEntry(items) {
+        if (!items)
+            return false
+        for (var i = 0; i < items.length; ++i) {
+            var entry = items[i]
+            if (entry && entry.submenu === true && entry.items && entry.items.length > 0)
+                return true
+        }
+        return false
+    }
+
+    /* 开之前用来夹位置的那两个数（见 worstExpandedHeight 的说明） */
+    function worstExpandedWidth(items) {
+        return hasSubmenuEntry(items) ? paneWidth * 2 + paneGap : paneWidth
+    }
 
     /* ---- 子菜单那一栏 ---- */
     readonly property bool submenuOpened: subEntries !== undefined && subEntries !== null
@@ -229,10 +298,24 @@ Popup {
         var below = anchor.mapToItem(host, 0, anchor.height + 3)
         var above = anchor.mapToItem(host, 0, 0)
 
-        var px = Math.max(2, Math.min(below.x, host.width - menuWidth - 4))
+        /*
+         * 夹位置用的是"最坏展开到多大"，不是当前主栏的尺寸 ——
+         * 这样下面展开子菜单时窗口只管往下长，一次都不用挪（见
+         * worstExpandedHeight 上面那一大段）。
+         *
+         * 算式的形状要和 openSubmenu 里那条兜底夹取**一模一样**
+         * （max(2, min(想要的, 宿主 - 最坏尺寸 - 4))）：下限同样是 2。
+         * 不一致就会露馅 —— 这里落在 8、兜底想要 2，展开子菜单时窗口照样挪 6px
+         * （实测：自检"展开子菜单时弹窗的左上角一动不动"就是这么红的）。
+         */
+        var worstW = worstExpandedWidth(items)
+        var worstH = worstExpandedHeight(items)
+
+        var px = Math.max(2, Math.min(below.x, host.width - worstW - 4))
         var py = below.y
-        if (py + menuHeight > host.height - 4)
-            py = Math.max(8, above.y - menuHeight - 6)
+        if (py + worstH > host.height - 4)
+            py = above.y - worstH - 6      /* 下边放不下：翻到锚点上面去 */
+        py = Math.max(2, Math.min(py, host.height - worstH - 4))
 
         root.x = px
         root.y = py
@@ -255,6 +338,9 @@ Popup {
      * 一般位置（tab 在窗口上半部分，右边还留着菜单宽度）夹取不生效，
      * 左上角就是鼠标那一点。
      *
+     * 夹的是"最坏展开到多大"，不是主栏当前的尺寸 —— 见 worstExpandedHeight
+     * 上面那一大段：位置开之前一次定死，之后展开子菜单只长不挪。
+     *
      * 先算好坐标再 open()，和 openFor 一样：不在打开之后二次移动，
      * 否则会闪一下"初始位置的菜单"再跳到鼠标这里。
      */
@@ -267,9 +353,11 @@ Popup {
 
         var host = root.parent
         var p = anchor ? anchor.mapToItem(host, px, py) : Qt.point(px, py)
+        var worstW = worstExpandedWidth(items)
+        var worstH = worstExpandedHeight(items)
 
-        root.x = Math.round(Math.max(2, Math.min(p.x, host.width - menuWidth - 4)))
-        root.y = Math.round(Math.max(2, Math.min(p.y, host.height - menuHeight - 4)))
+        root.x = Math.round(Math.max(2, Math.min(p.x, host.width - worstW - 4)))
+        root.y = Math.round(Math.max(2, Math.min(p.y, host.height - worstH - 4)))
         root.open()
     }
 
@@ -298,10 +386,32 @@ Popup {
         submenuTop = submenuRowY
 
         var host = root.parent
-        if (host && root.y + implicitHeight > host.height - 4)
-            root.y = Math.max(2, host.height - implicitHeight - 4)
-        if (host && root.x + implicitWidth > host.width - 4)
-            root.x = Math.max(2, host.width - implicitWidth - 4)
+        /*
+         * 顶出宿主下沿 / 右沿时把整块弹窗挪回来。
+         *
+         * **这一步是"露着的时候改位置"** —— 而位置在 Windows 上改一下，系统就会
+         * 把窗口的**旧画面**按新位置先合成一帧，Qt 下一帧才画新内容：用户看到的
+         * 就是"菜单闪一下再跳过去"（便签菜单那边为这一条专门拆成了两块窗口，
+         * 见 qml/notes/NoteMenu.qml 里那段实测记录）。
+         *
+         * 所以规矩是：**位置在 openFor / openAtPoint 里一次定死，开出来之后只许
+         * 长高长宽、不许挪**（见那两个函数里按"最坏展开到多大"夹位置）。
+         * 这里保留夹取只当兜底 —— 真走到这儿就说明上面那份预留算漏了，
+         * openShifts 记一笔，自检("弹窗：展开子菜单没有走到"露着的时候挪位置"
+         * 那条兜底")会红。
+         */
+        if (host && root.y + implicitHeight > host.height - 4) {
+            const ny = Math.max(2, host.height - implicitHeight - 4)
+            if (root.opened && ny !== root.y)
+                ++openShifts
+            root.y = ny
+        }
+        if (host && root.x + implicitWidth > host.width - 4) {
+            const nx = Math.max(2, host.width - implicitWidth - 4)
+            if (root.opened && nx !== root.x)
+                ++openShifts
+            root.x = nx
+        }
         return true
     }
 

@@ -25,16 +25,21 @@ Rectangle {
     width: 1460; height: 900
 
     /*
-     * 窗口本身必须透明，整窗的圆角才画得出来。
+     * 这一层（QQuickWidget 里的内容根）留透明。
      *
-     * 无边框（FramelessWindowHint）之后四角就是方角，
-     * 所以要自己圆：真正负责裁剪的是下面 interfaceMask 那一层
-     * （白底圆角矩形只当 alpha 遮罩，不参与显示）。
-     * 窗口这一层留透明，遮罩裁掉的四角才会露出桌面，
-     * 而不是露出一块方形的底色。
+     * 无边框（FramelessWindowHint）之后四角就是方角，所以要自己圆：
+     * 真正负责裁剪的是 **C++ 那边的圆角遮罩**（WindowHelper::applyRoundedMask，
+     * 落到 Windows 上是 SetWindowRgn，见 src/WindowHelper.h 的说明）——
+     * 不是这里，也不是透明本身。裸的深色底由宿主 QWidget 的调色板给
+     * （见 src/main.cpp 里 host 那一段：那个窗口是**不透明**的）。
      *
-     * 注意 palette.window 一并删掉：Fusion 样式会照着它刷一层
-     * 不透明窗口底，那样四角又会被这块底色填回方形。
+     * 别把这行改回成"靠窗口透明来露四角"：透明窗口在**最大化**时会有
+     * 一帧是空的，那一帧屏幕上看到的是窗口底下的东西（底下是个白底网页时
+     * 就是"白色的背影一闪"）。这条踩过，自检里钉着
+     * （"最大化/还原：来回切四次，窗口一次都没露底"）。
+     *
+     * 注意 palette.window 一并删掉：Fusion 样式会照着它刷一层不透明窗口底，
+     * 那样四角又会被这块底色填回方形。
      */
     color: "transparent"
 
@@ -1929,6 +1934,20 @@ Rectangle {
             /* 下拉菜单：长菜单（语言 27 项）必须限高 + 可滚动，
                否则会一路盖住左侧导航栏（见 DropdownMenu.maxMenuHeight） */
             menuOpened: ddMenu.opened,
+            /*
+             * 弹窗"露出来之后"被挪过几次（见 DropdownMenu.openShifts）。
+             *
+             * 这个是给自检用的**违规计数**：规则是"位置在开之前就定死，之后只许
+             * 长高长宽、不许挪" —— 挪一下在 Windows 上就是"旧画面按新位置合成
+             * 一帧"（闪）。正常应该是 0。
+             */
+            menuOpenShifts: ddMenu.openShifts,
+            /*
+             * 主窗口的系统转场动画关掉了没有（见 src/WindowHelper.h）。
+             * 关掉之前，最大化那一下系统会把上一次那张画面缩放过来 ——
+             * 看着就是"窗口先跑到右边、还在放大"。
+             */
+            transitionsDisabled: Win.transitionsDisabled,
             menuHeight: ddMenu.menuHeight,
             menuContentHeight: ddMenu.entriesHeight,
             menuScrollable: ddMenu.scrollable,
@@ -2355,6 +2374,8 @@ Rectangle {
      */
     DropdownMenu {
         id: ddMenu
+        /* 自检按名字找它那块原生窗（见 src/SelfTest.cpp 的"露出来之后不许再变"） */
+        objectName: "dropdownMenu"
         parent: window
         onSelected: (act) => window.dispatch(act)
         /*
@@ -2381,6 +2402,8 @@ Rectangle {
      */
     SettingsPanel {
         id: settingsPanel
+        /* 自检按名字找它那块原生窗（同上） */
+        objectName: "settingsPanel"
         parent: window
         view: window.view
         entries: window.shortcutItems
@@ -2396,6 +2419,8 @@ Rectangle {
      */
     CheckCard {
         id: checkCard
+        /* 自检按名字找它那块原生窗（同上） */
+        objectName: "checkCard"
         parentTransient: window
         onJumpRequested: (row, col, endCol) => window.jumpToIssue(row, col, endCol)
         onRerunRequested: window.runCheck()
@@ -2405,6 +2430,8 @@ Rectangle {
     /* 文件对比卡片（见 qml/components/DiffCard.qml） */
     DiffCard {
         id: diffCard
+        /* 自检按名字找它那块原生窗（同上） */
+        objectName: "diffCard"
         parentTransient: window
         onCopyPatchRequested: Cmd.copyText(Differ.unifiedDiff())
     }
@@ -2590,27 +2617,74 @@ Rectangle {
         anchors.fill: parent
 
         /*
-         * 最大化 / 还原的淡入。
+         * 最大化 / 还原这一下**不再做任何淡入**了。
          *
-         * 窗口尺寸是一次到位的（见 src/WindowHelper.cpp 里为什么不做几何
-         * 动画），所以这里用一次短促的"压暗 -> 回全亮"把这次跳变盖过去。
+         * 原来的"压暗 -> 回全亮"是为了盖住那次尺寸跳变；现在跳变本身已经没有了：
+         * WindowHelper 只改几何（不碰系统状态，系统那段缩放转场因此不会发生），
+         * 并且在改完之后当场把新尺寸这一帧合成上屏（flushContent）—— 屏幕上
+         * 只有"变完了"这一帧，没有需要遮的东西。
          *
-         * 从暗处淡入（而不是从亮处淡出）：界面本身是深色，压暗再回来
-         * 看起来是"刷新了一下"，比发白自然 —— 之前试过淡到 0.72 再回来，
-         * 屏幕上一片灰白，就是那个味道不对。
+         * 留着它反而是负担，两条都是量出来的：
+         *   * from 0.45 / 150ms 时，屏幕采样看到窗口左上角 (70,68,69) -> (49,49,49)
+         *     再爬回来，整窗压暗 30% 持续 130ms —— 这本身就是一眼能看见的"闪"；
+         *   * 就算压到 0.86 / 90ms，它仍然要驱动约 87ms 的连续重画
+         *     （日志里切换后那 11 条"帧：界面重画"就是它）。
          *
-         * 淡入只作用在这一层的 opacity 上，不参与布局，
-         * 所以内容再多（三千行文本也一样）都不会因此变慢。
+         * Win.transitioned 仍然发（谁要"知道刚切换过"可以接），只是这一层
+         * 不再拿它做动画。
          */
         property bool transitioning: Win.transitioned
         opacity: 1.0
 
-        NumberAnimation on opacity {
-            running: interfaceRoot.transitioning
-            from: 0.45
-            to: 1.0
-            duration: 150
-            easing.type: Easing.OutCubic
+        /*
+         * 最大化 / 还原那一小段里，把"图标条 / 左树 / 间隙 / 编辑区"四块的宽度
+         * 一帧一记，写进窗口变化日志（见 src/WindowHelper.h 的"窗口变化日志"）。
+         *
+         * 用来回答一个具体问题：**这次换尺寸，QML 布局是算一拍就落定，还是要算两拍**
+         * （两拍的话用户就会看到"缝在闪"）。一步到位的话，这段时间里记到的宽度
+         * 只应该有两个值：旧的那组和新的那组，中间不该出现第三组。
+         * 只在切换后 ~400ms 内记（50 拍 × 8ms），平时一行都不写。
+         */
+        Timer {
+            id: layoutProbe
+            /*
+             * 默认不开：这个探针自己在事件循环里很吵，开着会把换尺寸那一下
+             * 拖慢一个量级（实测 4K 渲染 ~5ms -> ~155ms）。
+             * 要看"布局算一拍还是两拍"时：设 SMARTCLIP_LAYOUT_PROBE=1 再跑。
+             */
+            interval: 1
+            repeat: true
+            property int ticks: 0
+            function dump(tag) {
+                Win.traceMark("布局[" + tag + "] nav=" + navStrip.width
+                              + " tree=" + folderTree.width
+                              + " gap=" + splitterGap.width
+                              + " editor=" + editor.width
+                              + " 窗=" + window.width + "x" + window.height)
+            }
+            onTriggered: {
+                if (++ticks > 120) {
+                    stop()
+                    return
+                }
+                dump("t" + ticks)
+            }
+        }
+
+        Connections {
+            target: Win
+            /*
+             * 用 maximized 而不是 transitioned 起头：maximized 是在**改几何之前**
+             * 就翻过去的（见 WindowHelper::applyState），所以先记一拍"改之前"，
+             * 再 1ms 一拍地跟 120 拍 —— 布局要是有"算两拍"的中间值，这里必然露出来。
+             */
+            function onMaximizedChanged() {
+                if (!Win.probeEnabled)
+                    return
+                layoutProbe.dump("改之前")
+                layoutProbe.ticks = 0
+                layoutProbe.restart()
+            }
         }
 
         /*
@@ -2714,6 +2788,7 @@ Rectangle {
 
             // ---- 左侧工具窗口图标条（已取消边框） ----
             Rectangle {
+                id: navStrip
                 Layout.fillHeight: true; Layout.preferredWidth: 34
                 color: "#313335"
                 // 已删除 border.color 和 border.width

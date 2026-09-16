@@ -1458,6 +1458,40 @@ int SelfTest::runNotes(ClipboardStore *store, TrayIcon *tray, EditorController *
                       QStringLiteral("flyout=%1")
                           .arg(flyoutState.value(QStringLiteral("flyout")).toString()));
 
+            /*
+             * 面板窗口**还露着**的时候换一块（组合 -> 透明度 -> 组合）。
+             *
+             * 这是"先藏、再摆、再露"那条规矩唯一走得通的入口（主栏窗口那一份在
+             * 上面已经钉过了，这里钉同一摞里的**面板窗口**）：露着的时候原地改几何，
+             * Windows 会把面板的旧画面按新位置先合成一帧 —— 用户看到的就是
+             * "换一栏的时候面板闪一下跳到新地方"。
+             *
+             * 两条一起看才有意义：shifts 不许涨（没在露着的时候改过几何），
+             * 而 remaps 必须涨（证明这条路上真的走了"重新映射"，不是压根没换过）。
+             */
+            {
+                const int shifts0 = flyoutState.value(QStringLiteral("flyoutShifts")).toInt();
+                const int remaps0 = flyoutState.value(QStringLiteral("flyoutRemaps")).toInt();
+
+                noteCheck(notes->openMenuFlyout(a->id(), QStringLiteral("opacity")),
+                          QStringLiteral("菜单：面板露着的时候能换成另一块（透明度）"));
+                settle();
+                noteCheck(notes->openMenuFlyout(a->id(), QStringLiteral("group")),
+                          QStringLiteral("菜单：再换回「与…组合」那一栏"));
+                settle();
+
+                const QVariantMap afterSwitch = notes->menuState(a->id());
+                noteCheck(afterSwitch.value(QStringLiteral("flyoutShifts")).toInt() == shifts0,
+                          QStringLiteral("菜单：换面板时，面板窗口从来没在露着的时候被改几何"),
+                          QStringLiteral("露着改了几何 %1 次（要 0）")
+                              .arg(afterSwitch.value(QStringLiteral("flyoutShifts")).toInt()));
+                noteCheck(afterSwitch.value(QStringLiteral("flyoutRemaps")).toInt() > remaps0,
+                          QStringLiteral("菜单：换面板走的是\"先藏、再摆、再露\""),
+                          QStringLiteral("重新映射 %1 次（换之前 %2）")
+                              .arg(afterSwitch.value(QStringLiteral("flyoutRemaps")).toInt())
+                              .arg(remaps0));
+            }
+
             QObject *menu = root->findChild<QObject *>(QStringLiteral("noteMenu"));
             bool fired = false;
             if (menu && !available.isEmpty()) {

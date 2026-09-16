@@ -2948,6 +2948,13 @@ QVariantMap StickyNotes::menuState(const QString &noteId) const {
     state.insert(QStringLiteral("opened"), menu->property("opened").toBool());
     state.insert(QStringLiteral("flyout"), menu->property("flyoutKind").toString());
     state.insert(QStringLiteral("flyoutSide"), menu->property("flyoutSide").toString());
+    /*
+     * 面板窗口那两个计数（见 NoteMenu 里 syncFlyoutWindow 的说明）：
+     * flyoutShifts 是"露着的时候被改了几何"（必须 0），flyoutRemaps 是"为了换
+     * 面板重新映射了几次"（切面板那条路上必须 > 0，否则前一个 0 是空的）。
+     */
+    state.insert(QStringLiteral("flyoutShifts"), menu->property("flyoutShifts").toInt());
+    state.insert(QStringLiteral("flyoutRemaps"), menu->property("flyoutRemaps").toInt());
     state.insert(QStringLiteral("width"), menu->property("width").toDouble());
     state.insert(QStringLiteral("height"), menu->property("height").toDouble());
     /*

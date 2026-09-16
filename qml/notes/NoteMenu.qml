@@ -216,11 +216,54 @@ Window {
     readonly property int flyoutHideDelayMs: 32
 
     /*
+     * 自检读的两个计数（见 StickyNotes::menuState 和 src/SelfTestNotes.cpp）。
+     *
+     *   flyoutShifts —— 面板窗口**还露着**的时候被改了几何的次数。规矩是
+     *     "先藏、再摆、再露"（和主栏窗口那条一样：Windows 会把旧画面按新位置
+     *     合成一帧，看着就是面板闪一下跳到新位置）。正常恒为 0。
+     *   flyoutRemaps —— 为了换一块面板而"藏一次再露一次"的次数。它是上面那条
+     *     规矩的**证据**：切面板那条路上必须 > 0，否则 flyoutShifts == 0 是空的
+     *     （压根没走到这个场景，量了个寂寞）。
+     */
+    property int flyoutShifts: 0
+    property int flyoutRemaps: 0
+
+    /*
      * 摆好面板窗口并按需 show / 收起时走这里（openFlyout / closeFlyout 调）。
      */
     function syncFlyoutWindow() {
         if (flyoutOpen) {
             flyoutHideTimer.stop()
+            const moved = Math.abs(flyoutWindow.x - flyoutScreenX) > 0.5
+                          || Math.abs(flyoutWindow.y - flyoutScreenY) > 0.5
+                          || Math.abs(flyoutWindow.width - flyoutWidth) > 0.5
+                          || Math.abs(flyoutWindow.height - flyoutHeight) > 0.5
+            /*
+             * 面板窗口**正露着**、几何又要变（换一块子面板就是这么回事：
+             * 透明度那一栏和"与…组合"那一栏高度不一样、顶边也要重新对到另一行）：
+             * **先藏、再摆、再露**，绝不原地改。
+             *
+             * 为什么：原地改的时候 Windows 手里还攥着这块窗口上一张表面，它会先
+             * 按新位置/新尺寸把旧画面合成出来，Qt 下一帧才画新内容 —— 用户看到的
+             * 就是"面板闪一下、跳到新地方"。藏一次之后那张表面就作废了，重新映射
+             * 出来直接就是新样子。主栏窗口那条"整场不动"的规矩是同一个道理，
+             * 只是主栏能靠拆窗口做到"压根不动"，面板的高度由内容决定，动是免不了的，
+             * 那就让它动得"不露脸"。
+             */
+            const wasPainted = flyoutPainted
+            const needsReplace = wasPainted && moved
+            if (needsReplace) {
+                flyoutPainted = false
+                flyoutWindow.visibility = Window.Hidden
+                ++flyoutRemaps
+            }
+            /*
+             * 兜底计数：走到这儿窗口居然还"画着"，却要改几何 —— 说明上面那次
+             * "先藏"没生效（谁把哪一行删了就露馅）。自检据此报红，见
+             * SelfTestNotes 里"换面板时，面板窗口从来没在露着的时候被改几何"。
+             */
+            if (flyoutPainted && moved)
+                ++flyoutShifts
             flyoutWindow.x = flyoutScreenX
             flyoutWindow.y = flyoutScreenY
             flyoutWindow.width = flyoutWidth

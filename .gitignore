@@ -14,3 +14,6 @@ __pycache__/
 # 截图那条路的调试痕迹（Screenshot.cpp 自己写的调试文件，落在**工作目录**下，
 # 也就是仓库根）。不该跟着提交 —— 它是用来查"取消截图时闪一下边框"的。
 shot-trace.log
+# 窗口变化日志（WindowHelper.cpp 写的：最大化 / 还原那一下窗口每一拍变成了什么样，
+# 见 src/WindowHelper.h 里"窗口变化日志"那段）。同样落在工作目录下，同样不该提交。
+window-trace.log

@@ -45,6 +45,7 @@
 #include <QMetaObject>
 #include <QPainter>
 #include <QRegularExpression>
+#include <QScreen>
 #include <QSettings>
 #include <QTemporaryDir>
 #include <QTextStream>
@@ -54,6 +55,16 @@
 #include <QWidget>
 #include <QWindow>
 #include <cstdio>
+#include <functional>
+
+#if defined(Q_OS_WIN)
+#  include <windows.h>
+/*
+ * windows.h（经 rpcndr.h）里 small 是给 MIDL 用的宏（等于 char），
+ * 这个文件里有个变量就叫 small —— 不 undef 会报一串莫名其妙的语法错误。
+ */
+#  undef small
+#endif
 
 namespace {
 
@@ -193,6 +204,252 @@ void clickSceneNoHover(QQuickWindow *window, const QPoint &pos) {
                         Qt::NoButton, Qt::NoModifier, device);
     QCoreApplication::sendEvent(window, &press);
     QCoreApplication::sendEvent(window, &release);
+}
+
+/*
+ * ======================================================================
+ * 弹窗"露出来之后不许再变"的量具
+ * ======================================================================
+ *
+ * 为什么要有它：弹窗"闪一下"的根，几乎都是**显出来之后窗口又被改了一刀** ——
+ * 改尺寸 / 改位置 / 改窗口标志。在 Windows 上这三件事都不是原子的：系统会先拿
+ * 窗口上**上一次的那张画面**按新样子合成一帧，Qt 下一帧才画新内容。用户看到的
+ * 就是"闪一下 / 抖一下 / 像重新出现了一次"。
+ *
+ * （这个结论不是猜的，是工程里三处实测攒出来的：
+ *   * 便签菜单为它拆成了两块窗口 —— qml/notes/NoteMenu.qml 那段"一步挪到位 /
+ *     分帧挪都躲不掉"的记录；
+ *   * 双击标题栏最大化改成"几何一次到位 + 界面淡入" —— src/WindowHelper.h 开头；
+ *   * QtWidgets 那些输入框关掉 DWM 淡入 —— src/DialogStyle.h 的 applyDarkTitleBar。）
+ *
+ * 所以规矩只有一条：
+ *
+ *   **它第一次露出来的那一帧，就必须是它最终的样子。**
+ *
+ * 量法：从"第一次可见"那一帧起，一帧一帧往下采（原生窗口的几何 + 窗口标志），
+ * 中途任何一帧和第一帧不一样就是违规，detail 里报"第一帧 -> 变掉那一帧"。
+ *
+ * 为什么采**原生窗口**而不是 QML 属性：闪的是原生窗口。这个工程里"属性对、
+ * 屏幕上不对"栽过不止一次（见 DocCard.qml 里那三条"自检绿了但眼睛一看不对"）。
+ *
+ * 为什么 windowOf 是个每次现问的函数：弹窗的原生窗口是 open() 那一刻才建/映射的
+ * （Screenshot.cpp 的 prewarm 那段分析过为什么），先问一次拿到空指针就白量了。
+ */
+struct SurfaceShot {
+    bool valid = false;
+    bool visible = false;
+    QRect geo;
+    Qt::WindowFlags flags;
+};
+
+SurfaceShot shootSurface(QQuickWindow *window) {
+    SurfaceShot shot;
+    if (!window)
+        return shot;
+    shot.valid = true;
+    shot.visible = window->isVisible();
+    shot.geo = window->geometry();
+    shot.flags = window->flags();
+    return shot;
+}
+
+QString surfaceShotText(const SurfaceShot &shot) {
+    if (!shot.valid)
+        return QStringLiteral("没有原生窗口");
+    return QStringLiteral("%1x%2@(%3,%4)")
+        .arg(shot.geo.width())
+        .arg(shot.geo.height())
+        .arg(shot.geo.x())
+        .arg(shot.geo.y());
+}
+
+/*
+ * 从"第一次可见"起连采 samples 帧，要求每一帧都和第一帧一模一样。
+ *
+ * 返回 true = 稳。detail 给"第一帧（连采 N 帧没变）"或者"第一帧 -> 变掉那帧"。
+ * 采不到（一直没露出来 / 露出来得太晚，一帧都没跟上）算失败 —— 那种情况下
+ * "没看见它变"没有意义，不能当通过。
+ */
+bool surfaceStaysPut(const std::function<QQuickWindow *()> &windowOf, int samples,
+                     QString *detail) {
+    SurfaceShot first;
+    int taken = 0;
+    QElapsedTimer clock;
+    clock.start();
+    while (clock.elapsed() < 900) {
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 15);
+        QThread::msleep(6);
+        const SurfaceShot now = shootSurface(windowOf());
+        if (!now.valid)
+            continue;                     /* 原生窗口还没建出来 / 还没找到 */
+        if (!now.visible)
+            continue;                     /* 还没露出来：从"可见"那一帧才算起 */
+        if (!first.valid) {
+            first = now;                  /* 第一帧：这就是它的"最终样子" */
+            continue;
+        }
+        if (now.geo != first.geo || now.flags != first.flags) {
+            if (detail)
+                *detail = QStringLiteral("%1 -> %2")
+                              .arg(surfaceShotText(first), surfaceShotText(now));
+            return false;
+        }
+        if (++taken >= samples)
+            break;
+    }
+    if (!first.valid) {
+        if (detail)
+            *detail = QStringLiteral("一直没露出来（或露得太晚，一帧都没跟上）");
+        return false;
+    }
+    if (detail)
+        *detail = QStringLiteral("%1（连采 %2 帧没变）")
+                      .arg(surfaceShotText(first))
+                      .arg(taken + 1);
+    return taken >= 1;
+}
+
+/*
+ * 这个原生窗口的几个关键样式位 —— 白帧查到最后，就靠它判"这块窗到底还是不是
+ * 分层（layered）窗口"：分层窗口的"空一帧"是**透出底下的东西**，不透明窗口的
+ * "空一帧"只会露自己的底色。分不清这两者，就会一直在"谁画了白色"上打转。
+ */
+QString nativeStyleText(QWidget *widget) {
+#if defined(Q_OS_WIN)
+    if (!widget)
+        return QString();
+    HWND hwnd = reinterpret_cast<HWND>(widget->winId());
+    if (!hwnd)
+        return QString();
+    const LONG_PTR ex = GetWindowLongPtr(hwnd, GWL_EXSTYLE);
+    const LONG_PTR st = GetWindowLongPtr(hwnd, GWL_STYLE);
+    return QStringLiteral(" 分层=%1 整窗透明=%2 最小化=%3 系统可见=%4 Qt透明属性=%5")
+        .arg((ex & WS_EX_LAYERED) ? 1 : 0)
+        .arg((ex & WS_EX_TRANSPARENT) ? 1 : 0)
+        .arg((st & WS_MINIMIZE) ? 1 : 0)
+        .arg(IsWindowVisible(hwnd) ? 1 : 0)
+        .arg(widget->testAttribute(Qt::WA_TranslucentBackground) ? 1 : 0);
+#else
+    Q_UNUSED(widget);
+    return QString();
+#endif
+}
+
+/*
+ * 盯着窗口自己的 Move / Resize 事件，把**几何序列**记下来。
+ *
+ * 为什么要记序列而不是只数次数：用户报的"最大化时窗口会变到右边、还在放大"
+ * 就是**两拍几何**的样子 —— 先按新尺寸待在旧位置上（于是界面看着往右挪、还变大），
+ * 下一拍才挪到 (0,0)。只数"几拍"看不出这个顺序，记下来一眼就清楚了。
+ */
+class GeometryTally : public QObject {
+public:
+    int moves = 0;
+    int resizes = 0;
+    QStringList sequence;
+
+    bool eventFilter(QObject *watched, QEvent *event) override {
+        if (event->type() != QEvent::Move && event->type() != QEvent::Resize)
+            return false;
+        if (event->type() == QEvent::Move)
+            ++moves;
+        else
+            ++resizes;
+        if (sequence.size() < 12) {
+            if (auto *widget = qobject_cast<QWidget *>(watched)) {
+                const QRect g = widget->geometry();
+                const QString entry = QStringLiteral("%1x%2@%3,%4")
+                                          .arg(g.width()).arg(g.height())
+                                          .arg(g.x()).arg(g.y());
+                /* 同一个几何连着来两下（Move+Resize 一对）只记一次 */
+                if (sequence.isEmpty() || sequence.last() != entry)
+                    sequence << entry;
+            }
+        }
+        return false;
+    }
+};
+
+/*
+ * 屏幕上一块区域里"近白像素"的个数和平均亮度。
+ *
+ * 为什么要抓**屏幕**、不抓 grab() 出来的控件图：白是"窗口刚变大、Qt 还没画到
+ * 那一块"的时候露出来的 —— 那是**合成层**的事。控件自己 render 出来的图里
+ * 根本没有这一帧（它画的时候已经画满了）。这个工程里"属性对、屏幕上不对"栽过
+ * 不止一次（见 DocCard.qml 里那三条），所以这里照 Screenshot 那套抓屏。
+ */
+struct ScreenProbe {
+    int white = 0;      /* 近白采样点数 */
+    double lum = 0.0;   /* 采样点平均亮度（0~255） */
+    double meanR = 0.0, meanG = 0.0, meanB = 0.0;   /* 平均色（看"这一块画的是什么"） */
+    int samples = 0;
+    QString where;      /* 白点大致在哪儿（给 detail 用） */
+    QImage shot;        /* 抓到的这一帧（要存下来看的时候用） */
+};
+
+/*
+ * 抓屏幕上一块矩形，数近白像素和平均亮度。clip 非空时只统计落在里面的点。
+ *
+ * step 是采样步长（逻辑像素）。为什么要有它就说明白一件事：
+ * **抓 4K 整屏一次要 70~80ms**（实测），采样间隔就等于它 —— 一闪而过的那一两帧
+ * 根本抓不着。所以量"闪"的时候抓的是主窗口里一条 800x400 的小条（几毫秒一张），
+ * 只有"要存图看看白的是什么"的时候才去抓整屏。
+ */
+ScreenProbe probeRect(QScreen *screen, const QRect &rect, const QRect &clip, int step) {
+    ScreenProbe probe;
+    if (!screen || rect.isEmpty())
+        return probe;
+    const QImage shot =
+        screen->grabWindow(0, rect.x(), rect.y(), rect.width(), rect.height()).toImage();
+    if (shot.isNull())
+        return probe;
+    probe.shot = shot;
+
+    /*
+     * 抓回来的是**设备像素**（高 DPI 屏上比逻辑像素大一档），
+     * 而 rect / clip 是逻辑像素 —— 换算一次，别拿逻辑坐标去索引设备像素。
+     */
+    const qreal dpr = shot.devicePixelRatio() > 0 ? shot.devicePixelRatio() : 1.0;
+    const int px = qMax(1, qRound(step * dpr));
+
+    int minX = 1 << 30, minY = 1 << 30, maxX = -1, maxY = -1;
+    double lum = 0.0;
+    double sumR = 0.0, sumG = 0.0, sumB = 0.0;
+    int count = 0;
+    for (int y = 0; y < shot.height(); y += px) {
+        for (int x = 0; x < shot.width(); x += px) {
+            if (!clip.isEmpty()) {
+                const int sx = rect.x() + qRound(x / dpr);
+                const int sy = rect.y() + qRound(y / dpr);
+                if (!clip.contains(sx, sy))
+                    continue;
+            }
+            const QRgb p = shot.pixel(x, y);
+            const int r = qRed(p), g = qGreen(p), b = qBlue(p);
+            lum += 0.299 * r + 0.587 * g + 0.114 * b;
+            sumR += r;
+            sumG += g;
+            sumB += b;
+            ++count;
+            if (r > 200 && g > 200 && b > 200) {
+                ++probe.white;
+                minX = qMin(minX, x);
+                minY = qMin(minY, y);
+                maxX = qMax(maxX, x);
+                maxY = qMax(maxY, y);
+            }
+        }
+    }
+    probe.samples = count;
+    probe.lum = count ? lum / count : 0.0;
+    probe.meanR = count ? sumR / count : 0.0;
+    probe.meanG = count ? sumG / count : 0.0;
+    probe.meanB = count ? sumB / count : 0.0;
+    if (probe.white > 0)
+        probe.where = QStringLiteral("白点范围（相对取样条）%1,%2 %3x%4")
+                          .arg(minX).arg(minY)
+                          .arg(maxX - minX + 1).arg(maxY - minY + 1);
+    return probe;
 }
 
 }  // namespace
@@ -5417,6 +5674,478 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
         view->closeDocument(view->currentIndex());
         view->setWrapEnabled(oldWrap);
         settle();
+    }
+
+    /*
+     * ======================================================================
+     * 弹窗"露出来之后不许再变"
+     * ======================================================================
+     *
+     * 这是那份"弹窗显示策略"里最该被钉住的一条，也是这个工程里最容易复发的一条：
+     * **先 open() 再摆 / 先 show() 再量** —— 只要有一处这么写，屏幕上就是一闪。
+     *
+     * 规矩：**它第一次露出来的那一帧，就必须是它最终的样子**（量具见文件头的
+     * surfaceStaysPut：从第一帧可见起连采几帧原生窗口的几何 + 窗口标志）。
+     *
+     * 摆在这一节的位置：它是最后一段"开开关关弹窗"的检查，后面只剩便签 / 翻译
+     * 那两节（各自在别的文件里）。开在这里不会给前面几节的时序添乱。
+     *
+     * 覆盖到的四块表面（这个工程里能自己开起来的那些）：
+     *   1) 退出问句     AskCard（Popup.Window）
+     *   2) 设置面板     SettingsPanel（Popup.Window）
+     *   3) 下拉菜单首开 DropdownMenu（Popup.Window）
+     *   4) 下拉菜单子菜单 —— **把主窗口压矮**再开，强制走到"顶出宿主下沿"那条路
+     *
+     * 没覆盖的：CheckCard / DiffCard / DocCard（前两个要真跑一遍校验 / 对比，
+     * 后一个要真的排一份文档进去；几何都是内容或固定值决定的，等它们各自的
+     * 用例补到那一步时再往这儿加一条同样的采样就行）。QtWidgets 那三个输入框
+     * 走的是 exec()，采样器够不着（见 EditorController 里的顺序注释）。
+     */
+    {
+        /* 主窗口（QML 场景所在那块原生窗）：弹窗都是**另一块**窗口，不是它 */
+        QQuickWindow *mainWindow = nullptr;
+        if (auto *rootItem = qobject_cast<QQuickItem *>(qmlRoot))
+            mainWindow = rootItem->window();
+
+        /*
+         * 按 objectName 找一块表面的**原生窗口**。
+         *
+         * Popup 型的（问句 / 设置面板 / 下拉菜单）要顺着内容项找它自己那块窗 ——
+         * 和"问句是一块小卡片，没有铺满整窗的遮罩"那条一样的取法；
+         * Window 型的（CheckCard / DiffCard / DocCard / 便签菜单）本身就是原生窗。
+         * 找到主窗口就当没找到：那说明这块表面是**场景内浮层**（Popup.Item），
+         * 它的几何不该拿主窗口来量。
+         */
+        auto surfaceWindow = [qmlRoot, mainWindow](const QString &objectName) -> QQuickWindow * {
+            QObject *object = qmlRoot->findChild<QObject *>(objectName);
+            if (!object)
+                return nullptr;
+            if (auto *asWindow = qobject_cast<QQuickWindow *>(object))
+                return asWindow == mainWindow ? nullptr : asWindow;
+            const char *props[] = { "popupItem", "contentItem" };
+            for (const char *prop : props) {
+                if (auto *item = object->property(prop).value<QQuickItem *>()) {
+                    if (QQuickWindow *asPopupWindow = item->window())
+                        return asPopupWindow == mainWindow ? nullptr : asPopupWindow;
+                }
+            }
+            return nullptr;
+        };
+
+        /* 主窗口那个 QWidget（要把主窗口临时压矮，见下面子菜单那一条） */
+        QWidget *hostWidget = nullptr;
+        for (QWidget *candidate : QApplication::topLevelWidgets()) {
+            if (candidate->isWindow() && candidate->isVisible()
+                && candidate->windowFlags().testFlag(Qt::FramelessWindowHint)
+                && candidate->width() >= 800) {
+                hostWidget = candidate;   /* 主窗口是唯一那块"大"的无边框窗口 */
+                break;
+            }
+        }
+        const QRect hostWas = hostWidget ? hostWidget->geometry() : QRect();
+
+        /* ---- 1. 退出问句（AskCard，Popup.Window） ---- */
+        QMetaObject::invokeMethod(qmlRoot, "openQuitAsk");
+        {
+            QString detail;
+            const bool stable =
+                surfaceStaysPut([&] { return surfaceWindow(QStringLiteral("quitAskCard")); },
+                                6, &detail);
+            check(stable,
+                  QStringLiteral("弹窗：退出问句露出来的第一帧就是最终样子（不在打开之后对中）"),
+                  detail);
+            QMetaObject::invokeMethod(qmlRoot, "closeQuitAsk");
+            settle();
+        }
+
+        /* ---- 2. 设置面板（Popup.Window，尺寸绑在宿主上） ---- */
+        dispatch(QStringLiteral("storage"));
+        {
+            QString detail;
+            const bool stable =
+                surfaceStaysPut([&] { return surfaceWindow(QStringLiteral("settingsPanel")); },
+                                5, &detail);
+            check(stable,
+                  QStringLiteral("弹窗：设置面板露出来的第一帧就是最终样子"), detail);
+            QMetaObject::invokeMethod(qmlRoot, "closeSettings");
+            settle();
+        }
+
+        /* ---- 3. 下拉菜单首开（不带子菜单） ---- */
+        dispatch(QStringLiteral("menu:文件"));
+        {
+            QString detail;
+            const bool stable =
+                surfaceStaysPut([&] { return surfaceWindow(QStringLiteral("dropdownMenu")); },
+                                5, &detail);
+            check(stable,
+                  QStringLiteral("弹窗：下拉菜单露出来的第一帧就是最终样子"), detail);
+            QMetaObject::invokeMethod(qmlRoot, "closeMenu");
+            settle();
+        }
+
+        /* ---- 4. 展开子菜单：**先压矮主窗口**，强制走到"顶出宿主下沿"那条路 ---- */
+        if (hostWidget) {
+            hostWidget->resize(900, 420);
+            settle();
+        }
+        dispatch(QStringLiteral("menu:视图"));
+        settle();
+        {
+            /*
+             * 展开之前先记下这块**原生窗口**在屏幕上的左上角。
+             *
+             * 为什么量原生窗口、还要在"已经开着"的时候量：规矩是"位置在开之前
+             * 一次定死，开出来之后只许长、不许挪"，而挪这一下是**同一个事件回合
+             * 里**发生的，采样器（只在帧与帧之间看）追不到它 —— 只有拿"展开前 /
+             * 展开后"两个点直接比。
+             */
+            QQuickWindow *menuWindow = surfaceWindow(QStringLiteral("dropdownMenu"));
+            const QRect wasAt = menuWindow ? menuWindow->geometry() : QRect();
+            const int shiftsBefore = uiState().value(QStringLiteral("menuOpenShifts")).toInt();
+
+            QVariant opened;
+            QMetaObject::invokeMethod(qmlRoot, "openSubmenuFor", Q_RETURN_ARG(QVariant, opened),
+                                      Q_ARG(QVariant, QVariant(QStringLiteral("menu:语言"))));
+            settle();
+
+            QQuickWindow *afterWindow = surfaceWindow(QStringLiteral("dropdownMenu"));
+            const QRect nowAt = afterWindow ? afterWindow->geometry() : QRect();
+            const QVariantMap ui = uiState();
+            const int shiftsAfter = ui.value(QStringLiteral("menuOpenShifts")).toInt();
+            const bool submenuUp = ui.value(QStringLiteral("submenuOpened")).toBool();
+            const double hostH = hostWidget ? double(hostWidget->height()) : 0.0;
+
+            check(wasAt.isValid() && nowAt.isValid() && nowAt.topLeft() == wasAt.topLeft(),
+                  QStringLiteral("弹窗：展开子菜单时弹窗的左上角一动不动（只往下长）"),
+                  QStringLiteral("%1,%2 -> %3,%4（%5x%6 -> %7x%8）")
+                      .arg(wasAt.x()).arg(wasAt.y()).arg(nowAt.x()).arg(nowAt.y())
+                      .arg(wasAt.width()).arg(wasAt.height())
+                      .arg(nowAt.width()).arg(nowAt.height()));
+            check(shiftsAfter == shiftsBefore,
+                  QStringLiteral("弹窗：展开子菜单没有走到\"露着的时候挪位置\"那条兜底"),
+                  QStringLiteral("兜底挪了 %1 次").arg(shiftsAfter - shiftsBefore));
+            /*
+             * 这一枪得真的打在那条路上：宿主压到 420 之后，"视图 + 语言"这份菜单
+             * 展开起来（763，见 DropdownMenu 的 worstExpandedHeight）一定比宿主还高
+             * —— 比宿主矮就说明宿主压得不够矮，上面两条是空的。
+             */
+            check(hostWidget && hostH < 600.0 && submenuUp && nowAt.height() > hostH,
+                  QStringLiteral("弹窗：子菜单把窗口撑得比宿主还高（这一枪没打空）"),
+                  QStringLiteral("宿主高 %1 / 弹窗 %2x%3 / 子菜单开=%4")
+                      .arg(hostH).arg(nowAt.width()).arg(nowAt.height())
+                      .arg(submenuUp ? 1 : 0));
+            QMetaObject::invokeMethod(qmlRoot, "closeMenu");
+            settle();
+        }
+        if (hostWidget && hostWas.isValid()) {
+            hostWidget->setGeometry(hostWas);
+            settle();
+        }
+    }
+
+    /*
+     * ======================================================================
+     * 最大化 / 还原：屏幕上不许露白、不许抽一下
+     * ======================================================================
+     * 用户报的原文："向主程序界面最大化切换，界面会出现闪动，还有白色的背影一闪。"
+     *
+     * 量法：切换的过程中**一帧一帧抓屏幕**（见 probeScreen），数两样东西 ——
+     *   * 近白像素：露白就是它，白点落在哪儿也一并报出来（一眼能看出是整窗还是某一块）；
+     *   * 整块的平均亮度："抽一下"那种压暗会在这一列数里露出来。
+     * 同时数这次切换来了几拍 Move / Resize —— 每一拍都会重设一次圆角遮罩
+     * （WindowHelper::eventFilter 里 Move / Resize 都调 applyRoundedMask），
+     * 那一下落到 Windows 上是 SetWindowRgn，戳得越多屏幕上越容易抽。
+     *
+     * 抓屏一次要几十毫秒，采样间隔就是抓屏的耗时；只有一两帧的白可能抓不着 ——
+     * 所以来回切两次，取最差的那一次。
+     */
+    {
+        QWidget *host = nullptr;
+        for (QWidget *candidate : QApplication::topLevelWidgets()) {
+            if (candidate->isWindow() && candidate->isVisible()
+                && candidate->windowFlags().testFlag(Qt::FramelessWindowHint)
+                && candidate->width() >= 800) {
+                host = candidate;   /* 主窗口是唯一那块"大"的无边框窗口 */
+                break;
+            }
+        }
+        QScreen *screen = host ? host->screen() : nullptr;
+        if (host && screen) {
+            const QRect area = screen->availableGeometry();
+            const QRect before = host->geometry();
+
+            /*
+             * 取样条放在**主窗口自己那块矩形里**（切换成最大化之后这块地儿照样
+             * 还是窗口的）。所以它变亮只有一个解释：**窗口这一块没画出来，
+             * 透出底下的东西了** —— 这正是用户说的"白色的背影一闪"。
+             */
+            const QRect strip(before.x() + 160, before.y() + 160,
+                              qMin(800, qMax(200, before.width() - 320)),
+                              qMin(400, qMax(200, before.height() - 320)));
+
+            /*
+             * 先量几帧"没切换"的当基准。
+             *
+             * 这几帧必须**又暗又没白**：说明窗口在前台、量到的确实是它。
+             * 窗口被别的程序压着时（比如启动自检的那个控制台 / 浏览器），
+             * 量到的就是别人的画面 —— 那种数据不能拿来判红判绿，
+             * 这一条就明说"这次没量成"，而不是报一个假红。
+             */
+            host->raise();
+            host->activateWindow();
+            settle();
+            int baseWhite = 0;
+            double baseLum = 0;
+            for (int i = 0; i < 6; ++i) {
+                const ScreenProbe probe = probeRect(screen, strip, QRect(), 4);
+                baseWhite = qMax(baseWhite, probe.white);
+                baseLum = qMax(baseLum, probe.lum);
+                QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
+            }
+            const bool measurable = baseWhite <= 40 && baseLum < 100.0;
+
+            GeometryTally tally;
+            host->installEventFilter(&tally);
+
+            int whiteFrames = 0;
+            int worstWhite = 0;
+            double minLum = 1e9;
+            double maxLum = -1e9;
+            int frames = 0;
+            QString worstWhere;
+            QStringList trace;
+            /* 四次切换分开记账：最大化 / 还原各两次 —— 只有分清方向，
+               才看得出"是最大化那一下白"还是"第一次白、之后就不白了" */
+            QStringList stepResult;
+
+            /*
+             * "探针角"：常规窗口之外、最大化窗口之内，而且最大化之后那儿画的是
+             * **左上角那个橙色应用图标**（右上角那块顶栏）—— 橙色和桌面/壁纸一眼
+             * 就分得开。
+             *
+             * 用它量什么：系统给最大化放一段"从旧位置放大过来"的动画时，界面的边
+             * 要过一会儿才扫到这儿；这段时间就是动画的时长。用户报的"最大化时窗口
+             * 会变到右边、还在放大"就是这一段。没有动画时它应该**立刻**就变色。
+             */
+            const QRect corner(24, 8, 48, 48);
+            const ScreenProbe cornerBefore = probeRect(screen, corner, QRect(), 4);
+            const double cornerR = cornerBefore.meanR;
+            const double cornerG = cornerBefore.meanG;
+            const double cornerB = cornerBefore.meanB;
+            int coverMs = -1;          /* 从"按下去"到界面扫到这个探针角，用了多少毫秒 */
+            bool stepCoverWanted = false;   /* 这一步要不要量探针角（只量最大化那几步） */
+            QElapsedTimer coverClock;
+            QStringList stepCover;
+
+            auto sampleOnce = [&](const QString &tag, int step) {
+                const ScreenProbe probe = probeRect(screen, strip, QRect(), 4);
+                if (probe.samples == 0)
+                    return;
+                ++frames;
+                minLum = qMin(minLum, probe.lum);
+                maxLum = qMax(maxLum, probe.lum);
+                /* 探针角：界面的边扫到它了没有（量"有没有一段放大动画在走"） */
+                if (coverMs < 0 && stepCoverWanted) {
+                    const ScreenProbe cornerNow = probeRect(screen, corner, QRect(), 4);
+                    if (cornerNow.samples > 0) {
+                        const double diff = qAbs(cornerNow.meanR - cornerR)
+                                            + qAbs(cornerNow.meanG - cornerG)
+                                            + qAbs(cornerNow.meanB - cornerB);
+                        if (diff > 60.0)
+                            coverMs = int(coverClock.elapsed());
+                    }
+                }
+                if (probe.white > worstWhite) {
+                    worstWhite = probe.white;
+                    worstWhere = probe.where;
+                }
+                if (probe.white > 40) {
+                    ++whiteFrames;
+                    if (step >= 0)
+                        stepResult[step] = QStringLiteral("白%1").arg(probe.white);
+                    if (whiteFrames <= 4) {
+                        trace << QStringLiteral("%1 #%2 白%3 亮%4")
+                                     .arg(tag).arg(frames).arg(probe.white)
+                                     .arg(qRound(probe.lum));
+                    }
+                    /*
+                     * 把**这一帧本身**存下来（就是采样条那张 800x400，不再另抓整屏 ——
+                     * 实测整屏要 80ms，存下来的已经是下一帧了，看不出白的是什么）。
+                     * 只在真露白的时候写这一张，是留给下一个人"一眼看出透出来的是什么"的。
+                     */
+                    if (probe.white > 4000 && whiteFrames <= 2) {
+                        const QString path = QDir::current().filePath(
+                            QStringLiteral("maximize-flash-step%1.png").arg(step));
+                        probe.shot.save(path);
+                        trace << QStringLiteral("  白帧已存图：%1（白%2 亮%3）")
+                                     .arg(path).arg(probe.white).arg(qRound(probe.lum));
+                    }
+                }
+            };
+
+#if defined(Q_OS_WIN)
+            /* 圆角是靠遮罩裁的（不是靠窗口透明）—— 这一条钉住"四角真的被裁掉了"，
+               免得哪天把窗口改成不透明之后，四角悄悄变成方的 */
+            check(!host->mask().isEmpty() && !host->mask().contains(QPoint(0, 0)),
+                  QStringLiteral("窗口：圆角遮罩落上了（左上角那一像素真的被裁掉）"),
+                  host->mask().isEmpty() ? QStringLiteral("遮罩是空的")
+                                         : QStringLiteral("遮罩在，但左上角没被裁"));
+#endif
+
+            /* 先把"系统转场动画关掉了没有"钉住：那条动画就是用户说的"窗口先跑到
+               右边、还在放大"（见 DialogStyle.h 里 disableDwmTransitions 的说明） */
+            check(uiState().value(QStringLiteral("transitionsDisabled")).toBool(),
+                  QStringLiteral("窗口：主窗口关掉了系统转场动画（最大化不再\"从旧位置缩放过来\"）"),
+                  QStringLiteral("transitionsDisabled=%1")
+                      .arg(uiState().value(QStringLiteral("transitionsDisabled")).toBool() ? 1 : 0));
+
+            if (measurable) {
+                /*
+                 * 四次切换：最大化 / 还原 / 最大化 / 还原。
+                 *
+                 * 方向要分开记：实测**只有最大化会白**，还原从来不白 —— 合成一行
+                 * "露白 N 帧"就看不出这个区别了，下次谁改坏了也不知道改坏的是哪一半。
+                 */
+                for (int step = 0; step < 4; ++step) {
+                    /*
+                     * 每一步之前都重新"上台"一次，并且**先确认这一步量的是我们这块窗**。
+                     *
+                     * 为什么：这块窗的位置/可见性都对，但别的东西（浏览器）可能在这一步
+                     * 中间抢到前台 —— 那时取样条里看到的是它，不是我们。这种数据**不能**
+                     * 拿来判红判绿（有一次跑出来 328 帧"白"，全是这么来的，而窗口根本没透）。
+                     * 判据用亮度：我们这块窗是深色的（基准 31），别人的白底页面一眼就分得开。
+                     */
+                    host->raise();
+                    host->activateWindow();
+                    settle();
+                    const ScreenProbe pre = probeRect(screen, strip, QRect(), 4);
+                    if (pre.lum > 100.0 || pre.white > 40) {
+                        stepResult << QStringLiteral("没量成(亮%1)").arg(qRound(pre.lum));
+                        continue;
+                    }
+
+                    const bool wasMaximized = qmlRoot->property("maximized").toBool();
+                    const QString dir = wasMaximized ? QStringLiteral("还原 ")
+                                                     : QStringLiteral("最大化");
+                    stepResult << QStringLiteral("-");
+                    /* 只对"最大化"量探针角（用户报的就是那一下） */
+                    stepCoverWanted = !wasMaximized;
+                    coverMs = -1;
+                    coverClock.start();
+                    QMetaObject::invokeMethod(qmlRoot, "toggleMaximize");
+                    QElapsedTimer clock;
+                    clock.start();
+                    while (clock.elapsed() < 800) {
+                        sampleOnce(dir + QStringLiteral("（第%1次）").arg(step), step);
+                    }
+                    if (stepCoverWanted)
+                        stepCover << QStringLiteral("%1ms").arg(coverMs);
+
+                    /*
+                     * 最大化那几步：**必须**走系统那个最大化状态（WS_MAXIMIZE 置上）。
+                     *
+                     * 这条是"不会露白"的确定性判据：自己的几何 + 幕布那套要在一个
+                     * 回合里同时改"窗口位置"和"窗口形状"，两者是两个 API 调用、
+                     * 区域又是窗口内坐标，中间必然露出过一帧（用户报的白色边、
+                     * 取消最大化也闪，见 WindowHelper::applyState 里那段记录）。
+                     * 交给系统之后，几何 / 表面重建 / 重画由窗口管理器一手包办，
+                     * 外面还有 DWM 那段转场盖着 —— 谁哪天把它改回"自己摆几何"，
+                     * 这条立刻红。
+                     */
+                    if (stepCoverWanted) {
+                        bool sysMax = false;
+#if defined(Q_OS_WIN)
+                        if (HWND h = reinterpret_cast<HWND>(host->winId()))
+                            sysMax = (GetWindowLongPtr(h, GWL_STYLE) & WS_MAXIMIZE) != 0;
+#endif
+                        check(sysMax,
+                              QStringLiteral("最大化：走的是系统最大化状态"
+                                             "（DWM 那段转场因此会把表面重建盖住，不露白）"),
+                              sysMax ? QString()
+                                     : QStringLiteral("WS_MAXIMIZE 没置上 —— 几何是自己摆的，"
+                                                      "中间会露出未画过的像素"));
+                    }
+
+                    /* 这一步跑完，窗口到底在哪儿、露着没露着 —— 白帧是不是"窗口不在那儿" */
+                    trace << QStringLiteral("%1第%2次 跑完：窗 %3x%4@%5,%6 可见=%7 前台=%8 "
+                                            "露出=%9 取样条在窗内=%10%11")
+                                 .arg(dir).arg(step)
+                                 .arg(host->width()).arg(host->height())
+                                 .arg(host->x()).arg(host->y())
+                                 .arg(host->isVisible() ? 1 : 0)
+                                 .arg(host->isActiveWindow() ? 1 : 0)
+                                 .arg(host->windowHandle() && host->windowHandle()->isExposed()
+                                          ? 1 : 0)
+                                 .arg(host->geometry().contains(strip) ? 1 : 0)
+                                 .arg(nativeStyleText(host));
+                }
+            }
+            host->removeEventFilter(&tally);
+            /* 保险：回到常规状态（QML 那边的 maximized 就是 Win.maximized） */
+            if (qmlRoot->property("maximized").toBool()) {
+                QMetaObject::invokeMethod(qmlRoot, "toggleMaximize");
+                settle();
+            }
+
+            out() << "        （最大化/还原：Move " << tally.moves << " 拍 / Resize "
+                  << tally.resizes << " 拍；基准 白" << baseWhite << " 亮" << qRound(baseLum)
+                  << "；抓了 " << frames << " 帧，露白 " << whiteFrames << " 帧；这一段最亮 "
+                  << qRound(maxLum) << " / 最暗 " << qRound(minLum)
+                  << "（基准与最暗差得越多，界面上那次\"压暗再回全亮\"就越看得出来）；"
+                     "四次切换（最大化/还原/最大化/还原）："
+                  << stepResult.join(QStringLiteral(" / ")) << "）" << Qt::endl;
+            out() << "        （这几拍里的几何序列（去重）："
+                  << tally.sequence.join(QStringLiteral(" -> ")) << "）" << Qt::endl;
+            out() << "        （探针角（最大化之后那儿是橙色应用图标）：切换前 RGB "
+                  << qRound(cornerR) << "," << qRound(cornerG) << "," << qRound(cornerB)
+                  << "；界面扫到它用了：" << stepCover.join(QStringLiteral(" / "))
+                  << "（-1 = 一直没扫到，说明探针角辨不出来））" << Qt::endl;
+            for (const QString &line : trace)
+                out() << "        （" << line << "）" << Qt::endl;
+
+            if (!measurable) {
+                out() << "        （窗口没在前台（基准 白" << baseWhite << " 亮"
+                      << qRound(baseLum) << "），这一次量不了 —— 跳过这条检查）"
+                      << Qt::endl;
+            } else {
+                /*
+                 * 两条一起看：
+                 *   * 白帧数必须是 0（露白就是用户报的"白色的背影一闪"）；
+                 *   * 整段最亮的一帧也得是"暗的" —— 半透明窗口"空一帧"时透出来的
+                 *     东西不一定白（可能是个深色窗口），那种漏法只看白点数是抓不到的。
+                 * "没量成"的那些步不算数（窗口被别的程序压着，量到的不是它）。
+                 */
+                const bool skipped = stepResult.filter(QStringLiteral("没量成")).size() > 0;
+                /*
+                 * 两条一起看：
+                 *   * 露白 0 帧（第 0.3 节那条）；最亮一帧也得是暗的；
+                 *     "没量成"的那些步不算数（窗口被别的程序压着，量到的不是它）。
+                 *   * 探针角那个数**采不到就不算缺陷**（-1）：切换现在只要 ~30ms，
+                 *     而采一次屏幕要几十毫秒，采不到是量具的问题，不是画面的问题；
+                 *     采到了就必须 <200ms。"会不会看到系统那段缩放动画"这件事
+                 *     由上面那条 WS_MAXIMIZE 检查钉着（确定性判据），不靠这个数。
+                 */
+                const int slowestCover = [&]() {
+                    int worst = -1;
+                    for (const QString &s : stepCover) {
+                        const int ms = s.left(s.size() - 2).toInt();
+                        if (ms > worst)
+                            worst = ms;
+                    }
+                    return worst;
+                }();
+                check(!skipped && whiteFrames == 0 && maxLum < 120.0
+                          && (slowestCover < 0 || slowestCover < 300),
+                      QStringLiteral("最大化/还原：不露白（表面重建被 DWM 那段转场盖住了）"),
+                      QStringLiteral("露白 %1 帧；最亮 %2；界面铺到位用了 %3（<0 = 没采到；"
+                                     "这里含了系统那段转场的时长，别拿它当性能指标）；%4")
+                          .arg(whiteFrames)
+                          .arg(qRound(maxLum))
+                          .arg(slowestCover)
+                          .arg(stepResult.join(QStringLiteral(" / "))));
+            }
+        }
     }
 
     /*

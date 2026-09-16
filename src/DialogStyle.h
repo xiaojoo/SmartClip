@@ -59,6 +59,42 @@ QInputDialog QPushButton:pressed {
 }
 
 /*
+ * 关掉这个窗口的**系统转场动画**（最大化 / 还原那一段）。
+ *
+ * 实测（QtWidgets 那些输入框）：系统给新窗口默认带一段淡入 —— 框的像素要在约
+ * 150ms 里才爬满（蓝色图标计数 146 -> 288），用户看到的就是"弹框闪动、像重新
+ * 出现了一次"。主窗口那边更明显：最大化时系统会把**上一次那张画面**按新矩形
+ * 缩放一遍再交出去，看着就是"窗口先跑到右边、还在放大"。这是纯观感损失
+ * （这段动画不提供任何信息），所以整窗关掉它，只关这一个窗口，
+ * 不动系统全局的动画设置。
+ *
+ * 调用时机：窗口句柄得先存在 —— 这里用 winId() 主动建一下，所以在 show() /
+ * exec() 之前调也没问题。
+ *
+ * 返回 HRESULT：**设没设上是要看的**。这个属性只在文档里标了"配合
+ * DwmSetWindowAttribute 用"（反向读不了，DwmGetWindowAttribute 会回
+ * E_INVALIDARG），所以除了这里记下写的结果，没有别的办法知道它到底生效没有。
+ * 排查"最大化那一下还在缩放"时，这一笔是"到底是没设上，还是设上了没用"的判据。
+ */
+inline HRESULT disableDwmTransitions(QWidget *w) {
+#if defined(Q_OS_WIN)
+    if (!w)
+        return E_INVALIDARG;
+#  ifndef DWMWA_TRANSITIONS_FORCEDISABLED
+#    define DWMWA_TRANSITIONS_FORCEDISABLED 3
+#  endif
+    const HWND hwnd = reinterpret_cast<HWND>(w->winId());
+    if (!hwnd)
+        return E_HANDLE;
+    const BOOL off = TRUE;
+    return DwmSetWindowAttribute(hwnd, DWMWA_TRANSITIONS_FORCEDISABLED, &off, sizeof(off));
+#else
+    Q_UNUSED(w);
+    return E_NOTIMPL;
+#endif
+}
+
+/*
  * 原生标题栏也刷成深色。
  *
  * 对话框的"身子"由 dialogStyle() 刷深色，可**标题栏是系统画的** —— 系统在
@@ -76,9 +112,6 @@ inline void applyDarkTitleBar(QWidget *w) {
 #  ifndef DWMWA_USE_IMMERSIVE_DARK_MODE
 #    define DWMWA_USE_IMMERSIVE_DARK_MODE 20
 #  endif
-#  ifndef DWMWA_TRANSITIONS_FORCEDISABLED
-#    define DWMWA_TRANSITIONS_FORCEDISABLED 3
-#  endif
     const HWND hwnd = reinterpret_cast<HWND>(w->winId());
     if (!hwnd)
         return;
@@ -88,14 +121,10 @@ inline void applyDarkTitleBar(QWidget *w) {
         DwmSetWindowAttribute(hwnd, 19, &dark, sizeof(dark));
 
     /*
-     * 顺带把这个窗口的转场动画关掉。
-     *
-     * 系统给新窗口默认带一段淡入 —— 实测：框的像素要在约 150ms 里才爬满
-     * （蓝色图标计数 146 -> 288），用户看到的就是"弹框闪动、像重新出现了一次"。
-     * 这是个一问一答的小框，半透明地慢慢浮出来只有坏处（底下界面透过来），
-     * 没有好处。只关这一个窗口，不动系统全局的动画设置。
+     * 顺带把这个窗口的转场动画关掉（见 disableDwmTransitions 里的实测说明：
+     * 系统给新窗口默认带一段淡入，用户看到的就是"弹框闪动、像重新出现了一次"）。
      */
-    DwmSetWindowAttribute(hwnd, DWMWA_TRANSITIONS_FORCEDISABLED, &dark, sizeof(dark));
+    disableDwmTransitions(w);
 #else
     Q_UNUSED(w);
 #endif
