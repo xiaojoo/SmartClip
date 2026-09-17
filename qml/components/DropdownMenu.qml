@@ -172,7 +172,17 @@ Popup {
      * 那条路 —— 那时 openShifts 会记账，自检会红。
      */
     function worstExpandedHeight(items) {
-        var worst = paneHeight(items)
+        /*
+         * 封顶：主栏真实画出来最多只有 maxMenuHeight 那么高（见 menuHeight），
+         * 所以"最坏展开高度"也不能超过它。
+         *
+         * 不封顶会这样：长菜单（比如"设置"，内容 ~808px）算出的 worstH 是 808，
+         * openFor 里 `py + worstH > host.height - 4`（31 + 808 > 896）成立，
+         * 于是翻到锚点上方，py = 31-808-6 = -783，最后被 Math.max(2, …) 夹到
+         * **y=2 —— 整条菜单压在导航栏上**（用户报的"设置这个下拉框贴在顶上了"）。
+         * 而菜单真实高度只有 460，下面明明放得下。
+         */
+        var worst = Math.min(paneHeight(items), maxMenuHeight)
         if (!items)
             return worst
         var rowTop = panePadding
@@ -185,7 +195,7 @@ Popup {
             }
             rowTop += (entry && entry.separator) ? separatorHeight : itemHeight
         }
-        return worst
+        return Math.min(worst, maxMenuHeight)
     }
 
     /* 这一份菜单里有没有"能展开"的条目（决定宽度要不要按两栏预留） */

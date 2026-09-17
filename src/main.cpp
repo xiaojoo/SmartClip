@@ -246,7 +246,75 @@ int main(int argc, char *argv[]) {
      *     ├── QQuickWidget(整个 QML 界面)
      *     └── QsciScintilla(编辑器，同一层级 → 圆角/裁剪/QML 层级都成立)
      */
+    /*
+     * GPU 合成的试验结论（都试过、都量过，别再走一遍）：
+     *
+     * 目的：这块界面是 4K，QML 那层渲染进 FBO 之后合进 QWidget 的 backing store 是
+     * **CPU** 干的（先把 4K 读回来、再画一遍），一次整窗合成 ~20ms —— 最大化时
+     * "窗口已经变大、内容还没合成好"那几帧黑就是它。想让这段走 GPU，试了两版：
+     *
+     *   1. 宿主流着，里面套一层 QOpenGLWidget、QQuickWidget 挂到那层上：
+     *      实测反而更慢（等于在 raster 宿主里又多了一次 "GL 层 → raster 宿主" 的读回；
+     *      那笔"铺底色"要过一遍 4K FBO，日志里量到 52ms）；
+     *   2. 顶层窗口本身就是 QOpenGLWidget（整条链路没有 raster backing store）：
+     *      最大化中间帧从 5 帧变成 9 帧（144fps 录像），更差 —— QQuickWidget 那张纹理
+     *      该读回还是读回（它在自己的上下文里渲染）。
+     *
+     * 结论：**这条捷径不通**。要真正省掉那次读回，只能把内容层从 QQuickWidget 换成
+     * GPU 渲染的 QQuickWindow（QML 直接由 GPU 出图），而 QScintilla 是 QWidget、
+     * 必须挂在 QWidget 层级里（见上面那段），所以要重新设计编辑区的挂载 ——
+     * 那是项目级改造，不是调几行能解决的。素材：build\frames-gpuhost、frames-gputop。
+     *
+     * ---------------------------------------------------------------------------
+     * 第三版：GPU 内容层（QQuickRenderControl + 隐藏 QQuickWindow + QOpenGLWidget）
+     * —— **做完了、能跑、全量自检也全绿，但没换来性能，所以整份删掉了**（不是留在
+     * 那里当旁路）。想回去看，代码在 git 的 53db0c1 里。
+     *
+     * 为什么删：它唯一的目的是省掉那次 4K 读回，而这一步没做到（原因见下），
+     * 于是它只剩成本 —— 一条不跑的并行分支、三个调用点被迫改成间接层，
+     * 之后每次改内容层和每次跑全量自检都要多考虑一份实现。（前两版 GPU 尝试
+     * 也是这么处理的：留结论 + 素材，不留活代码。）
+     *
+     * 数字（同一份二进制、同一条判据，各多轮；脚本：build\win-maxframes.ps1）：
+     *   最大化那一下的"空档"帧数（144fps）：
+     *                         空状态              开一篇长文档
+     *     老 QQuickWidget      4 / 5 / 4 帧        10 / 11 / 13 / 13 帧
+     *     GPU 内容层           6 / 3 / 5 帧        14 / 12 / 15 / 15 帧
+     *   全量自检两边都是 789 / 0，退出码都 0。
+     *
+     * 也就是：空状态**打平**（差在噪声里），开文档**稳定多 2~3 帧**。原因和第一版
+     * 是同一个：QOpenGLWidget 那张 FBO 最终还是要合进**宿主的 raster backing store**，
+     * 读回只是从 QQuickWidget 那张纹理挪到了这张纹理上。QML 那一帧变成"渲进自己的
+     * 纹理 -> blit 进 QOpenGLWidget 的 FBO -> 合成进 backing store"，中间那步 blit
+     * 是白送的 GPU 拷贝，最后那步该读回还是读回。
+     *
+     * 要真把这一步也搬上 GPU，只有让**顶层窗口本身**不再是 raster backing store
+     * （整窗 GL 合成）—— 那又会碰上第二版踩过的坑（QML 那层会各自建上下文），
+     * 得连着改 Qt Quick 的图形设备绑定，不是本项目能收得住的范围。
+     *
+     * 界面这条线的性能问题别再从"换渲染目标"这个方向找 —— 往"最大化那一下到底
+     * 哪几帧在等什么"上找更划算（见 WindowHelper 里 applyState 的 ①~⑤）。
+     *
+     * 顺带记三条这次踩出来的硬约束（照 Qt 6.11.2 的 QQuickWidget 实现核过）：
+     *   * Qt 6 的 QQuickRenderControl **必须**自己给一张渲染目标纹理，不给就报
+     *     "QQuickWindow: No render target" 且整块空（Qt 5 那套"渲进当前 FBO"不成立）；
+     *   * initialize() 之前要 setGraphicsDevice(fromOpenGLContext(本控件上下文))，
+     *     让场景图用现有上下文，别自己另建一个；
+     *   * 离屏窗口的几何要摆到控件的**屏幕坐标**上，**同时**重写 renderWindow()
+     *     返回宿主真窗口 —— 少哪个都会坏（少前者弹窗挪错位置，少后者弹窗根本不出现）。
+     * 素材：build\gpu-content-*.png、build\selftest-*.out、build\max-*144.mp4、
+     * build\window-trace-{legacy,gpu}.log。临时诊断脚本 build\gpu-content-smoke.ps1
+     * 也是那次留下的（现在没用了）。
+     */
     QWidget host;
+    /*
+     * 无边框（圆角、自绘顶栏都靠这一条）。
+     *
+     * 试过"生来就是普通窗口（Qt::Window 带标题栏样式）+ WM_NCCALCSIZE 把非客户区压成 0"，
+     * 想让 Windows 那段最大化转场放起来盖住空档 —— 实测**照样不放**（素材
+     * build\frames-framed2），所以还是维持无边框。结论记在 WindowHelper.cpp 的
+     * WM_NCCALCSIZE 那段注释里。
+     */
     host.setWindowFlags(Qt::Window | Qt::FramelessWindowHint);
     /*
      * 主窗口**不透明**、底色就是界面底色 —— 不是 WA_TranslucentBackground。
@@ -280,6 +348,13 @@ int main(int argc, char *argv[]) {
     }
     host.setWindowTitle(QStringLiteral("SmartClip — 剪贴板"));
 
+    /*
+     * 装整个 QML 界面的那块控件。
+     *
+     * 曾经有过第二条实现（GPU 内容层，QML 直接渲进 QOpenGLWidget 的 FBO），
+     * 量下来不划算，已经整份删掉了 —— 结论、数字和踩过的坑见上面那段
+     * "GPU 合成的试验结论"，代码在 git 53db0c1。
+     */
     auto *quick = new QQuickWidget(&host);
     quick->setResizeMode(QQuickWidget::SizeRootObjectToView);
     /*

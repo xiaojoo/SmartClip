@@ -83,6 +83,7 @@
 ClipboardStore *EditorViewItem::s_store = nullptr;
 QWidget *EditorViewItem::s_hostWidget = nullptr;
 EditorViewItem *EditorViewItem::s_instance = nullptr;
+QVector<QPointer<EditorViewItem>> EditorViewItem::s_all;
 
 namespace {
 
@@ -264,12 +265,28 @@ EditorViewItem::EditorViewItem(QQuickItem *parent) : QQuickItem(parent) {
      * 现在由 QML 显式指定：主栏那份写 `mainEditor: true`（见下面的 setter），
      * 谁是主编辑器一目了然，和创建顺序无关。
      */
+    s_all.append(this);
 }
 
 EditorViewItem::~EditorViewItem() {
     if (s_instance == this)
         s_instance = nullptr;
+    s_all.removeAll(QPointer<EditorViewItem>(this));
     detach();
+}
+
+/*
+ * 让所有编辑器实例按当前 QML 布局重新摆一次原生控件。
+ *
+ * 调用点在 WindowHelper::applyState：主窗口换几何**之前**调一次 —— 这样
+ * 窗口变大的那一拍，编辑器已经在目标坐标上了（它挂在宿主 QWidget 上，
+ * 坐标超出旧窗口那部分是裁掉的，看不出来；窗口一变就是正好那个位置）。
+ */
+void EditorViewItem::syncAllGeometry() {
+    for (const QPointer<EditorViewItem> &item : s_all) {
+        if (item)
+            item->applyGeometry();
+    }
 }
 
 /* ------------------------------------------------------------------ */

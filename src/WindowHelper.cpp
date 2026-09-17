@@ -1,6 +1,7 @@
 #include "WindowHelper.h"
 
 #include "DialogStyle.h"
+#include "EditorViewItem.h"
 
 #include <QAbstractNativeEventFilter>
 #include <QCoreApplication>
@@ -12,6 +13,7 @@
 #include <QEvent>
 #include <QGuiApplication>
 #include <QLayout>
+#include <QPainter>
 #include <QPainterPath>
 #include <QQuickWidget>
 #include <QRegion>
@@ -79,6 +81,42 @@ QString dwmTransitionNote(WId handle, HRESULT hr) {
 #endif
 }
 
+/*
+ * 界面底色：和 Main.qml 的 contentRoot、宿主的调色板同一个值（#313335）。
+ *
+ * 窗口"还没画过"的那一块一律擦成它 —— 那块像素直接交给合成器就是纯黑 / 白，
+ * 而在这套深色界面上，底色闪一下基本看不出来。现在只有 MessageTrace 的
+ * WM_ERASEBKGND 用它（换尺寸那一小段里自己擦，见那段的说明）。
+ */
+HBRUSH backdropBrush() {
+    static HBRUSH brush = ::CreateSolidBrush(RGB(0x31, 0x33, 0x35));
+    return brush;
+}
+
+/*
+ * 系统那边这个窗口的**真实矩形**。
+ *
+ * 为什么不用 QWidget::geometry()：窗口状态刚变的那一拍（showMaximized / showNormal
+ * 回来的当口），Qt 记着的 geometry 还是旧值 —— 拿它跟目标矩形比永远"不相等"，
+ * 于是每次都会白补一次 setGeometry()（那一下还会把 Qt 记的最大化状态清掉）。
+ * 要判断"系统摆到位了没有"，只能问系统。
+ */
+QRect nativeFrameRect(QWidget *widget) {
+#if defined(Q_OS_WIN)
+    if (!widget)
+        return QRect();
+    const HWND hwnd = reinterpret_cast<HWND>(widget->internalWinId());
+    if (!hwnd)
+        return QRect();
+    RECT rc{};
+    if (!::GetWindowRect(hwnd, &rc))
+        return QRect();
+    return QRect(rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top);
+#else
+    return widget ? widget->geometry() : QRect();
+#endif
+}
+
 }  // namespace
 
 /*
@@ -104,32 +142,46 @@ WindowHelper::WindowHelper(QObject *parent)
  *
  * 格式和 Screenshot 那份 shot-trace.log 一致：左边是"启动至今多少毫秒"，
  * 右边一句话。每次启动把上一份删掉重开，所以文件永远只反映最近这一次运行。
+ *
+ * **文件只开一次**（一个常驻句柄）：
+ * 原来是"一行一次 open/write/flush/close"，一次最大化要写十几行，光这些系统调用
+ * 就够吃掉一整帧 —— 而这条日志恰恰是在量"切换那几十毫秒里屏幕上是什么"，
+ * 记录本身不能成为主角（实测：改成常驻句柄之后，切换从发出到整窗画完短了一截，
+ * 录屏里那两帧"旧内容 + 黑"收成了一帧）。每次写完照样 flush，外面随时能看见。
  * ------------------------------------------------------------------------ */
+
+namespace {
+
+QFile &traceFile()
+{
+    static QFile file(QString::fromLatin1(kWindowTraceFile));
+    return file;
+}
+
+}  // namespace
 
 void WindowHelper::trace(const QString &what)
 {
-    const QString path = QString::fromLatin1(kWindowTraceFile);
+    QFile &f = traceFile();
 
     if (!m_traceStarted) {
         m_traceStarted = true;
         m_traceClock.start();
-        QFile::remove(path);
-        QFile head(path);
-        if (head.open(QIODevice::WriteOnly | QIODevice::Text)) {
-            head.write(QStringLiteral("# SmartClip 窗口变化日志  启动于 %1\n")
-                           .arg(QDateTime::currentDateTime().toString(
-                               QStringLiteral("HH:mm:ss.zzz")))
-                           .toUtf8());
-            head.close();
+        f.close();
+        QFile::remove(QString::fromLatin1(kWindowTraceFile));
+        if (f.open(QIODevice::WriteOnly | QIODevice::Text)) {
+            f.write(QStringLiteral("# SmartClip 窗口变化日志  启动于 %1\n")
+                            .arg(QDateTime::currentDateTime().toString(
+                                QStringLiteral("HH:mm:ss.zzz")))
+                            .toUtf8());
+            f.flush();
         }
     }
 
-    QFile f(path);
-    if (!f.open(QIODevice::Append | QIODevice::Text))
+    if (!f.isOpen())
         return;
     f.write(QStringLiteral("%1  %2\n").arg(m_traceClock.elapsed(), 6).arg(what).toUtf8());
     f.flush();
-    f.close();
 }
 
 void WindowHelper::traceSnapshot(const QString &tag)
@@ -307,16 +359,14 @@ bool WindowHelper::probeEnabled() const
 
 void WindowHelper::applyRoundedMask()
 {
-    if (!m_widget)
+    if (!m_widget) {
+        trace(QStringLiteral("applyRoundedMask：没窗口"));
         return;
-
-    /*
-     * 换尺寸那一小段里"区域"归幕布管（见 curtainRegion）：这一段里**不许**按窗口
-     * 尺寸重算圆角遮罩 —— 那会把幕布顶掉，而 setMask 还会把绘制裁起来，
-     * 于是幕布后面那圈画不上、撤幕布时就是白边。
-     */
-    if (m_curtainOn)
-        return;
+    }
+    trace(QStringLiteral("applyRoundedMask：进（%1x%2 最大=%3 半径=%4）")
+              .arg(m_widget->width()).arg(m_widget->height())
+              .arg(m_maximized ? 1 : 0)
+              .arg(m_cornerRadius));
 
     /*
      * setMask() 用的是**设备像素**，而 QWidget::width()/height() 是逻辑像素。
@@ -330,26 +380,27 @@ void WindowHelper::applyRoundedMask()
         return;
 
     /*
-     * 圆角半径：最大化时给直角（见 applyRoundedMask 上面那段）。
+     * 圆角半径。
      *
      * **不要再"拖边的时候也不给圆角"**：试过（为了少几次 SetWindowRgn），
      * 但摘掉遮罩之后窗口变方角，而四角那几像素从来没画过 —— 拖窗口 / 拉边时
      * 角上会闪白（用户报的"白色背景闪现"）。圆角照旧每拍跟着尺寸算，
      * 多出来的那几次 SetWindowRgn 换来的是"任何时刻都不露没画过的像素"。
+     *
+     * 最大化要不要圆角：默认**要**（用户 2026-09-17 明确要求"最大化也要圆角"）。
+     * 要走回"最大化 = 直角"（和 Windows 原生最大化一致）就设
+     * SMARTCLIP_SQUARE_WHEN_MAXIMIZED=1。
+     *
+     * 注意最大化时这个圆角是**抠掉四个角**：窗口是不透明矩形，圆角靠 SetWindowRgn 裁，
+     * 裁掉的那几像素露出的是底下的桌面 / 别的窗口。
      */
-    const int r = m_maximized ? 0
-                              : qRound(qMin(m_cornerRadius, qMin(w / 2, h / 2)) * dpr);
+    static const bool squareWhenMaximized = qEnvironmentVariableIsSet("SMARTCLIP_SQUARE_WHEN_MAXIMIZED");
+    const int r = (m_maximized && squareWhenMaximized)
+                      ? 0
+                      : qRound(qMin(m_cornerRadius, qMin(w / 2, h / 2)) * dpr);
 
     QRegion region;
-    if (m_curtainOn) {
-        /*
-         * 换尺寸那一小段：区域钉在"卡片"上（见 curtainRegion）。
-         *
-         * 这一小段里窗口的几何可能已经是整块可用区了，但屏幕上看起来必须还是
-         * 原来那块窗 —— 所以区域**不能**按窗口尺寸算，得用钉住的那一块。
-         */
-        region = m_curtain;
-    } else if (r > 0) {
+    if (r > 0) {
         QPainterPath path;
         path.addRoundedRect(QRectF(0, 0, w, h), r, r);
         region = QRegion(path.toFillPolygon().toPolygon());
@@ -363,8 +414,25 @@ void WindowHelper::applyRoundedMask()
      * 每拍都重设一遍就是白白多出几帧闪。实测过：不缓存时一次最大化会重设 2 次
      * （Resize 一拍 + applyState 收尾那次），缓存之后 0~1 次。
      */
-    if (m_maskApplied && region == m_appliedMask)
+    if (m_maskApplied && region == m_appliedMask) {
+        trace(QStringLiteral("applyRoundedMask：形状没变，不重设（r=%1 区域=%2 最大=%3）")
+                  .arg(r)
+                  .arg(region.isEmpty() ? QStringLiteral("空")
+                                        : QStringLiteral("%1x%2")
+                                              .arg(region.boundingRect().width())
+                                              .arg(region.boundingRect().height()))
+                  .arg(m_maximized ? 1 : 0));
         return;
+    }
+
+    trace(QStringLiteral("applyRoundedMask：r=%1 区域=%2 最大=%3 → %4")
+              .arg(r)
+              .arg(region.isEmpty() ? QStringLiteral("空")
+                                    : QStringLiteral("%1x%2")
+                                          .arg(region.boundingRect().width())
+                                          .arg(region.boundingRect().height()))
+              .arg(m_maximized ? 1 : 0)
+              .arg(region.isEmpty() ? QStringLiteral("clearMask()") : QStringLiteral("setMask()")));
 
     if (region.isEmpty())
         m_widget->clearMask();
@@ -479,6 +547,51 @@ public:
             break;
 
         /*
+         * 非客户区压成 0（**只在窗口带标题栏样式时才动手**）。
+         *
+         * 这一条是留给"让系统那段最大化转场放起来"那条路的：转场只对带标题栏的普通窗口放，
+         * 而那样窗口就会长出真的标题栏，所以要把非客户区压掉、客户区 = 整块窗口。
+         *
+         * 现在这个窗口是 Qt::FramelessWindowHint 出来的 WS_POPUP（实测 style=0x96000000），
+         * 本来就没有非客户区 —— 实测四条路都试过：把样式位补成 CAPTION|THICKFRAME、
+         * 去掉 WS_POPUP、去掉圆角区域、甚至让窗口**生来就是普通窗口**（main.cpp 里那个
+         * 试验开关），DWM **照样不放那段最大化转场**（素材 build 下 frames-caption2、
+         * frames-nopopup、frames-nomask、frames-framed2）；而同时拿画图做对照，
+         * 它在这台机器上放得好好的（见 build\frames-paint）。所以"让系统转场盖住空档"
+         * 这条路整个搁下（多半是因为这个窗口的"可动画"资格在创建时就定了、且 Qt 给
+         * QWidget 建的是那种不参与动画的窗口类）。
+         * 这一条留着：以后要是真走"普通窗口 + 压掉非客户区"的做法，还得靠它。
+         * 现在走到这里直接让开，不动系统给的矩形。
+         */
+        case WM_NCCALCSIZE: {
+            if (!(::GetWindowLongPtr(ours, GWL_STYLE) & WS_CAPTION))
+                break;   /* 没有标题栏样式：不关我们的事，交回系统 / Qt */
+            if (msg->wParam) {
+                auto *params = reinterpret_cast<NCCALCSIZE_PARAMS *>(msg->lParam);
+                if (!params)
+                    break;
+                if (::IsZoomed(ours)) {
+                    MONITORINFO mi{};
+                    mi.cbSize = sizeof(mi);
+                    if (::GetMonitorInfo(::MonitorFromWindow(ours, MONITOR_DEFAULTTONEAREST), &mi)) {
+                        params->rgrc[0] = mi.rcWork;
+                        self->trace(QStringLiteral("WM_NCCALCSIZE（最大化）客户区按可用区 %1x%2@%3,%4")
+                                        .arg(mi.rcWork.right - mi.rcWork.left)
+                                        .arg(mi.rcWork.bottom - mi.rcWork.top)
+                                        .arg(mi.rcWork.left).arg(mi.rcWork.top));
+                    }
+                }
+            } else {
+                auto *rect = reinterpret_cast<RECT *>(msg->lParam);
+                if (rect)
+                    ::GetWindowRect(ours, rect);
+            }
+            if (result)
+                *result = 0;      /* 0 = 客户区就是上面那个矩形，没有非客户区 */
+            return true;
+        }
+
+        /*
          * 系统在最大化之前会先问"最大能多大"。
          *
          * 无边框窗口在这里报的数常常是"整块屏"而不是"去掉任务栏的可用区"
@@ -497,8 +610,7 @@ public:
             break;
         }
 
-        case WM_SYSCOMMAND: {
-            const WPARAM cmd = msg->wParam & 0xFFF0;
+        case WM_SYSCOMMAND: {            const WPARAM cmd = msg->wParam & 0xFFF0;
             const bool iconic = IsIconic(ours) != FALSE;
             self->trace(QStringLiteral("WM_SYSCOMMAND  %1（窗口%2）")
                             .arg(sysCommandText(cmd),
@@ -517,19 +629,27 @@ public:
              * "在最小化状态"时不拦：那时 SC_RESTORE 的语义是"从最小化恢复"，
              * 交给系统办才对（恢复之后该是最大化就还是最大化）。
              */
-            const bool restoring = (cmd == SC_RESTORE)
-                                   && (self->m_maximized || self->updateMaximizedFromWindow());
-            if (!iconic && (cmd == SC_MAXIMIZE || restoring)) {
-                self->trace(cmd == SC_MAXIMIZE
-                                ? QStringLiteral("  → 这条我们自己办（不进系统那套最大化转场）")
-                                : QStringLiteral("  → 这条我们自己办（不进系统那套还原转场）"));
-                if (cmd == SC_MAXIMIZE)
-                    self->maximize();
-                else
-                    self->restore();
-                if (result)
-                    *result = 0;
-                return true;
+            /*
+             * 调试开关：SMARTCLIP_LET_SYSTEM_MAXIMIZE=1 —— 不接这两条，交给系统自己办
+             * （用来验"系统那套最大化转场到底能不能放起来"：我们一吃掉 SC_MAXIMIZE，
+             * 系统就没机会放那段动画了，见下面的说明）。
+             */
+            static const bool letSystem = qEnvironmentVariableIsSet("SMARTCLIP_LET_SYSTEM_MAXIMIZE");
+            if (!letSystem) {
+                const bool restoring = (cmd == SC_RESTORE)
+                                       && (self->m_maximized || self->updateMaximizedFromWindow());
+                if (!iconic && (cmd == SC_MAXIMIZE || restoring)) {
+                    self->trace(cmd == SC_MAXIMIZE
+                                    ? QStringLiteral("  → 这条我们自己办（不进系统那套最大化转场）")
+                                    : QStringLiteral("  → 这条我们自己办（不进系统那套还原转场）"));
+                    if (cmd == SC_MAXIMIZE)
+                        self->maximize();
+                    else
+                        self->restore();
+                    if (result)
+                        *result = 0;
+                    return true;
+                }
             }
             break;
         }
@@ -554,8 +674,7 @@ public:
                 break;
             RECT rc;
             ::GetClientRect(ours, &rc);
-            static HBRUSH brush = ::CreateSolidBrush(RGB(0x31, 0x33, 0x35));
-            ::FillRect(dc, &rc, brush);
+            ::FillRect(dc, &rc, backdropBrush());
             if (result)
                 *result = 1;
             return true;   /* 已经擦过了，别让系统再擦一遍 */
@@ -650,6 +769,7 @@ void WindowHelper::attachWidget(QWidget *widget)
             }
         }
 
+
         /*
          * 关掉这个窗口的系统转场动画。
          *
@@ -665,9 +785,17 @@ void WindowHelper::attachWidget(QWidget *widget)
          * applyState 里"先摆几何、再改状态"的顺序。
          */
 #if defined(Q_OS_WIN)
-        const HRESULT dwhr = disableDwmTransitions(m_widget);
+        /*
+         * 调试开关：SMARTCLIP_KEEP_DWM_TRANSITION=1 —— 不关系统转场，让 Windows 自己那段
+         * "从旧矩形缩放过来"的最大化 / 还原动画放出来（对比"转场盖住空档"这条路用，
+         * 见 build\win-verify-switch.ps1）。平时不设，转场是关掉的。
+         */
+        static const bool keepDwmTransition = qEnvironmentVariableIsSet("SMARTCLIP_KEEP_DWM_TRANSITION");
+        const HRESULT dwhr = keepDwmTransition ? S_FALSE : disableDwmTransitions(m_widget);
         m_transitionsDisabled = SUCCEEDED(dwhr);
-        m_transitionNote = dwmTransitionNote(m_widget->internalWinId(), dwhr);
+        m_transitionNote = keepDwmTransition
+                               ? QStringLiteral("**没关**（探针要求留着）")
+                               : dwmTransitionNote(m_widget->internalWinId(), dwhr);
         trace(QStringLiteral("系统转场动画：%1").arg(m_transitionNote));
 #else
         m_transitionNote = QStringLiteral("非 Windows，关不了");
@@ -675,6 +803,7 @@ void WindowHelper::attachWidget(QWidget *widget)
         cacheNormalGeometry(m_widget->geometry());
         updateMaximizedFromWindow();
         applyRoundedMask();
+
 
         /* 开头几行：这台机器上窗口和屏幕是怎么摆的（后面所有几何都对着它看） */
         trace(QStringLiteral("==== attach ===="));
@@ -750,33 +879,39 @@ void WindowHelper::restore()
 }
 
 /*
- * 一次到位地把窗口切到目标状态。
+ * 一次到位地把窗口切到目标状态：**先把内容按目标尺寸画好，再把窗口摆过去**。
  *
- * 这套顺序的目的只有一个：**屏幕上不出现"窗口已经变大、那一块还没画过"的中间态**。
- * 做法是拿窗口区域(SetWindowRgn)当幕布（用户挑的方案 B）：
+ * 为什么是这个顺序（这一版是照录屏改的，素材在 build\frames-*）：
  *
- *   最大化：
- *     ① 区域钉在"卡片"上（就是现在这块窗的样子）
- *     ② 窗口几何一步长成整块可用区 —— 多出来的那圈被区域裁掉，屏幕上看不出来
- *     ③ 内容控件按最大化尺寸摆好，它的 resizeEvent 里会**同步**渲染一帧
- *     ④ 放开区域（整窗可见）
- *     ⑤ 当场合成上屏
- *   ①②③④⑤ 都在同一个事件循环回合里，所以合成器只会看到"旧卡片"和"最大化界面"
- *   两个状态，中间那些步骤一个都露不出来。
+ *   上一版是"showMaximized() 之后等 Qt 自己把内容跟上来"，录屏（60fps，DDA 抓的
+ *   合成器输出）里量出来中间有 2~3 帧 —— 窗口**已经**铺满屏幕，而界面内容还是
+ *   旧尺寸那一版挂在窗口左上角，其余一大片是没画过的黑 —— 然后才跳成最大化那一版。
+ *   用户看到的就是"窗口先跑到角上、再放大"。
  *
- *   还原是同一条路反过来走：区域先缩成卡片（窗口还是整块）→ 内容缩回卡片并渲染
- *   → 真窗口再缩成卡片（这时区域按新尺寸算，形状和刚才那块完全一样）→ 合成。
+ *   那几帧**不是系统那段最大化转场**：转场在 attachWidget 里已经被
+ *   DWMWA_TRANSITIONS_FORCEDISABLED 关掉了，录屏里从头到尾没有任何缩放动画
+ *   （窗口矩形是"啪"一下到位的）。那几帧是纯粹的"窗口换完尺寸、内容还没按新尺寸
+ *   重排重画"。
  *
- * 为什么这套能成立（实测过，见 build\win-region-proto.ps1）：
- *   * 区域裁掉的部分**不属于这个窗口** —— 桌面照常透出来，那片地方的点击也照常
- *     落到桌面上（WindowFromPoint 验过：卡片外面返回的是桌面/浏览器，卡片里面
- *     才是我们）。所以不需要透明窗口、不需要管 alpha 命中测试；
- *   * 内容控件（QQuickWidget）是离屏渲染的，它自己的 resizeEvent 里就是
- *     polishItems + sync + render，跟窗口当时多大无关 —— 所以"先把内容画好"
- *     这一步能提前，画完再放开区域，那一帧就是完整的。
+ * 所以顺序反过来 —— 内容先动，窗口后动（最大化那一路，逐条理由见下面就地注释）：
+ *   ① 内容控件（QQuickWidget）先按**目标尺寸**渲染一帧：此刻窗口还是旧尺寸，
+ *      多出来的部分被窗口裁掉，屏幕上什么都看不见；而它是离屏渲染的，它的
+ *      resizeEvent 里就是 polishItems + sync + render，跟窗口当时多大无关
+ *      （见 placeContent 的说明）；
+ *   ② 窗口一步摆到目标矩形（setGeometry，不是 showMaximized —— 后者把新尺寸
+ *      排队告诉 Qt，紧接着那次合成会按旧尺寸裁）；
+ *   ③ 布局归位 + 当场合成内容那一帧（4K 上 ~15ms，省不掉）；
+ *   ④ 最后才把最大化状态置上（WS_MAXIMIZE / Qt 的窗口状态，这一步不挪窗口）。
+ * ①~④ 在同一个事件循环回合里走完：屏幕上只有"切换前""切换后"两帧。
  *
- * 稳态还是普通窗口：还原状态就是一块 1460x900 的真窗口（任务栏 / Alt+Tab /
- * 贴边 / 拖到别的显示器都照旧），"整块可用区大小"只在切换那几十毫秒里存在。
+ * ②→③ 之间有 ~15ms 空档（窗口已撑到 4K、内容还没合成完），DWM 可能把那一帧
+ * "表面全屏、内容未就位"放出去。这里**不再主动补一帧底色**去盖它 —— 那等于每次
+ * 都必然多呈现一帧裸底色（用户报的"界面一闪"）。空档只靠 WM_ERASEBKGND 兜底
+ * （见 m_fastErase）：真空档时那片未初始化显存被擦成界面底色而不是黑；机器空闲时
+ * 内容帧赶在前面，屏幕上连这一帧都看不到。
+ *
+ * 稳态还是普通窗口：最大化就是整块可用区（任务栏 / Alt+Tab / 贴边都照旧），
+ * 还原就是用户上次摆出来的那块卡片。
  */
 void WindowHelper::applyState(bool maximize)
 {
@@ -791,6 +926,7 @@ void WindowHelper::applyState(bool maximize)
      * 从没画过的像素被交给合成器就是"白色背景闪现"。
      */
     m_fastErase = true;
+
 
     /* 状态翻转只在这一个地方做 */
     auto setState = [this](bool on) {
@@ -807,42 +943,150 @@ void WindowHelper::applyState(bool maximize)
         const QRect avail = screen ? screen->availableGeometry() : QRect();
 
         /*
-         * ==============================================================
-         * 最大化：交给系统（showMaximized），不再自己摆几何 + 幕布
-         * ==============================================================
-         *
-         * 为什么回到这条路（"幕布"那套试过、留着记录免得再走）：
-         *   自己摆几何要同时做两件事 —— 把窗口挪到 (0,0)、把"窗口在屏幕上的形状"
-         *   从旧卡片换成新卡片。两者是**两个 API 调用**，而区域用的是窗口内坐标：
-         *     * 先设区域、后挪窗口 -> 窗口还在旧位置时区域落在客户区外面，
-         *       窗口整个不显示（屏幕上就是桌面/浏览器），而且持续整个 4K 渲染过程；
-         *     * 先挪窗口、后设区域 -> 中间那一瞬窗口已经在 (0,0)、区域还是旧的，
-         *       画面会"跳到左上角"。
-         *   实测两种都露出一帧（用户报的"白色边"和"取消最大化也闪"），
-         *   这是结构性的，不是调几行能根治的。
-         *
-         * 而系统自己的最大化是**窗口管理器一手包办**的：几何、表面重建、重画
-         * 在一条路径里完成，外加 DWM 那段"从旧矩形缩放过来"的转场把整个过程盖住 ——
-         * 所以不可能露白、不可能闪。
-         *
-         * 这段转场以前看着不对，是因为当时**内容要 160ms 才跟上**（动画里放的是
-         * 旧内容、收尾还夹一帧黑）。那 160ms 上一轮查明并消掉了（"带着 setMask
-         * 去 resize 内容控件"造成的，现在 ~3ms），所以现在动画里放的就是新内容。
+         * ① 内容先按最大化之后的尺寸渲染一帧（窗口还是小的，多出来的那圈被窗口
+         *    裁掉，屏幕上看不出来）。
          *
          * 先 clearMask()：最大化 = 直角，而且**顺手让内容控件那次 4K 渲染走快路径**
          * （带遮罩渲染那一帧要 ~140ms，见 applyRoundedMask 里的说明）。
          */
-        trace(QStringLiteral("applyState(最大化)：交给系统 showMaximized()（可用区 %1x%2）")
-                  .arg(avail.width()).arg(avail.height()));
         m_widget->clearMask();
-        m_widget->showMaximized();
-        traceSnapshot(QStringLiteral("  已 showMaximized()"));
+        if (avail.isValid() && !avail.isEmpty())
+            placeContent(QRect(QPoint(0, 0), avail.size()));
 
         /*
-         * 无边框窗口在部分平台上 showMaximized() 回来时几何还没落定，
-         * 补一次到屏幕可用区域，保证和任务栏不重叠。
+         * ①c 让编辑区那个原生子窗**先按新布局摆好**（见 EditorViewItem::syncAllGeometry）。
+         *
+         * 它本来是挂在 QML 的 geometryChange 上摆的，而"窗口换尺寸"和"QML 布局落定"
+         * 谁先谁后不保证 —— 窗口先变的那一版里，编辑器会带着旧内容挂在旧坐标上飘一帧
+         * （144fps 录屏里看得见）。这里在换几何**之前**先摆一次、摆到目标坐标上：
+         * 超出旧窗口那部分被宿主裁掉、屏幕上看不见；等窗口一变，它正好在那个位置上。
          */
-        if (avail.isValid() && m_widget->geometry() != avail) {
+        EditorViewItem::syncAllGeometry();
+
+        /*
+         * ②b 先把界面那一层擦掉（和换几何在同一个回合里）。
+         *
+         * 擦掉：窗口变大的时候，系统会把"变大前那一张画面"拷到新窗口表面的左上角。
+         * 拷过去的是整块界面的话，用户看到的就是"界面跑到左上角、再放大"。
+         *
+         * 为什么用 RedrawWindow(RDW_UPDATENOW) 而不是 repaint()：repaint() 只是**请求**
+         * 重画，机器一忙就推迟到下一轮 —— 那样换几何时拷过去的还是整块界面，
+         * 于是这个毛病"不是每次都有"（用户原话）。RDW_UPDATENOW 让系统当场把 WM_PAINT
+         * 走完（Qt 那次 backing store 上屏也就跟着走了）。
+         */
+        auto blankBackdrop = [this]() {
+            if (m_quickWidget)
+                m_quickWidget->setUpdatesEnabled(false);   /* 这一步里内容控件别画 */
+            m_blankBackdrop = true;
+            m_widget->repaint();
+#if defined(Q_OS_WIN)
+            if (HWND hwnd = reinterpret_cast<HWND>(m_widget->internalWinId())) {
+                ::RedrawWindow(hwnd, nullptr, nullptr,
+                               RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW);
+            }
+            /*
+             * 再等**合成器真的把这一帧吃掉**，然后才去换几何。
+             *
+             * 为什么非要等：RedrawWindow(RDW_UPDATENOW) 只保证"应用把这一帧画完了"
+             * （WM_PAINT 走完了），**不保证 DWM 已经拿它当这个窗口的最新画面**。
+             * 紧接着就 setGeometry() 的话，DWM 手上可能还是上一张 —— 也就是那张
+             * **旧尺寸的整块界面**，而窗口变大的时候系统会把它贴到新表面的左上角：
+             * 用户看到的就是"界面缩在左上角一小块、再铺满"（就是 ②b 要治的那条，
+             * 但 ②b 只擦不"确认上屏"的话治不干净）。
+             *
+             * DwmFlush() 就是"等到合成器画完当前这一帧"的那个口子。
+             * 代价是这里会阻塞一帧（144Hz 上 ~7ms），换的是"拷过去的确定是底色
+             * 而不是旧界面" —— 这一段本来就已经在做同步 repaint，不差这一下。
+             *
+             * 调试开关：SMARTCLIP_NO_DWM_FLUSH=1 —— 退回旧行为，用来对跑。
+             */
+            static const bool noFlush = qEnvironmentVariableIsSet("SMARTCLIP_NO_DWM_FLUSH");
+            if (!noFlush)
+                ::DwmFlush();
+#endif
+            m_blankBackdrop = false;
+            if (m_quickWidget)
+                m_quickWidget->setUpdatesEnabled(true);
+        };
+
+        /*
+         * 调试开关：SMARTCLIP_NO_BLANK_BACKDROP=1 —— 不做"先擦成底色"这一步。
+         *
+         * 用来验一件事：这一擦到底有没有用。关掉之后如果屏幕上变成
+         * "界面缩在左上角一小块、再铺满"（用户报的那个形状），就说明这一擦是**必要的**，
+         * 只是它在某些机器上没顶到合成器；如果关掉之后反而更顺，那这一擦本身就多余。
+         */
+        static const bool noBlank = qEnvironmentVariableIsSet("SMARTCLIP_NO_BLANK_BACKDROP");
+        if (!noBlank)
+            blankBackdrop();
+
+        /* ② 窗口一步摆到可用区 */
+        /*
+         * 调试开关：SMARTCLIP_MAX_BY_SYSTEM=1 —— 几何也让系统那一下摆（showMaximized），
+         * 配合 SMARTCLIP_KEEP_DWM_TRANSITION=1，看"系统转场盖住空档"这条路长什么样
+         * （实测：这条路在这个窗口上不放动画，空档一样露，留着是为了以后能再验）。
+         */
+        static const bool maxBySystem = qEnvironmentVariableIsSet("SMARTCLIP_MAX_BY_SYSTEM");
+        trace(QStringLiteral("applyState(最大化)：%1 %2x%3")
+                  .arg(maxBySystem ? QStringLiteral("交给系统 showMaximized()")
+                                   : QStringLiteral("摆到可用区，再置最大化状态"))
+                  .arg(avail.width()).arg(avail.height()));
+        if (maxBySystem)
+            m_widget->showMaximized();   /* 状态 + 几何都交给系统那一下（转场才有东西可动） */
+        else
+            m_widget->setGeometry(avail);
+
+
+        /*
+         * ③ 内容那一版：布局归位 + 当场合成一帧（这一步 4K 上要 ~20ms，省不掉）。
+         *
+         *    这一小段（窗口撑大 → 内容合成上屏）里露出来的那帧是**结构性的**：窗口表面
+         *    变大之后、Qt 把内容画出来之前，那块地方是没画过的。四种"盖住它"的办法
+         *    都试过、也都用 144Hz 录屏量过（素材在 build\frames-*，判据脚本
+         *    build\win-verify-switch.ps1 / win-classify2.ps1）；结论写在这儿免得再走一遍：
+         *
+         *      * 主动刷一帧界面底色：每次必然多呈现一帧**裸底色**（用户报的"界面一闪"）；
+         *      * DWM 隐身（DWMWA_CLOAK；写没写进去用 DWMWA_CLOAKED 读回来验过，
+         *        hr=S_OK / cloaked=1，确实生效）：窗口**整个消失** ~40ms（卡片区连续 5 帧
+         *        "已经不是卡片"），屏幕上露出背后桌面，比那几帧黑更扎眼；
+         *      * "稍微延迟 + 一次性放大"：窗口变大之前先把这一版读回成一张图（延迟这一段
+         *        屏幕上还是卡片，是对的），窗口一变就拿它把整块客户区一次画满（纯拷贝
+         *        几毫秒）—— 结果**屏幕上的黑帧一帧没少**：我们提前画进窗口表面的那一帧
+         *        并没有被放出来，直到 Qt 把放大后的窗口完整合成一次才算数
+         *        （日志里"一步放大：贴 cover"到"repaint 之后"隔了 56ms）。
+         *        也就是说那几帧不是"我们没画"，是**系统还没把新窗口表面交出去**；
+         *      * 让系统那段最大化转场盖（SMARTCLIP_MAX_BY_SYSTEM=1 + KEEP_DWM_TRANSITION=1
+         *        + 补 CAPTION/THICKFRAME 样式位 + 去掉 WS_POPUP + 去掉圆角区域 + 让窗口
+         *        生来就是普通窗口，六种组合）：**这个窗口上 DWM 压根不放动画**，空档照露
+         *        （对照：画图那种普通窗口在这台机器上是放的，见 build\frames-paint）；
+         *
+         *    所以这一版**不盖**：卡片一直留在屏幕上（不动它），撑大之后那 2~5 帧
+         *    （144Hz 上 ~15~40ms）由内容那一帧接上。要把这段再压短，只有把那次整窗合成
+         *    从 ~20ms 压到几毫秒（宿主改 GPU 合成），那是另一件工程。
+         *    空档里还有 WM_ERASEBKGND 兜底（见 m_fastErase）。
+         *
+         *    ④ 改状态放在合成**之后**：showMaximized() 实测要 10ms（过一遍系统消息 +
+         *    Qt 的窗口状态），放在前面就等于把这 10ms 白算进"屏幕上还没画好"的那段里。
+         *
+         *    状态这一步**不挪窗口**（矩形已经是可用区了），只把 WS_MAXIMIZE /
+         *    Qt 的窗口状态置上 —— 任务栏右键、Win+↓、Alt+Tab 那些语义才是对的。
+         *
+         *    为什么几何要用 setGeometry() 自己摆、不直接用 showMaximized() 摆：
+         *    showMaximized() 那一下，Windows 是**排队**把新尺寸告诉 Qt 的
+         *    （日志里 WM_SIZE 到了之后 ~14ms 才有 Qt Resize），而紧接着那次同步合成
+         *    会按 Qt 当时记着的**旧尺寸**裁（"帧：主窗口 paint 范围 1460x900@0,0"）——
+         *    新露出来的那大半屏就留下一帧黑。
+         *    setGeometry() 是 Qt 自己的调用，几何当场就更新，合成覆盖整块窗口。
+         */
+        flushContent();
+        m_widget->showMaximized();
+
+        /*
+         * 兜底：万一某个平台/DPI 组合下几何没落定，按**系统那边的真实矩形**
+         * （nativeFrameRect）核一次。判据不能用 Qt 的 geometry()：那一拍它记的可能
+         * 还是旧值，拿它比会永远"不相等"，于是白补一次 setGeometry()。
+         */
+        if (avail.isValid() && nativeFrameRect(m_widget) != avail) {
             trace(QStringLiteral("  几何没落定，补一次到可用区"));
             m_widget->setGeometry(avail);
         }
@@ -850,24 +1094,37 @@ void WindowHelper::applyState(bool maximize)
         m_normalRect = m_restoreAnchor;
     } else {
         /*
-         * 还原：同样交给系统退出最大化状态，再把几何对到还原矩形。
+         * 还原是同一条路反过来走：先把内容按卡片尺寸画好，再把窗口缩回去。
          *
-         * 顺序和最大化镜像：先 showNormal()（系统自己做"从最大化缩回来"的转场，
-         * 一样盖住表面重建），再把窗口摆到用户上次的位置和尺寸。
+         * 顺序反过来的话，录屏里能看到卡片上先挂 1~2 帧"最大化版左上角那一条"。
          */
         setState(false);
 
         const QRect to = clampToScreen(m_restoreAnchor.isValid() ? m_restoreAnchor
                                                                  : m_normalRect);
-        trace(QStringLiteral("applyState(还原)：交给系统 showNormal()（还原矩形 %1x%2@%3,%4）")
+        if (to.isValid() && to.width() > 0 && to.height() > 0)
+            placeContent(QRect(QPoint(0, 0), to.size()));
+
+        trace(QStringLiteral("applyState(还原)：showNormal() + 摆到还原矩形 %1x%2@%3,%4")
                   .arg(to.width()).arg(to.height()).arg(to.x()).arg(to.y()));
         m_widget->showNormal();
         if (to.isValid() && to.width() > 0 && to.height() > 0) {
             m_widget->setGeometry(to);
             m_normalRect = to;
         }
-        traceSnapshot(QStringLiteral("  已 showNormal()"));
+        flushContent();
     }
+
+    /*
+     * 几何都摆完了，**再把状态对一次**，然后才算圆角。
+     *
+     * 为什么必须重设：这一路里 showNormal() / showMaximized() 会触发 WindowStateChange，
+     * 而那一拍窗口的几何还是"另一半"（还原时还停在整块可用区上），
+     * updateMaximizedFromWindow() 按几何就把它又认成"最大化"了 —— 圆角随即被当成
+     * "最大化 = 直角"算掉，用户看到的就是"最大化还原之后四个圆角变成直角"（实测复现过：
+     * 还原后 GetWindowRgn 回 ERROR）。
+     */
+    setState(maximize);
 
     /* 最大化/还原会改变要不要圆角 */
     applyRoundedMask();
@@ -885,89 +1142,11 @@ void WindowHelper::applyState(bool maximize)
 }
 
 /*
- * 幕布：把窗口在**屏幕上**的形状裁成"卡片"，但**不让 Qt 知道**。
- *
- * 用户报的"点最大化那一下，三条白色间隙"就是这里的错：
- * 之前用的是 QWidget::setMask() —— setMask 除了给窗口设区域，还会让 Qt 把
- * **绘制**也裁在区域里。于是幕布后面那一圈（等下要露出来的地方）**根本画不上**，
- * 幕布一撤，露出来的就是没画过的像素（白 / 花），形状正好是卡片四周的那几条。
- *
- * 走 ::SetWindowRgn 就只有"窗口在屏幕上是这个形状"这一层意思，Qt 照旧把整个窗口
- * 画满 —— 所以只要在撤幕布之前先合成一次，露出来的那圈就已经是画好的内容。
- *
- * 注意 setMask 那套（Qt 自己的圆角遮罩）在这一段里必须让开：见 applyRoundedMask()
- * 开头那句"幕布期间不碰区域"。
- */
-void WindowHelper::curtainRegion(const QRect &contentInWindow)
-{
-    if (!m_widget || !contentInWindow.isValid())
-        return;
-
-    const qreal dpr = m_widget->devicePixelRatioF();
-    const QRect dev(QPoint(qRound(contentInWindow.x() * dpr), qRound(contentInWindow.y() * dpr)),
-                    QSize(qRound(contentInWindow.width() * dpr), qRound(contentInWindow.height() * dpr)));
-
-    QPainterPath path;
-    const int r = qRound(qMin<qreal>(m_cornerRadius * dpr, qMin(dev.width(), dev.height()) / 2.0));
-    if (r > 0)
-        path.addRoundedRect(QRectF(dev), r, r);
-    else
-        path.addRect(QRectF(dev));
-
-    m_curtain = QRegion(path.toFillPolygon().toPolygon());
-    m_curtainOn = true;
-    m_maskApplied = false;
-
-    /* Qt 这边先别裁绘制（这一步同时会把窗口区域清掉，紧接着我们设自己的） */
-    m_widget->clearMask();
-
-#if defined(Q_OS_WIN)
-    if (HWND hwnd = reinterpret_cast<HWND>(m_widget->internalWinId())) {
-        HRGN hrgn = m_curtain.toHRGN();          /* 设进去之后由系统接管，不要再 delete */
-        if (hrgn)
-            ::SetWindowRgn(hwnd, hrgn, TRUE);
-    }
-#else
-    m_widget->setMask(m_curtain);                /* 别的平台没有这层区分，退回 setMask */
-#endif
-}
-
-/*
- * 撤幕布：把区域交回 Qt 管（按 最大化/常规 算成空区域或圆角卡片）。
- *
- * ⚠ 这里必须**自己**把窗口区域撤掉，不能指望 applyRoundedMask() 里那句
- * clearMask()：curtainRegion() 已经 clearMask() 过一次，Qt 那边记的是"没有遮罩"，
- * 再调一次会被它当成空操作 —— 而幕布是直接 ::SetWindowRgn 设上去的，Qt 不知道，
- * 于是那块区域**永远留着**：窗口在屏幕上一直是"旧卡片那个形状"，
- * 用户看到的就是"最大化之后只有一块内容、四周露桌面"（白色背景）。
- *
- * 调用点都在"**已经把整窗画好之后**"（见 applyState 里那两步）——
- * 所以露出来的那一圈是画好的，不会有白边。
- */
-void WindowHelper::dropCurtain()
-{
-    if (!m_curtainOn)
-        return;
-    m_curtainOn = false;
-    m_curtain = QRegion();
-
-#if defined(Q_OS_WIN)
-    if (HWND hwnd = reinterpret_cast<HWND>(m_widget ? m_widget->internalWinId() : 0)) {
-        ::SetWindowRgn(hwnd, nullptr, TRUE);   /* nullptr = 恢复成"没有区域"的矩形窗口 */
-        trace(QStringLiteral("  幕布撤掉（SetWindowRgn(nullptr)）"));
-    }
-#endif
-
-    m_maskApplied = false;      /* 让下面这次一定重新落到窗口上 */
-    applyRoundedMask();
-}
-
-/*
  * 现在窗口在系统那边到底是什么形状（空 = 整块矩形）。
  *
- * 这一条是**地面真相**：幕布是不是真的撤掉了，日志里那几句"板"都是我们自己记的，
- * 只有这个数是系统答的。用户报的"最大化之后只有一块内容、四周露白"就是
- * "幕布没撤"，而这一点以前从日志里看不出来（Qt 那边以为没遮罩）。
+ * 这一条是**地面真相**：日志里那些"区域/遮罩"的记录都是我们自己记的，
+ * 只有这个数是系统答的（用户报的"最大化之后只有一块内容、四周露白"就是
+ * 窗口区域没撤干净，而这一点从 Qt 那边看不出来）。
  */
 QString WindowHelper::windowRegionText() const
 {
@@ -1198,26 +1377,33 @@ bool WindowHelper::eventFilter(QObject *watched, QEvent *event)
      */
     if (watched != m_widget) {
         if (watched == m_quickWidget) {
+            /*
+             * 日志里的名字**现读控件自己的类名**，别写死字面量：曾经有过第二条
+             * 内容层实现（GPU 内容层，见 src/main.cpp"GPU 合成的试验结论"），
+             * 那时候写死 "QQuickWidget" 会让日志撒谎（实测：明明写着 QQuickWidget，
+             * 控件其实是 QOpenGLWidget）。现读一行不多，留着。
+             */
+            const QString who = QString::fromLatin1(watched->metaObject()->className());
             if (event->type() == QEvent::Resize || event->type() == QEvent::Move) {
                 const QRect g = m_quickWidget->geometry();
-                trace(QStringLiteral("%1  %2x%3@%4,%5")
-                          .arg(event->type() == QEvent::Resize
-                                   ? QStringLiteral("QQuickWidget Resize")
-                                   : QStringLiteral("QQuickWidget Move"))
+                trace(QStringLiteral("%1 %2  %3x%4@%5,%6")
+                          .arg(who,
+                               event->type() == QEvent::Resize ? QStringLiteral("Resize")
+                                                              : QStringLiteral("Move"))
                           .arg(g.width()).arg(g.height()).arg(g.x()).arg(g.y()));
             } else if (event->type() == QEvent::Paint) {
                 /*
                  * "界面重画了一次" —— 内容跟没跟上窗口，只有这一条说得准。
                  *
-                 * 为什么不是 QQuickWindow::frameSwapped：这块界面是 QQuickWidget
-                 * （走 QQuickRenderControl 渲染进 FBO），**没有换页那一下**，
+                 * 为什么不是 QQuickWindow::frameSwapped：这块界面走的是
+                 * QQuickRenderControl 渲染进 FBO，**没有换页那一下**，
                  * frameSwapped 一次都不发（实测：挂上去以后日志里一条都没有）。
                  * 重画则是真的会走到这里的。
                  *
                  * 只在切换后那一小段里记（见 traceFrames）：平时 QML 一动就是一串。
                  */
                 if (m_traceFramesUntil >= 0 && m_traceClock.elapsed() <= m_traceFramesUntil)
-                    trace(QStringLiteral("帧：界面重画（QQuickWidget paint）"));
+                    trace(QStringLiteral("帧：界面重画（%1 paint）").arg(who));
             }
         }
         return QObject::eventFilter(watched, event);
@@ -1247,17 +1433,30 @@ bool WindowHelper::eventFilter(QObject *watched, QEvent *event)
 
     case QEvent::Paint: {
         /*
+         * "先把界面擦成底色"这一帧（见 applyState 里 ②b）：只铺界面底色，不合成内容控件。
+         *
+         * 为什么要它：窗口变大的时候，系统会把"变大前那一张画面"拷到新表面的左上角。
+         * 拷过去的是整块界面的话，用户看到的就是"界面跑到左上角、再放大"（用户报的原话）；
+         * 先把它擦成一片底色再换几何，拷过去的就只是底色 —— 屏幕上成了一次"整块铺满底色"，
+         * 没有"界面跑过去"这件事。
+         */
+        if (m_blankBackdrop) {
+            trace(QStringLiteral("  帧：铺底色（%1x%2）")
+                      .arg(m_widget->width()).arg(m_widget->height()));
+            QPainter blank(m_widget);
+            blank.fillRect(QRect(QPoint(0, 0), m_widget->size()), QColor(0x00, 0x00, 0x00));
+            return true;
+        }
+        /*
          * 主机窗口自己重画（整窗合成的时机，见 flushContent）。
          *
-         * 换尺寸那一小段里把**绘制范围**也记下来：幕布挂着的时候这一笔必须覆盖
-         * **整块窗口**（幕布只裁屏幕形状，不裁绘制）—— 要是只有卡片那点大，
-         * 撤幕布时露出来的那几条就是没画过的像素（用户报的"三条白色间隙"）。
+         * 换尺寸那一小段里把**绘制范围**记下来，用来确认这一拍覆盖的是整块窗口
+         * （只覆盖一小块的话，放开窗口时露出来的就是没画过的像素）。
          */
         if (m_fastErase) {
             const QRect r = static_cast<QPaintEvent *>(event)->region().boundingRect();
-            trace(QStringLiteral("  帧：主窗口 paint 范围 %1x%2@%3,%4（幕布%5）")
-                      .arg(r.width()).arg(r.height()).arg(r.x()).arg(r.y())
-                      .arg(m_curtainOn ? QStringLiteral("挂着") : QStringLiteral("已撤")));
+            trace(QStringLiteral("  帧：主窗口 paint 范围 %1x%2@%3,%4")
+                      .arg(r.width()).arg(r.height()).arg(r.x()).arg(r.y()));
         }
         break;
     }

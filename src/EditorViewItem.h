@@ -182,6 +182,18 @@ public:
     static EditorViewItem *instance() { return s_instance; }
 
     /*
+     * 让**所有**编辑器实例按当前 QML 布局重新摆一次原生控件（主编栏 + 分栏镜像）。
+     *
+     * 为什么需要它（用户报的"最大化时编辑区还挂在旧坐标上飘着"）：
+     * 编辑区那个原生 QScintilla 子窗的位置本来是 applyGeometry() 里按 QML 布局算的，
+     * 而它挂在 QML 的 geometryChange 上 —— 主窗口换尺寸那一下，QML 布局和窗口几何
+     * 谁先谁后不保证；窗口先变大的话，编辑器就在旧坐标上露一帧（屏幕上就是"一块
+     * 带着旧内容的窗口飘在中间"）。WindowHelper 在换几何**之前**调一次这个，
+     * 让它先按新布局摆到目标坐标上。
+     */
+    static void syncAllGeometry();
+
+    /*
      * 代码折叠（第 1 列那个折叠边距）与当前行行号高亮，都在 applyMargins /
      * applyMarginTheme 里落地，见 .cpp 里的说明。
      */
@@ -941,4 +953,6 @@ private:
     static ClipboardStore *s_store;
     static QWidget *s_hostWidget;
     static EditorViewItem *s_instance;
+    /* 所有活着的实例（syncAllGeometry 要挨个摆，见那边的说明） */
+    static QVector<QPointer<EditorViewItem>> s_all;
 };
