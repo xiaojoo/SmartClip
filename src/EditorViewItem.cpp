@@ -63,6 +63,7 @@
 #include <Qsci/qsciscintilla.h>
 
 #include <algorithm>
+#include <utility>       /* std::as_const */
 
 /*
  * 把 QScintilla 包成 QML 可用的 Item。
@@ -84,6 +85,9 @@ ClipboardStore *EditorViewItem::s_store = nullptr;
 QWidget *EditorViewItem::s_hostWidget = nullptr;
 EditorViewItem *EditorViewItem::s_instance = nullptr;
 QVector<QPointer<EditorViewItem>> EditorViewItem::s_all;
+QVector<std::weak_ptr<EditorViewItem::Doc>> EditorViewItem::s_pool;
+int EditorViewItem::s_untitledCounter = 0;
+int EditorViewItem::s_nextDocId = 0;
 
 namespace {
 
@@ -203,11 +207,12 @@ QColor themeColorFor(const QString &description) {
 }
 
 bool isCommentDescription(const QString &description) {
-    return description.toLower().contains(QStringLiteral("comment"));
+    /* contains(..., Qt::CaseInsensitive)：不区分大小写地找，省掉 toLower() 那份拷贝 */
+    return description.contains(QLatin1String("comment"), Qt::CaseInsensitive);
 }
 
 bool isKeywordDescription(const QString &description) {
-    return description.toLower().contains(QStringLiteral("keyword"));
+    return description.contains(QLatin1String("keyword"), Qt::CaseInsensitive);
 }
 
 /* 语言表：id 与显示名。id 同时是 lexer 的键。 */
@@ -266,6 +271,34 @@ EditorViewItem::EditorViewItem(QQuickItem *parent) : QQuickItem(parent) {
      * 谁是主编辑器一目了然，和创建顺序无关。
      */
     s_all.append(this);
+
+    /*
+     * 两栏之间只连"提醒对方重画标签"这一路信号（见 tabsChanged）。
+     *
+     * 正文**不需要**同步：两栏看的是池子里同一份 Doc，底层就是同一个
+     * Scintilla 文档。这里连的是"标题 / 修改标记变了""池子里多了一份"这类
+     * 界面层的事 —— 对方收到就重算自己的标签栏。
+     *
+     * 遍历用**下标**：s_all / s_pool / m_docs 都是隐式共享的 QList，范围 for
+     * 在非 const 容器上会调 begin() 而把共享**脱开**（多一次深拷贝，clazy 的
+     * range-loop-detach 报的就是这个）；下标 + at() 是 const 的，一眼能看出
+     * "这是只读遍历"。
+     */
+    for (int i = 0; i < s_all.size(); ++i) {
+        EditorViewItem *other = s_all.at(i).data();
+        if (!other || other == this)
+            continue;
+        connect(other, &EditorViewItem::tabsChanged, this,
+                [this]() { refreshTabs(); }, Qt::QueuedConnection);
+        connect(this, &EditorViewItem::tabsChanged, other,
+                [other]() { if (other) other->refreshTabs(); }, Qt::QueuedConnection);
+    }
+
+    /*
+     * 别处（另一栏）已经有文档了，而这一栏是后来才建出来的吗？
+     * 不用管 —— 新栏开局是空的，池子里的东西不进它的标签栏。
+     * "分栏时把当前这一份拉过来"由 QML 显式调 openPoolDocument()。
+     */
 }
 
 EditorViewItem::~EditorViewItem() {
@@ -283,8 +316,9 @@ EditorViewItem::~EditorViewItem() {
  * 坐标超出旧窗口那部分是裁掉的，看不出来；窗口一变就是正好那个位置）。
  */
 void EditorViewItem::syncAllGeometry() {
-    for (const QPointer<EditorViewItem> &item : s_all) {
-        if (item)
+    /* 下标遍历（理由同上：s_all 是隐式共享的 QList，只读就别脱开它） */
+    for (int i = 0; i < s_all.size(); ++i) {
+        if (EditorViewItem *item = s_all.at(i).data())
             item->applyGeometry();
     }
 }
@@ -315,14 +349,22 @@ public:
         setFocusPolicy(Qt::NoFocus);
     }
 
-    /* 要补的线：控件坐标的 x + 颜色（宽度固定 1px） */
+    /*
+     * 要补的线：控件坐标的 x + 颜色（宽度固定 1px）。
+     *
+     * 不是 const（外面算完要整个赋进来，见 updateBottomLines），所以
+     * paintEvent 里用**下标**遍历：QVector 是隐式共享的，范围 for 在非 const
+     * 成员上会调 begin() 而把共享脱开（clazy 的 range-loop-detach）。
+     */
     QVector<QPair<int, QColor>> lines;
 
 protected:
     void paintEvent(QPaintEvent *) override {
         QPainter painter(this);
-        for (const QPair<int, QColor> &line : lines)
+        for (int i = 0; i < lines.size(); ++i) {
+            const QPair<int, QColor> &line = lines.at(i);
             painter.fillRect(QRect(line.first, 0, 1, height()), line.second);
+        }
     }
 };
 
@@ -424,6 +466,8 @@ void EditorViewItem::ensureWrapped() {
         emit modifiedChanged();
         emit documentsChanged();
         emit undoStateChanged();
+        /* 另一栏标签上那个"未保存"的点也要跟着亮 / 灭 */
+        emit tabsChanged();
     });
 
     connect(m_sci, &QsciScintilla::textChanged, this, [this]() {
@@ -432,12 +476,12 @@ void EditorViewItem::ensureWrapped() {
         applyMargins();
         emit statsChanged();
         /*
-         * 分栏：源那边正文一变就推给镜像（直接调，不走队列 —— 用户要的是
-         * "在左边打一个字，右边立刻跟上"）。m_syncing 是防回环的闸门：
-         * 镜像灌正文时也会发这个信号，那一次必须挡住。
+         * 另一栏如果正看着**同一份文档**，它的画面也得重画（两栏是同一个
+         * 底层文档，Scintilla 不会自己通知另一个视图 —— 不通知就是"在左边
+         * 打字，右边那半屏还是旧的"）。走 tabsChanged 那条广播，见
+         * Main.qml 里两个编辑器的 Connections。
          */
-        if (!m_syncing && m_source)
-            m_source->syncFromSource();
+        emit tabsChanged();
     });
 
     connect(m_sci, &QsciScintilla::linesChanged, this, [this]() {
@@ -445,9 +489,11 @@ void EditorViewItem::ensureWrapped() {
         emit statsChanged();
     });
 
-        connect(m_sci, &QsciScintilla::cursorPositionChanged, this, [this](int, int) {
-        if (Doc *d = currentDoc())
-            d->cursorPos = long(m_sci->SendScintilla(QsciScintillaBase::SCI_GETCURRENTPOS));
+    connect(m_sci, &QsciScintilla::cursorPositionChanged, this, [this](int, int) {
+        /* 光标是**这一栏自己的**视图状态（另一栏可能正看着别的文件） */
+        if (hasDocument())
+            m_docs[currentDocSlot()].cursorPos =
+                long(m_sci->SendScintilla(QsciScintillaBase::SCI_GETCURRENTPOS));
         emit cursorChanged();
     });
 
@@ -498,18 +544,25 @@ void EditorViewItem::detach() {
      *   控件销毁，这些壳子只能直接丢掉（进程退出前的一次性泄漏，
      *   换的是不崩）。
      *
+     * 现在正文句柄是**共享**的（池子里那份 Doc 用 shared_ptr 持有，
+     * 每个栏的 DocRef 各拷一份 QsciDocument）—— 所以这里只把**自己**那几份
+     * 壳子丢掉，池子里那份由 shared_ptr 的最后一个持有者负责（见 unbind /
+     * releaseDocument 的说明）。自己这份先脱离视图，别的栏照样显示得好好的。
+     *
      * lexer 的父对象就是 m_sci，随它一起销毁，所以这里只清表、不删对象。
      */
     if (m_sci) {
         m_sci->setDocument(QsciDocument());
 
-        for (Doc &d : m_docs)
-            delete d.document;
+        /* 自己那份壳子放掉（引用计数减一，不是删文档） */
+        for (DocRef &r : m_docs)
+            r.m_doc = QsciDocument();
 
         delete m_scratch;
     }
 
     m_docs.clear();
+    m_open.clear();
     m_current = -1;
     m_scratch = nullptr;
 
@@ -1446,7 +1499,7 @@ void EditorViewItem::applyLanguageLexer() {
     if (!m_sci)
         return;
 
-    const QString lang = hasDocument() ? m_docs[m_current].language
+    const QString lang = hasDocument() ? m_docs.at(currentDocSlot()).doc->language
                                        : QStringLiteral("plain");
 
     if (lang == QStringLiteral("plain")) {
@@ -1610,8 +1663,11 @@ void EditorViewItem::updateHorizontalScroll() {
      * 做法：**实际量**最长行的像素宽度。
      *   1) 先按字符数找最长行（只比长度，很便宜）；
      *   2) 只对那一行量一次实际像素宽度；
-     *   3) 放得下 -> scrollWidth 设成**一页文本宽**（hMax = 0，横条隐藏）；
-     *      超了   -> 设成内容宽度（hMax > 0，横条出现）。
+     *   3) scrollWidth 就设成这个内容宽度 —— 放得下时它比一页窄（hMax = 0，
+     *      横条隐藏），超了时它比一页宽（hMax > 0，横条出现），两件事都由
+     *      Scintilla 那一次减法判，这里不再自己比"放不放得下"。
+     *      **别**改成"放得下时设成一页宽"：那样 scrollWidth 就把"当时面板多宽"
+     *      记了进去，拖动分栏把它变窄的那一拍会闪出横条，见下面那段说明。
      *
      * 注意不能用"字符数 × 字符宽 × 系数"估算：那个系数会多算一截，
      * 结果就是横条出现、还能向右滚正好多算的那些像素（实测过）。
@@ -1680,15 +1736,25 @@ void EditorViewItem::updateHorizontalScroll() {
     m_lastContentWidth = contentWidth;
 
     /*
-     * 放得下：把 scrollWidth 设成**一页文本宽**（= Scintilla 的 hNewPage），
-     * 横向范围 hMax = scrollWidth - hNewPage 正好是 0 -> 横条自动隐藏。
-     * 需要横滚：设成内容宽度，hMax = 内容宽 - 一页宽 > 0 -> 横条出现。
-     * 两个分支都 > 0，满足 Scintilla 的断言要求。
+     * scrollWidth 只由**内容宽度**决定 —— 放得下时它天然比一页窄，范围就是 0。
+     *
+     * 为什么不能"放得下就写成一页文本宽"（原来就是这么写的）：那样这个值顺手
+     * 把"设它的那一刻面板有多宽"也记了进去。拖动分栏分隔线 / 拉窗口把它变窄的
+     * **那一拍**，Scintilla 那边
+     *     hMax = scrollWidth - 新的 hNewPage
+     * 就成了正数（见 third/qscintilla/src/ScintillaQt.cpp 的 ModifyScrollBars），
+     * 横条当场冒出来闪一下，等下一拍 updateHorizontalScroll() 才压回去 ——
+     * 用户报的"拖分隔线时底下横条一闪一闪、正文根本没超出屏幕"就是这个。
+     *
+     * 换成内容宽度之后，这个值跟面板宽度无关：变宽变窄都不动它，"够不够放"
+     * 全交给 Scintilla 那次减法判。拖动过程中它一直是同一个数，横条自然不闪。
+     *
+     * 一个字都没有时给 1：SCI_SETSCROLLWIDTH 要求 wParam > 0（Editor.cpp:6659），
+     * 而 hNewPage 至少也有几十像素，hMax 仍然是 0。
      */
-    const long scrollWidth = (contentWidth <= pageWidth) ? pageWidth
-                                                         : contentWidth;
+    const long scrollWidth = qMax(1L, contentWidth);
     m_sci->SendScintilla(QsciScintillaBase::SCI_SETSCROLLWIDTH,
-                         (unsigned long)qMax(1L, scrollWidth));
+                         (unsigned long)scrollWidth);
 
     /*
      * 横条可能刚出现 / 刚收回去 —— 那一条的高度变了，补线要跟着排。
@@ -1780,6 +1846,32 @@ void EditorViewItem::updateBottomLines() {
         if (auto *o = static_cast<BottomLines *>(m_bottomLines.data()))
             o->raise();
     });
+}
+
+/*
+ * 盯住**所有祖先**的位置 / 尺寸变化，一有就重摆原生控件。
+ *
+ * 原生子窗口是按**场景坐标**摆的（applyGeometry 把 item 的场景位置换算成宿主
+ * 控件坐标），而 item 自己的 geometryChange 只在它相对父项的几何变化时才发：
+ * 分栏那两个占位壳（mainPane / mirrorPaneHolder）**整体挪位置、尺寸不变**时
+ * （上下分栏布局落定那一下，下面那一栏的 y 变、高不变）它不发 ——
+ * 原生子窗口就停在旧位置，压住中间那条分隔线，屏幕上看着就是"没分开"
+ * （用户报的"上下分栏没有展开"）。
+ *
+ * 祖先的 x / y / width / height 都是现成的 NOTIFY 信号，接上就是同步的，
+ * 不落后任何一拍。链子很短（占位壳 → 正文卡片 → 编辑区根），接一次就够；
+ * 父项换了（ItemParentHasChanged）再走一遍。
+ */
+void EditorViewItem::watchAncestorGeometry() {
+    for (QQuickItem *p = parentItem(); p; p = p->parentItem()) {
+        if (m_watchedAncestors.contains(p))
+            continue;
+        connect(p, &QQuickItem::xChanged, this, &EditorViewItem::applyGeometry);
+        connect(p, &QQuickItem::yChanged, this, &EditorViewItem::applyGeometry);
+        connect(p, &QQuickItem::widthChanged, this, &EditorViewItem::applyGeometry);
+        connect(p, &QQuickItem::heightChanged, this, &EditorViewItem::applyGeometry);
+        m_watchedAncestors.append(p);
+    }
 }
 
 void EditorViewItem::applyGeometry() {
@@ -1982,10 +2074,29 @@ void EditorViewItem::itemChange(ItemChange change, const ItemChangeData &value) 
     case ItemSceneChange:
         if (value.window) {
             ensureWrapped();
+            watchAncestorGeometry();
             applyGeometry();
         } else if (m_sciWidget) {
             m_sciWidget->hide();
         }
+        break;
+    /*
+     * 场景位置变了也要重新摆那块原生控件。
+     *
+     * 为什么 geometryChange 不够：那个只在**本 item 自己**的几何（相对父项）
+     * 变的时候才发。分栏之后两栏各自挂在一个占位壳里（mainPane /
+     * mirrorPaneHolder），壳**只挪位置、尺寸不变**时（上下分栏那次布局落定：
+     * 下面那一栏的 y 从中间值收到最终值），壳里的 item 相对坐标一点没变 ——
+     * geometryChange 不发，原生子窗口就停在旧位置上，压住中间那条分隔线，
+     * 屏幕上看着就是"上面那一栏铺满了、没分开"（用户报的"上下分栏没有展开"）。
+     *
+     * Qt Quick 6 没有"场景位置变了"这种 change（QQuickItem::ItemChange 里没有
+     * 这一项），所以改成盯**所有祖先**的 x / y / width / height 信号
+     * （见 watchAncestorGeometry）：祖先一动，立刻按场景坐标重摆。
+     */
+    case ItemParentHasChanged:
+        watchAncestorGeometry();
+        applyGeometry();
         break;
     case ItemVisibleHasChanged:
         if (m_sciWidget) {
@@ -2394,30 +2505,64 @@ void EditorViewItem::setReadOnly(bool on) {
 /* ------------------------------------------------------------------ */
 
 EditorViewItem::Doc *EditorViewItem::currentDoc() {
-    if (m_current < 0 || m_current >= m_docs.size())
+    const int slot = currentDocSlot();
+    if (slot < 0)
         return nullptr;
-    return &m_docs[m_current];
+    return m_docs.at(slot).doc.get();
+}
+
+/* 当前标签对应池子里的第几份（-1 = 这一栏没打开任何文档） */
+int EditorViewItem::currentDocSlot() const {
+    if (m_current < 0 || m_current >= m_open.size())
+        return -1;
+    return m_open.at(m_current);
+}
+
+int EditorViewItem::slotOfTab(int tabIndex) const {
+    if (tabIndex < 0 || tabIndex >= m_open.size())
+        return -1;
+    return m_open.at(tabIndex);
+}
+
+int EditorViewItem::tabOfSlot(int slot) const {
+    return m_open.indexOf(slot);
+}
+
+int EditorViewItem::openDocumentById(int docId, bool activate) {
+    const int slot = tabIndexOfDocId(docId);
+    if (slot < 0)
+        return -1;
+    const int existing = tabOfSlot(slot);
+    if (existing >= 0) {
+        if (activate)
+            activateDocument(existing);
+        return existing;
+    }
+    m_open.append(slot);
+    const int tab = m_open.size() - 1;
+    if (activate)
+        activateDocument(tab);
+    else
+        emit documentsChanged();
+    return tab;
 }
 
 QString EditorViewItem::displayName() const {
     if (!hasDocument())
         return QString();
-    const Doc &d = m_docs.at(m_current);
-    if (!d.filePath.isEmpty())
-        return QFileInfo(d.filePath).fileName();
-    return QStringLiteral("未命名 %1").arg(d.untitledNo);
+    return titleOf(*m_docs.at(currentDocSlot()).doc);
 }
 
 QString EditorViewItem::filePath() const {
     if (!hasDocument())
         return QString();
-    return m_docs.at(m_current).filePath;
+    return m_docs.at(currentDocSlot()).doc->filePath;
 }
 
 bool EditorViewItem::modified() const {
     if (!hasDocument())
         return false;
-    return m_docs.at(m_current).modified;
+    return m_docs.at(currentDocSlot()).doc->modified;
 }
 
 void EditorViewItem::setModified(bool m) {
@@ -2430,23 +2575,25 @@ void EditorViewItem::setModified(bool m) {
     m_bulkLoading = true;
     m_sci->SendScintilla(QsciScintillaBase::SCI_SETSAVEPOINT);
     m_bulkLoading = false;
-    m_docs[m_current].modified = false;
+    m_docs[currentDocSlot()].doc->modified = false;
     emit modifiedChanged();
     emit documentsChanged();
+    emit tabsChanged();
 }
 
 QString EditorViewItem::language() const {
     if (!hasDocument())
         return QStringLiteral("plain");
-    return m_docs.at(m_current).language;
+    return m_docs.at(currentDocSlot()).doc->language;
 }
 
 void EditorViewItem::setLanguage(const QString &id) {
     if (!hasDocument() || id.isEmpty())
         return;
-    if (m_docs.at(m_current).language == id)
+    Doc *doc = m_docs.at(currentDocSlot()).doc.get();
+    if (doc->language == id)
         return;
-    m_docs[m_current].language = id;
+    doc->language = id;
 
     /*
      * 必须走 applyStyle()，不能只调 applyLanguageLexer()。
@@ -2459,20 +2606,22 @@ void EditorViewItem::setLanguage(const QString &id) {
     applyStyle();
     emit languageChanged();
     emit documentsChanged();
+    emit tabsChanged();
 }
 
 QString EditorViewItem::encoding() const {
     if (!hasDocument())
         return QStringLiteral("UTF-8");
-    return m_docs.at(m_current).encoding;
+    return m_docs.at(currentDocSlot()).doc->encoding;
 }
 
 void EditorViewItem::setEncoding(const QString &name) {
     if (!hasDocument() || name.isEmpty())
         return;
-    if (m_docs.at(m_current).encoding == name)
+    Doc *doc = m_docs.at(currentDocSlot()).doc.get();
+    if (doc->encoding == name)
         return;
-    m_docs[m_current].encoding = name;
+    doc->encoding = name;
     emit encodingChanged();
 }
 
@@ -2505,9 +2654,17 @@ void EditorViewItem::setEolMode(const QString &name) {
 }
 
 QVariantList EditorViewItem::documents() const {
+    /*
+     * 只列**这一栏打开着**的文档（不是整个池子）。
+     *
+     * 两个栏各有自己的标签栏 —— 这正是"像 VS Code 那样，两栏是独立的 tab"
+     * 那件事；池子里有哪几份是全局的，界面上看到的是"这一栏开着哪几份"。
+     * 对外那个 index 是**标签下标**（0 = 最左边那条），和 QML 里点标签、
+     * 关标签用的是同一套。
+     */
     QVariantList out;
-    for (int i = 0; i < m_docs.size(); ++i) {
-        const Doc &d = m_docs.at(i);
+    for (int i = 0; i < m_open.size(); ++i) {
+        const Doc &d = *m_docs.at(m_open.at(i)).doc;
         QVariantMap m;
         m.insert(QStringLiteral("index"), i);
         m.insert(QStringLiteral("title"), titleOf(d));
@@ -2515,6 +2672,8 @@ QVariantList EditorViewItem::documents() const {
         m.insert(QStringLiteral("modified"), d.modified);
         m.insert(QStringLiteral("active"), i == m_current);
         m.insert(QStringLiteral("language"), d.language);
+        /* 文档号：分栏那边认"两栏看的是不是同一份"用它（见 currentDocId） */
+        m.insert(QStringLiteral("docId"), d.id);
         out.append(m);
     }
     return out;
@@ -2619,11 +2778,15 @@ QString EditorViewItem::languageLabel(const QString &id) const {
 }
 
 int EditorViewItem::indexOfPath(const QString &path) const {
+    /*
+     * 找的是**这一栏标签栏里**的那一条（返回值是标签下标，QML 拿它切标签）。
+     * 池子是两栏共用的，所以"池子里有"不等于"这一栏开着"。
+     */
     const QString abs = QFileInfo(path).absoluteFilePath();
-    for (int i = 0; i < m_docs.size(); ++i) {
-        if (!m_docs.at(i).filePath.isEmpty()
-            && QFileInfo(m_docs.at(i).filePath).absoluteFilePath() == abs)
-            return i;
+    for (int tab = 0; tab < m_open.size(); ++tab) {
+        const QString known = m_docs.at(m_open.at(tab)).doc->filePath;
+        if (!known.isEmpty() && QFileInfo(known).absoluteFilePath() == abs)
+            return tab;
     }
     return -1;
 }
@@ -2633,31 +2796,35 @@ int EditorViewItem::newDocument() {
     if (!m_sci)
         return -1;
 
-    /* 先把当前文档的滚动位置和光标记下来，再往列表里加新文档 */
+    /* 先把当前文档的滚动位置和光标记下来，再往标签列表里加新文档 */
     if (hasDocument())
-        storeViewState();
+        saveCurrentViewState();
 
-    Doc d;
-    d.document = new QsciDocument();
-    d.language = QStringLiteral("plain");
-    d.untitledNo = ++m_untitledCounter;
-    m_docs.append(d);
+    auto doc = std::make_shared<Doc>();
+    doc->language = QStringLiteral("plain");
+    doc->untitledNo = ++s_untitledCounter;
 
-    const int index = m_docs.size() - 1;
-    m_current = index;
+    /* 进池子（广播给所有栏）+ 进这一栏的标签栏 + 切过去 */
+    appendPoolDocument(doc);
+    const int tab = openDocumentById(doc->id, true);
+    if (tab < 0)
+        return -1;
 
-    m_sci->setDocument(*m_docs[index].document);
+    DocRef &ref = m_docs[m_open.at(tab)];
+    ref.m_doc = doc->m_doc;
+    ref.shown = true;
+    m_sci->setDocument(ref.m_doc);
     applyStyle();
     applyViewOptions();
 
-    m_docs[index].modified = false;
-    m_docs[index].cursorPos = 0;
-    m_docs[index].firstVisibleLine = 0;
-    m_docs[index].xOffset = 0;
+    ref.cursorPos = 0;
+    ref.firstVisibleLine = 0;
+    ref.xOffset = 0;
 
     emitDocumentsState();
+    emit tabsChanged();
     QTimer::singleShot(0, this, [this]() { updateHorizontalScroll(); });
-    return index;
+    return tab;
 }
 
 int EditorViewItem::openFile(const QString &path) {
@@ -2741,21 +2908,27 @@ int EditorViewItem::openFile(const QString &path) {
 
     setContentCurrent(text);
 
-    m_docs[m_current].filePath = abs;
-    m_docs[m_current].encoding = detectedEncoding;
-    m_docs[m_current].language = languageForPath(abs);
+    Doc *doc = m_docs[currentDocSlot()].doc.get();
+    doc->filePath = abs;
+    doc->encoding = detectedEncoding;
+    doc->language = languageForPath(abs);
 
     m_sci->SendScintilla(QsciScintillaBase::SCI_SETEOLMODE, eol);
     m_sci->SendScintilla(QsciScintillaBase::SCI_CONVERTEOLS, eol);
 
     applyStyle();
     applyViewOptions();
-    m_docs[m_current].modified = false;
+    doc->modified = false;
     m_sci->SendScintilla(QsciScintillaBase::SCI_SETSAVEPOINT);
 
     emitDocumentsState();
+    /*
+     * 标题 / 语言刚填上，别的栏的标签栏也得跟着重画（它们在广播那一刻
+     * 看到的还是一份"未命名 N"，因为当时路径还没填）。
+     */
+    emit tabsChanged();
     QTimer::singleShot(0, this, [this]() { updateHorizontalScroll(); });
-    return m_current;
+    return index;
 }
 
 QString EditorViewItem::currentText() const {
@@ -2802,9 +2975,13 @@ void EditorViewItem::setContentCurrent(const QString &text) {
 
     if (Doc *d = currentDoc()) {
         d->modified = false;
-        d->cursorPos = 0;
-        d->firstVisibleLine = 0;
-        d->xOffset = 0;
+        /* 视图状态（光标 / 滚动）是这一栏自己的，记在自己的账上 */
+        if (hasDocument()) {
+            DocRef &r = m_docs[currentDocSlot()];
+            r.cursorPos = 0;
+            r.firstVisibleLine = 0;
+            r.xOffset = 0;
+        }
     }
 }
 
@@ -2817,10 +2994,10 @@ bool EditorViewItem::saveCurrent() {
      * 剪贴板内容现在也是真实文件了（日期目录里的 md），从左边点开就带着路径，
      * 所以这里只剩"未命名空白文档"这一种情况。
      */
-    const Doc &d = m_docs.at(m_current);
-    if (d.filePath.isEmpty())
+    const QString path = m_docs.at(currentDocSlot()).doc->filePath;
+    if (path.isEmpty())
         return false;
-    return saveDocument(m_current, d.filePath);
+    return saveDocument(m_current, path);
 }
 
 bool EditorViewItem::updateDocumentPath(const QString &oldPath, const QString &newPath) {
@@ -2831,15 +3008,16 @@ bool EditorViewItem::updateDocumentPath(const QString &oldPath, const QString &n
     const QString to = QFileInfo(newPath).absoluteFilePath();
 
     bool found = false;
-    for (int i = 0; i < m_docs.size(); ++i) {
-        if (QFileInfo(m_docs.at(i).filePath).absoluteFilePath() != from)
+    for (int slot = 0; slot < m_docs.size(); ++slot) {
+        Doc *d = m_docs.at(slot).doc.get();
+        if (QFileInfo(d->filePath).absoluteFilePath() != from)
             continue;
-        m_docs[i].filePath = to;
+        d->filePath = to;
         /* md -> md 语言不变；别的扩展名顺手跟着认一遍 */
         const QString guess = languageForPath(to);
-        if (guess != m_docs.at(i).language) {
-            m_docs[i].language = guess;
-            if (i == m_current) {
+        if (guess != d->language) {
+            d->language = guess;
+            if (slot == currentDocSlot()) {
                 applyLanguageLexer();
                 emit languageChanged();
             }
@@ -2850,6 +3028,7 @@ bool EditorViewItem::updateDocumentPath(const QString &oldPath, const QString &n
     if (found) {
         emit documentsChanged();
         emit currentChanged();
+        emit tabsChanged();
     }
     return found;
 }
@@ -2861,7 +3040,8 @@ bool EditorViewItem::saveCurrentAs(const QString &path) {
 }
 
 bool EditorViewItem::saveDocument(int index, const QString &path) {
-    if (index < 0 || index >= m_docs.size() || path.isEmpty())
+    const int slot = slotOfTab(index);
+    if (slot < 0 || path.isEmpty())
         return false;
     if (!m_sci)
         return false;
@@ -2873,7 +3053,7 @@ bool EditorViewItem::saveDocument(int index, const QString &path) {
     }
 
     const QString text = m_sci->text();
-    const QByteArray bytes = encodeText(text, m_docs.at(index).encoding);
+    const QByteArray bytes = encodeText(text, m_docs.at(slot).doc->encoding);
 
     QFile file(path);
     if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
@@ -2890,13 +3070,14 @@ bool EditorViewItem::saveDocument(int index, const QString &path) {
     }
 
     const QString abs = QFileInfo(path).absoluteFilePath();
-    m_docs[index].filePath = abs;
+    Doc *doc = m_docs[slot].doc.get();
+    doc->filePath = abs;
 
     /* 未命名文件另存为之后按扩展名认语言 */
-    if (m_docs.at(index).language == QLatin1String("plain")) {
+    if (doc->language == QLatin1String("plain")) {
         const QString guess = languageForPath(abs);
         if (guess != QLatin1String("plain")) {
-            m_docs[index].language = guess;
+            doc->language = guess;
             applyLanguageLexer();
             emit languageChanged();
         }
@@ -2905,87 +3086,285 @@ bool EditorViewItem::saveDocument(int index, const QString &path) {
     m_bulkLoading = true;
     m_sci->SendScintilla(QsciScintillaBase::SCI_SETSAVEPOINT);
     m_bulkLoading = false;
-    m_docs[index].modified = false;
+    doc->modified = false;
 
     emit saved(abs);
     emit modifiedChanged();
     emit documentsChanged();
     emit currentChanged();
+    emit tabsChanged();
     return true;
 }
 
-void EditorViewItem::closeDocument(int index) {
-    if (index < 0 || index >= m_docs.size())
+/* ------------------------------------------------------------------ */
+/* 文档池（两个栏共用一份，见 EditorViewItem.h 里那段说明）              */
+/* ------------------------------------------------------------------ */
+
+void EditorViewItem::detachFromCurrentDocument() {
+    /*
+     * 让视图**先离开**当前文档。
+     *
+     * QScintilla 的视图（QsciScintilla::doc）一旦析构 / 切走，会去动那份
+     * 底层文档；文档已经被放掉之后再动它就是读已释放内存。所以任何一次
+     * "放掉一份文档"之前都必须先走这里（原来那个版本在 detach() 的注释里
+     * 记了这个坑，现在收成一个函数）。
+     */
+    if (!m_sci)
         return;
+    m_sci->setDocument(*m_scratch);
+}
 
-    if (!m_sci) {
-        delete m_docs.at(index).document;
-        m_docs.remove(index);
-        m_current = m_docs.isEmpty() ? -1 : qMin(m_current, m_docs.size() - 1);
-        emitDocumentsState();
-        return;
-    }
+int EditorViewItem::appendPoolDocument(const std::shared_ptr<Doc> &doc) {
+    if (!doc)
+        return -1;
 
-    const bool wasCurrent = (index == m_current);
+    if (doc->id <= 0)
+        doc->id = ++s_nextDocId;
 
-    /* 关掉的是当前文档时，先挑好接替者 */
-    int successor = -1;
-    if (wasCurrent) {
-        storeViewState();
-        if (m_docs.size() > 1)
-            successor = (index == m_docs.size() - 1) ? index - 1 : index + 1;
-    }
+    s_pool.append(doc);
 
     /*
-     * 顺序要紧：先让视图离开这份文档，再删它的 QsciDocument。
-     *
-     * 反过来的话，QScintilla 的 doc 成员还挂在已经释放的 pdoc 上，
-     * 下一次 setDocument / 析构就是读已释放内存。
+     * 广播给**所有**栏（包括自己）：各栏的文档表都跟着加一条（只加账，
+     * 不进标签栏 —— 进不进标签栏由这一栏自己决定，见 openPoolDocument）。
      */
-    if (wasCurrent) {
-        if (successor >= 0)
-            m_sci->setDocument(*m_docs[successor].document);
-        else
-            m_sci->setDocument(*m_scratch);
+    for (int i = 0; i < s_all.size(); ++i) {
+        if (EditorViewItem *any = s_all.at(i).data())
+            any->syncPoolFromRegistry();
+    }
+    return tabIndexOfDocId(doc->id);
+}
+
+int EditorViewItem::poolCount() const {
+    int n = 0;
+    for (int i = 0; i < s_pool.size(); ++i)
+        if (!s_pool.at(i).expired())
+            ++n;
+    return n;
+}
+
+bool EditorViewItem::hasPoolDocument(int docId) const {
+    for (int i = 0; i < m_docs.size(); ++i) {
+        const Doc *d = m_docs.at(i).doc.get();
+        if (d && d->id == docId)
+            return true;
+    }
+    return false;
+}
+
+int EditorViewItem::currentDocId() const {
+    const int slot = currentDocSlot();
+    if (slot < 0)
+        return -1;
+    return m_docs.at(slot).doc->id;
+}
+
+int EditorViewItem::tabIndexOfDocId(int docId) const {
+    for (int i = 0; i < m_docs.size(); ++i)
+        if (m_docs.at(i).doc && m_docs.at(i).doc->id == docId)
+            return i;
+    return -1;
+}
+
+void EditorViewItem::syncPoolFromRegistry() {
+    /*
+     * 把池子里的文档对齐到这一栏的文档表上。
+     *
+     * 池子是"整个编辑器里开着哪些文档"的唯一真相（s_pool）；每个栏都留一份
+     * **同样顺序**的表 —— 这样"这一栏开着哪几份"（m_open）和"池子里第几份"
+     * 的下标在两边是一致的，切标签、关标签都只要动自己这份。
+     */
+    if (m_syncing)
+        return;
+    m_syncing = true;
+
+    /* 1) 池子里已经没了的（别处关掉了）：从自己的表里去掉 */
+    for (int i = m_docs.size() - 1; i >= 0; --i) {
+        const Doc *d = m_docs.at(i).doc.get();
+        bool alive = false;
+        for (int k = 0; k < s_pool.size(); ++k) {
+            std::shared_ptr<Doc> held = s_pool.at(k).lock();
+            if (held && held.get() == d) {
+                alive = true;
+                break;
+            }
+        }
+        if (alive)
+            continue;
+
+        /* 这一栏还开着它：先让视图离开，再把标签摘掉（文档本身由池子管） */
+        const int tab = tabOfSlot(i);
+        if (tab >= 0) {
+            if (tab == m_current)
+                detachFromCurrentDocument();
+            m_open.remove(tab);
+            if (tab < m_current)
+                --m_current;
+            else if (tab == m_current)
+                m_current = m_open.isEmpty() ? -1
+                                             : qBound(0, tab, m_open.size() - 1);
+        }
+
+        /* 下标整体前移：自己的标签表和小工具表都要跟着挪 */
+        for (int k = 0; k < m_open.size(); ++k)
+            if (m_open.at(k) > i)
+                --m_open[k];
+        m_docs.remove(i);
     }
 
-    delete m_docs.at(index).document;
-    m_docs.remove(index);
+    /* 2) 池子里新加的：按池子的顺序补进自己的表（**不进**标签栏） */
+    for (int s = 0; s < s_pool.size(); ++s) {
+        std::shared_ptr<Doc> held = s_pool.at(s).lock();
+        if (!held)
+            continue;
 
-    /* 移除之后下标会前移，把接替者换算成新下标 */
+        bool known = false;
+        for (int k = 0; k < m_docs.size(); ++k) {
+            if (m_docs.at(k).doc.get() == held.get()) {
+                known = true;
+                break;
+            }
+        }
+        if (known)
+            continue;
+
+        /*
+         * 只加账：正文不在这里读（读盘那条路在 openFile 里，它才知道编码、
+         * 二进制判断那一套）。这一份进这一栏的**标签栏**是另一件事 ——
+         * 由这一栏自己决定（openPoolDocument / activateDocument）。
+         */
+        m_docs.append(DocRef{held, QsciDocument(), false, 0, 0, 0});
+    }
+
+    m_syncing = false;
+    emit documentsChanged();
+    emit tabsChanged();
+}
+
+void EditorViewItem::openPoolDocument(int docId) {
+    openDocumentById(docId, true);
+}
+
+void EditorViewItem::refreshSharedDocument() {
+    if (!m_sci || !hasDocument())
+        return;
+    /*
+     * 重画这一栏的正文区。另一栏刚刚改了同一份文档（同一个 Scintilla 文档），
+     * 但两个视图各有自己的画面缓存，必须让这个视图重新算一遍可见行再重画。
+     *
+     * 行号栏的位数可能也变了（另一栏插了行），所以顺带走一遍 applyMargins，
+     * 还有横向滚动条的显隐（见 updateHorizontalScroll）。
+     */
+    m_sci->viewport()->update();
+    applyMargins();
+    updateHorizontalScroll();
+    emit statsChanged();
+    emit modifiedChanged();
+}
+
+void EditorViewItem::refreshTabs() {
+    if (m_syncing)
+        return;
+    emit documentsChanged();
+    emit modifiedChanged();
+    emit currentChanged();
+}
+
+void EditorViewItem::releaseDocument(int tab) {
+    if (tab < 0 || tab >= m_open.size())
+        return;
+
+    if (hasDocument())
+        saveCurrentViewState();
+
+    const bool wasCurrent = (tab == m_current);
+    const int slot = m_open.at(tab);
+    DocRef taken = m_docs.at(slot);
+
+    if (m_sci) {
+        if (wasCurrent) {
+            /*
+             * 先挑接替者：优先右边那条标签，没有就左边那条。
+             * 挑好之后**先把视图切过去**，再放掉要关的那一份壳子 ——
+             * 反过来的话 Scintilla 还挂在一份正在消失的文档上。
+             */
+            const int successor = (tab + 1 < m_open.size()) ? tab + 1 : tab - 1;
+            if (successor >= 0)
+                m_sci->setDocument(m_docs.at(m_open.at(successor)).m_doc);
+            else
+                detachFromCurrentDocument();
+        }
+    }
+
+    /* 自己那份壳子放掉（引用计数减一，不是删文档） */
+    taken.m_doc = QsciDocument();
+    taken.shown = false;
+    m_open.remove(tab);
+
+    /* 标签下标前移：当前那个要跟着挪 */
     if (wasCurrent) {
-        if (successor > index)
-            --successor;
-        m_current = successor;
-    } else if (index < m_current) {
+        m_current = (tab < m_open.size()) ? tab : m_open.size() - 1;
+    } else if (tab < m_current) {
         --m_current;
     }
+    if (m_current >= m_open.size())
+        m_current = m_open.size() - 1;
 
-    if (m_current >= 0) {
-        applyStyle();
-        applyViewOptions();
-        restoreViewState();
-    } else {
+    if (m_sci) {
+        if (hasDocument()) {
+            applyStyle();
+            applyViewOptions();
+            applyStoredViewState();
+        } else {
+            m_sci->SendScintilla(QsciScintillaBase::SCI_SETREADONLY, 1L);
+            applyStyle();
+        }
+    }
+
+    emitDocumentsState();
+    emit tabsChanged();
+    QTimer::singleShot(0, this, [this]() { updateHorizontalScroll(); });
+}
+
+void EditorViewItem::releaseAllDocuments() {
+    if (hasDocument())
+        saveCurrentViewState();
+    detachFromCurrentDocument();
+
+    /*
+     * 只是**不再显示**它们：文档本身在池子里（别的栏可能还在看），
+     * 这一栏的账（m_open）清空，m_docs 留着当"池子的镜像"。
+     */
+    for (DocRef &r : m_docs) {
+        r.m_doc = QsciDocument();
+        r.shown = false;
+    }
+    m_open.clear();
+    m_current = -1;
+
+    if (m_sci) {
         m_sci->SendScintilla(QsciScintillaBase::SCI_SETREADONLY, 1L);
         applyStyle();
     }
 
     emitDocumentsState();
-    QTimer::singleShot(0, this, [this]() { updateHorizontalScroll(); });
+    emit tabsChanged();
+}
+
+void EditorViewItem::closeDocument(int index) {
+    releaseDocument(index);
 }
 
 void EditorViewItem::closeCurrent() {
     if (hasDocument())
-        closeDocument(m_current);
+        releaseDocument(m_current);
 }
 
 void EditorViewItem::closeAll() {
-    while (!m_docs.isEmpty())
-        closeDocument(m_docs.size() - 1);
+    releaseAllDocuments();
 }
 
 /* ------------------------------------------------------------------ */
-/* 分栏：镜像一个源编辑区（见 EditorViewItem.h 里那段说明）              */
+/* 分栏：两个栏各自一组标签，共用一份文档池（见 EditorViewItem.h）        */
 /* ------------------------------------------------------------------ */
 
 void EditorViewItem::setDocId(int id) {
@@ -3000,9 +3379,9 @@ void EditorViewItem::setMainEditor(bool on) {
         return;
     m_mainEditor = on;
     /*
-     * 主编辑器 = "当前编辑器"（instance()）。分栏之后镜像那份永远不是主栏，
-     * 所以这里只认 on == true 的调用（镜像写 mainEditor: true 是配置错误，
-     * 不认）。
+     * 主编辑器 = "当前编辑器"（instance()）。分栏之后"用户点的是哪一栏"
+     * 会让它跟着走（见 setPaneFocus），这里只认 on == true 的调用
+     * （另一栏写 mainEditor: true 是配置错误，不认）。
      */
     if (on)
         s_instance = this;
@@ -3014,150 +3393,18 @@ void EditorViewItem::setMirror(bool on) {
         return;
     m_mirror = on;
     /*
-     * 镜像这一栏**只读**：正文由源那边推过来。
-     *
-     * 不禁用输入法 / 不让点（那样连选中复制都做不了），只是不让改 ——
-     * 用户想在右边改就直接把焦点切过去（QML 那边会把"当前编辑器"换掉，
-     * 命令自然落到它身上）。
+     * 第二栏不是"只读镜像"了 —— 两栏对等，都能编辑（同一份文档，
+     * 改哪边都是改同一个东西）。这个属性现在只用来让界面 / 自检认出
+     * "这是第二栏"。
      */
-    if (m_sci)
-        m_sci->SendScintilla(QsciScintillaBase::SCI_SETREADONLY, on ? 1L : 0L);
     emit boundChanged();
-    emit readOnlyChanged();
-}
-
-void EditorViewItem::bindTo(EditorViewItem *source) {
-    if (m_source == source)
-        return;
-    if (m_source)
-        disconnect(m_source, nullptr, this, nullptr);
-    m_source = source;
-    if (!source) {
-        emit boundChanged();
-        return;
-    }
-
-    /*
-     * 源那边正文一变就推过来。
-     *
-     * 正文那一路是**直接连接**的（见上面 textChanged 里那处：用户要的是
-     * "左边打一个字右边立刻跟上"）。这里这组只兜元信息那一类变化 ——
-     * 重命名 / 切标签 / 源那一栏被藏起来，用 QueuedConnection 排到下一轮
-     * 更安全（那些信号是在文档池正在改的时候发出来的）。
-     */
-    connect(source, &EditorViewItem::documentsChanged, this, [this]() { syncFromSource(); },
-            Qt::QueuedConnection);
-    connect(source, &EditorViewItem::currentChanged, this, [this]() { syncFromSource(); },
-            Qt::QueuedConnection);
-    connect(source, &QQuickItem::visibleChanged, this,
-            [this]() { syncFromSource(); }, Qt::QueuedConnection);
-
-    setMirror(true);
-    emit boundChanged();
-    syncFromSource();
 }
 
 void EditorViewItem::unbind() {
-    if (m_source)
-        disconnect(m_source, nullptr, this, nullptr);
-    m_source = nullptr;
-    setMirror(false);
-    closeAll();
+    /* 取消分栏：把自己打开的那些标签放回池子，自己关掉 */
+    releaseAllDocuments();
+    m_mirror = false;
     emit boundChanged();
-}
-
-void EditorViewItem::syncFromSource() {
-    if (!m_source) {
-        closeAll();
-        return;
-    }
-
-    /*
-     * 把源的**当前那一份**搬到这边来。
-     *
-     * 只搬正文 + 元信息（路径 / 语言 / 编码 / 换行符），**不搬视图状态**
-     * （光标、滚动）：两栏各滚各的是正常的（用户就是想让它们看不同的位置 ——
-     * 比如一边对着函数定义、一边对着调用处）。
-     */
-    const int count = m_source->m_docs.size();
-    const int index = m_source->m_current;
-
-    if (count == 0 || index < 0 || index >= count) {
-        closeAll();
-        return;
-    }
-
-    /* 镜像自己的文档池跟上源的条数（两边一一对应，切标签时下标才对得上） */
-    while (m_docs.size() > count)
-        closeDocument(m_docs.size() - 1);
-    while (m_docs.size() < count)
-        newDocument();
-
-    const Doc &src = m_source->m_docs.at(index);
-
-    /*
-     * 正文本体：只有真变了才灌（灌一次要重建整份文档，很贵）。
-     *
-     * 比的是**源那份文档的文本**，不是镜像自己的：镜像里那份是上一次灌进去的
-     * 快照，拿它比就够了。
-     */
-    const QString srcText = m_source->currentText();
-    m_syncing = true;
-    if (m_current != index)
-        activateDocument(index);
-    if (currentText() != srcText)
-        setContentCurrent(srcText);
-
-    /*
-     * 光标也跟着主栏走（但**不抢焦点**）。
-     *
-     * 不跟的话分栏没什么用：一边滚到函数定义、另一边还停在文件开头。
-     * 这里用 SCI_GOTOPOS + SCI_SCROLLCARET，而不是 requestEditorFocus() ——
-     * 灌一次正文就把焦点抢过来的话，用户在主栏打一个字、焦点跳到右栏，
-     * 下一个字就打进镜像里（镜像只读，等于丢字）。
-     */
-    if (m_sci) {
-        const long line = long(m_source->cursorLine());
-        const long col = long(m_source->cursorColumn());
-        const long lineStart =
-            m_sci->SendScintilla(QsciScintillaBase::SCI_POSITIONFROMLINE, line);
-        if (lineStart >= 0) {
-            const long lineLen = m_sci->SendScintilla(QsciScintillaBase::SCI_LINELENGTH, line);
-            m_sci->SendScintilla(QsciScintillaBase::SCI_GOTOPOS,
-                                 lineStart + qBound(0L, col, qMax(0L, lineLen)));
-            m_sci->SendScintilla(QsciScintillaBase::SCI_SCROLLCARET);
-        }
-    }
-
-    /* 元信息：路径 / 语言 / 编码 / 换行符 / 修改标记 */
-    const QString srcEol = m_source->eolMode();
-    if (Doc *d = currentDoc()) {
-        d->filePath = src.filePath;
-        d->modified = src.modified;
-        d->untitledNo = src.untitledNo;
-        if (d->language != src.language) {
-            d->language = src.language;
-            applyLanguageLexer();
-        }
-        d->encoding = src.encoding;
-    }
-    /* 换行符在 Scintilla 里（不在 Doc 里），所以走 setter */
-    if (eolMode() != srcEol)
-        setEolMode(srcEol);
-    m_syncing = false;
-
-    emit documentsChanged();
-    emit statsChanged();
-    emit modifiedChanged();
-    emit currentChanged();
-}
-
-void EditorViewItem::noteFocus() {
-    /*
-     * 只是"点到这一栏了"，不做别的：Main.qml 那个 Connections 接住 paneFocused，
-     * 把"当前编辑器"换成它（于是工具栏 / 菜单 / 快捷键都作用在这一栏上）。
-     */
-    emit paneFocused();
 }
 
 void EditorViewItem::setPaneFocus(bool on) {
@@ -3169,23 +3416,42 @@ void EditorViewItem::setPaneFocus(bool on) {
      *
      * 不分栏时只有一栏，这一句等于什么都没做（本来就是它）。
      */
+    if (m_paneFocus == on)
+        return;
     if (on)
         s_instance = this;
     m_paneFocus = on;
+    emit paneFocusChanged();
 }
 
 
 void EditorViewItem::activateDocument(int index) {
-    if (index < 0 || index >= m_docs.size() || index == m_current)
+    if (index < 0 || index >= m_open.size() || index == m_current)
         return;
     if (!m_sci)
         return;
 
     if (hasDocument())
-        storeViewState();
+        saveCurrentViewState();
 
     m_current = index;
-    m_sci->setDocument(*m_docs[index].document);
+    /*
+     * 切到这一份（池子里共享的那个底层文档）。两个栏看同一份时，
+     * 这一句让**这个**栏也挂上它 —— QsciDocument 的引用计数自己会涨
+     * （见 Doc::m_doc 的说明）。
+     */
+    DocRef &ref = m_docs[m_open.at(index)];
+    /*
+     * 这一栏第一次显示这一份：把池子里那份壳子拷进来（引用计数 +1）。
+     * 拷贝是必须的 —— 两个视图共用一份 QsciDocument 对象的话，
+     * 谁先放手就会把 pdoc 连同另一个视图的画面一起带掉（见
+     * third/qscintilla/src/qscidocument.cpp 的 nr_attaches）。
+     */
+    if (!ref.shown) {
+        ref.m_doc = ref.doc->m_doc;
+        ref.shown = true;
+    }
+    m_sci->setDocument(ref.m_doc);
 
     /*
      * 样式和视图设置都是**按文档**存的（Scintilla 的样式表在文档里），
@@ -3193,7 +3459,7 @@ void EditorViewItem::activateDocument(int index) {
      */
     applyStyle();
     applyViewOptions();
-    restoreViewState();
+    applyStoredViewState();
 
     emitDocumentsState();
     QTimer::singleShot(0, this, [this]() { updateHorizontalScroll(); });
@@ -3201,39 +3467,39 @@ void EditorViewItem::activateDocument(int index) {
 }
 
 int EditorViewItem::activateNextDocument() {
-    if (m_docs.size() < 2)
+    if (m_open.size() < 2)
         return m_current;
-    activateDocument((m_current + 1) % m_docs.size());
+    activateDocument((m_current + 1) % m_open.size());
     return m_current;
 }
 
 int EditorViewItem::activatePreviousDocument() {
-    if (m_docs.size() < 2)
+    if (m_open.size() < 2)
         return m_current;
-    activateDocument((m_current - 1 + m_docs.size()) % m_docs.size());
+    activateDocument((m_current - 1 + m_open.size()) % m_open.size());
     return m_current;
 }
 
-void EditorViewItem::storeViewState() {
+void EditorViewItem::saveCurrentViewState() {
     if (!m_sci || !hasDocument())
         return;
-    Doc &d = m_docs[m_current];
-    d.cursorPos = long(m_sci->SendScintilla(QsciScintillaBase::SCI_GETCURRENTPOS));
-    d.firstVisibleLine =
+    DocRef &r = m_docs[currentDocSlot()];
+    r.cursorPos = long(m_sci->SendScintilla(QsciScintillaBase::SCI_GETCURRENTPOS));
+    r.firstVisibleLine =
         int(m_sci->SendScintilla(QsciScintillaBase::SCI_GETFIRSTVISIBLELINE));
-    d.xOffset = int(m_sci->SendScintilla(QsciScintillaBase::SCI_GETXOFFSET));
+    r.xOffset = int(m_sci->SendScintilla(QsciScintillaBase::SCI_GETXOFFSET));
 }
 
-void EditorViewItem::restoreViewState() {
+void EditorViewItem::applyStoredViewState() {
     if (!m_sci || !hasDocument())
         return;
-    const Doc &d = m_docs.at(m_current);
+    const DocRef &r = m_docs.at(currentDocSlot());
     const long docLen = m_sci->SendScintilla(QsciScintillaBase::SCI_GETLENGTH);
     m_sci->SendScintilla(QsciScintillaBase::SCI_GOTOPOS,
-                         qBound(0L, d.cursorPos, docLen));
+                         qBound(0L, r.cursorPos, docLen));
     m_sci->SendScintilla(QsciScintillaBase::SCI_SETFIRSTVISIBLELINE,
-                         long(qMax(0, d.firstVisibleLine)));
-    m_sci->SendScintilla(QsciScintillaBase::SCI_SETXOFFSET, long(qMax(0, d.xOffset)));
+                         long(qMax(0, r.firstVisibleLine)));
+    m_sci->SendScintilla(QsciScintillaBase::SCI_SETXOFFSET, long(qMax(0, r.xOffset)));
 }
 
 void EditorViewItem::emitDocumentsState() {
@@ -3560,6 +3826,18 @@ long EditorViewItem::searchFrom(long from, long to, const QString &text,
     if (from > to)
         std::swap(from, to);
 
+    /*
+     * 搜索标志要**单独发一条 SCI_SETSEARCHFLAGS**。
+     *
+     * Scintilla 的 SCI_SEARCHINTARGET 只收"长度 + 文本"两个参数，区分大小写 /
+     * 全字 / 正则这三个开关是通过 SCI_SETSEARCHFLAGS 事先设好的（qsciscintilla
+     * 自己的 findFirst 也是这么干的）。原来这里算完 flags 就没人用了 ——
+     * 于是三个开关全是摆设（界面上勾了没反应，clang-analyzer 报的 dead store
+     * 就是这一条）。标志是"粘住"的：每次搜之前都设一遍，免得被别处的调用带走。
+     */
+    m_sci->SendScintilla(QsciScintillaBase::SCI_SETSEARCHFLAGS,
+                         static_cast<unsigned long>(flags));
+
     m_sci->SendScintilla(QsciScintillaBase::SCI_SETTARGETSTART, from);
     m_sci->SendScintilla(QsciScintillaBase::SCI_SETTARGETEND, to);
     /*
@@ -3639,7 +3917,7 @@ int EditorViewItem::highlightMatches(const QString &text, bool caseSensitive,
     if (!m_sci || !hasDocument() || text.isEmpty())
         return 0;
 
-    const QByteArray needle = text.toUtf8();
+    /* 搜文本那一步在 searchFrom 里（它自己转 UTF-8），这里不用再转一份 */
     const long docLen = m_sci->SendScintilla(QsciScintillaBase::SCI_GETLENGTH);
 
     m_sci->SendScintilla(QsciScintillaBase::SCI_SETINDICATORCURRENT,
@@ -3837,6 +4115,33 @@ void EditorViewItem::updateZoomPercent() {
     const long zoom = m_sci->SendScintilla(QsciScintillaBase::SCI_GETZOOM);
     const int base = qMax(100, stylePointSize());
     m_zoomPercent = qRound(100.0 * double(base + zoom * 100) / double(base));
+}
+
+/*
+ * 直接定一个缩放百分比（QML 绑定用，见 Q_PROPERTY 里的说明）。
+ *
+ * 传进来的是**百分比**（100 = 不缩放）。Scintilla 的 zoom 增量单位是**点**，
+ * 所以换算要拿字号的点数当基准：basePoint100 是"点 × 100"（见
+ * updateZoomPercent），点数 = basePoint100 / 100，于是
+ *     zoom = 点数 × (百分比 - 100) / 100 = basePoint100 × (百分比 - 100) / 10000
+ * 夹在 -8 ~ 30，和 zoomIn / zoomOut 一个范围 —— 绑定回写时不会越夹越远。
+ */
+void EditorViewItem::setZoomPercent(int percent) {
+    if (!m_sci)
+        return;
+    const long zoom = m_sci->SendScintilla(QsciScintillaBase::SCI_GETZOOM);
+    const int basePoint100 = qMax(100, stylePointSize());
+    const long want = qBound(-8L,
+                             long(qRound(double(basePoint100) * (percent - 100) / 10000.0)),
+                             30L);
+    if (want == zoom) {
+        updateZoomPercent();
+        return;
+    }
+    m_sci->SendScintilla(QsciScintillaBase::SCI_SETZOOM, want);
+    updateZoomPercent();
+    emit zoomChanged();
+    QTimer::singleShot(0, this, [this]() { updateHorizontalScroll(); });
 }
 
 void EditorViewItem::zoomIn() {
@@ -4069,6 +4374,51 @@ QVariantMap EditorViewItem::horizontalScrollState() const {
         int(m_sci->SendScintilla(QsciScintillaBase::SCI_GETSCROLLWIDTH));
     state[QStringLiteral("contentWidth")] = int(m_lastContentWidth);
     state[QStringLiteral("wrap")] = m_wrap;
+    return state;
+}
+
+/*
+ * 自检用：量"面板被拉窄的那一拍"（见头文件里的说明）。
+ *
+ * 直接改控件的宽度，等于把一页文本宽 hNewPage 当场改小；Scintilla 在
+ * resizeEvent 里就会重算 hMax = scrollWidth - hNewPage（ScintillaQt.cpp 的
+ * ModifyScrollBars），所以读 hState 之前**不能**转事件循环 ——
+ * 一转，applyGeometry 排的那次重算就把值压回去了，那一拍就看不到了。
+ * 量完把宽度还原。
+ */
+/*
+ * 自检用：这一栏的 QML item 和它那块原生控件各摆在哪、多大（见头文件说明）。
+ */
+QVariantMap EditorViewItem::paneGeometryForTest() const {
+    QVariantMap m;
+    const QPointF scene = mapToItem(nullptr, QPointF(0, 0));
+    m[QStringLiteral("sceneX")] = scene.x();
+    m[QStringLiteral("sceneY")] = scene.y();
+    m[QStringLiteral("itemW")] = width();
+    m[QStringLiteral("itemH")] = height();
+    if (m_sciWidget) {
+        const QRect g = m_sciWidget->geometry();
+        m[QStringLiteral("widgetX")] = g.x();
+        m[QStringLiteral("widgetY")] = g.y();
+        m[QStringLiteral("widgetW")] = g.width();
+        m[QStringLiteral("widgetH")] = g.height();
+        m[QStringLiteral("widgetVisible")] = m_sciWidget->isVisible();
+    }
+    return m;
+}
+
+QVariantMap EditorViewItem::horizontalScrollAfterNarrowForTest(int deltaWidth) {
+    QVariantMap state;
+    if (!m_sci)
+        return state;
+
+    const int wasWidth = m_sci->width();
+    const int wasHeight = m_sci->height();
+    m_sci->resize(qMax(120, wasWidth + deltaWidth), wasHeight);
+
+    state = horizontalScrollState();
+
+    m_sci->resize(wasWidth, wasHeight);
     return state;
 }
 

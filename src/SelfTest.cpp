@@ -500,11 +500,17 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
         return result.toMap();
     };
 
-    /* 读 tab 右键菜单的条目清单（见 Main.qml 的 tabMenuActs，和弹出的是同一份构造） */
-    auto tabMenuActs = [qmlRoot](int index) {
+    /*
+     * 读 tab 右键菜单的条目清单（见 Main.qml 的 tabMenuActs，和弹出的是同一份构造）。
+     *
+     * 第二个参数是**哪一栏**（分栏之后有两条标签栏）：不给就传空 —— Main.qml
+     * 那边会退回用"当前那一栏"，也就是不分栏时的唯一那一栏。
+     */
+    auto tabMenuActs = [qmlRoot](int index, QVariant pane = QVariant()) {
         QVariant result;
         QMetaObject::invokeMethod(qmlRoot, "tabMenuActs", Q_RETURN_ARG(QVariant, result),
-                                  Q_ARG(QVariant, QVariant(index)));
+                                  Q_ARG(QVariant, QVariant(index)),
+                                  Q_ARG(QVariant, pane));
         return result.toList();
     };
 
@@ -1233,6 +1239,42 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
           QStringLiteral("实际 %1").arg(matches));
     view->clearHighlights();
 
+    /*
+     * 区分大小写 / 全字匹配那两个开关**真的传下去了**。
+     *
+     * 这两条是补的：原来 searchFrom() 把 SCFIND_* 标志算出来却忘了传给
+     * SCI_SEARCHINTARGET（clang-analyzer 的 dead store 报的就是它），于是
+     * "区分大小写""全字匹配""正则"三个开关全是摆设 —— 界面上勾了没反应。
+     *
+     * 用例文件里第 2、3 行各有一个大写 NEEDLE，**没有**小写 needle，
+     * 所以拿小写去搜：不区分大小写时找得到，区分大小写时一个都找不到。
+     */
+    {
+        view->activateDocument(view->indexOfPath(srcPath));
+        const int anyCase =
+            view->find(QStringLiteral("needle"), false, false, false, true);
+        check(anyCase > 0, QStringLiteral("不区分大小写：小写 needle 也搜得到"),
+              QStringLiteral("实际 %1").arg(anyCase));
+
+        view->activateDocument(view->indexOfPath(srcPath));
+        const int exactCase =
+            view->find(QStringLiteral("needle"), true, false, false, true);
+        check(exactCase < 0, QStringLiteral("区分大小写：小写 needle 搜不到"),
+              QStringLiteral("实际 %1").arg(exactCase));
+
+        view->activateDocument(view->indexOfPath(srcPath));
+        const int wholeOk =
+            view->find(QStringLiteral("NEEDLE"), true, true, false, true);
+        check(wholeOk == 2, QStringLiteral("全字匹配：整词 NEEDLE 还是命中第 2 行"),
+              QStringLiteral("实际 %1").arg(wholeOk));
+
+        view->activateDocument(view->indexOfPath(srcPath));
+        const int wholeNo =
+            view->find(QStringLiteral("NEED"), true, true, false, true);
+        check(wholeNo < 0, QStringLiteral("全字匹配：半个词 NEED 不算命中"),
+              QStringLiteral("实际 %1").arg(wholeNo));
+    }
+
     /* ---- 全部替换 ---- */
     const int replaced =
         view->replaceAll(QStringLiteral("NEEDLE"), QStringLiteral("PIN"), true, false, false);
@@ -1899,6 +1941,40 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
                    - small.value(QStringLiteral("pageWidthComputed")).toInt()) <= 1,
               QStringLiteral("一页文本宽：自己算的和 Scintilla 的一致"), detail(small));
 
+        /*
+         * ---- 面板被拉窄的**那一拍**不许冒出横条 ----
+         *
+         * 用户报的："左右拖动分栏分隔线时，底下那条横条一闪一闪，正文根本没超出
+         * 屏幕也闪出来。"
+         *
+         * 根因是 scrollWidth 的取值口径：原来"放得下"这一支把它写成**当时那一页
+         * 文本宽**，于是这个数把"设它的那一刻面板有多宽"也记了进去。拖动把它变窄的
+         * 那一拍，Scintilla 那边 hMax = scrollWidth - 新的 hNewPage 就成了正数
+         * （ScintillaQt.cpp 的 ModifyScrollBars），横条当场冒出来闪一下，
+         * 下一拍 updateHorizontalScroll() 才压回去 —— 拖动是一格一格来的，
+         * 于是"一闪一闪"。
+         *
+         * 这里卡的就是那一拍：把控件拉窄之后**不转事件循环**，直接读横条状态。
+         * （转一次事件循环，applyGeometry 排的那次重算就把值压回去了，
+         * 这一条就永远量不到东西。）
+         */
+        {
+            const QVariantMap narrowed =
+                view->horizontalScrollAfterNarrowForTest(-220);
+            out() << "        （拉窄那一拍：" << detail(narrowed) << "）" << Qt::endl;
+            check(narrowed.value(QStringLiteral("maximum")).toInt() == 0
+                  && !narrowed.value(QStringLiteral("visible")).toBool(),
+                  QStringLiteral("面板变窄的那一拍：短内容不冒横向滚动条（拖分隔线不闪）"),
+                  detail(narrowed));
+            /*
+             * 换个说法钉同一条：横向范围不许超过**变窄之后**那一页宽。
+             * 旧口径（scrollWidth = 当时的一页宽）在这里是 1107 > 887。
+             */
+            check(narrowed.value(QStringLiteral("scrollWidth")).toInt()
+                  <= narrowed.value(QStringLiteral("pageStep")).toInt(),
+                  QStringLiteral("变窄之后 scrollWidth 仍不超过一页文本宽"), detail(narrowed));
+        }
+
         /* ---- 长内容 ---- */
         check(view->openFile(longPath) >= 0, QStringLiteral("打开长行文件"),
               view->lastError());
@@ -2132,14 +2208,19 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
               QStringLiteral("编辑器没有溢出卡片（不压状态栏、不出画布）"), geom);
 
         /*
-         * ============ 分栏（tab 右键那三条） ============
+         * ============ 分栏（两个对等的编辑组，tab 右键那三条） ============
          *
-         * 钉两件事：
+         * 钉的是用户要的那套 VS Code 语义（见 EditorViewItem.h 里分栏那一段）：
          *   1) 右键菜单里那三条命令**接得上**（dispatch 之后 editor.splitMode
          *      真的变了）—— 菜单是数据、dispatch 是执行，两边名字写错一个字
          *      在界面上就是"点了没反应"；
-         *   2) 分栏之后**镜像那一栏真的拿到了同一份正文**（bindMirror 把文本推
-         *      过去了）—— 只改布局不推正文的话，右栏会一直空着。
+         *   2) 分出来的是**两个各自独立的编辑组**：各自一组标签（打开一份新
+         *      文件只动发出命令的那一栏），各自看自己那一份；
+         *   3) 同一份文档在两栏里就是**同一个底层文档**：改一边另一边立刻就是
+         *      新内容（这是"信息共用"那一半）。
+         *
+         * 注意用 view->newDocument() 而不是 dispatch("new")：后者会弹系统
+         * 文件框（未命名文档要问路径），自检里没有用户，会卡在那儿。
          */
         {
             /*
@@ -2161,30 +2242,365 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
                 uiState().value(QStringLiteral("mirrorText")).toString();
             const QString mainText = view->currentText();
             check(!mirrorText.isEmpty() && mirrorText == mainText,
-                  QStringLiteral("镜像栏拿到了主栏的正文（两边一模一样）"),
-                  QStringLiteral("主 %1 字 / 镜像 %2 字")
+                  QStringLiteral("分出来的第二栏显示的是同一份正文"),
+                  QStringLiteral("主 %1 字 / 第二栏 %2 字")
                       .arg(mainText.size()).arg(mirrorText.size()));
 
+            /* 两栏各有自己的一组标签，而且当前显示的是同一份文档 */
+            const int mainTabs = uiState().value(QStringLiteral("mainTabCount")).toInt();
+            const int mirrorTabs = uiState().value(QStringLiteral("mirrorTabCount")).toInt();
+            check(mainTabs >= 1 && mirrorTabs == 1,
+                  QStringLiteral("第二栏只有一条标签（分栏时把当前这一份挪过去，"
+                                 "不是把主栏那一堆全抄一份）"),
+                  QStringLiteral("主 %1 条 / 第二栏 %2 条；C++ view 看到 %3 条 / "
+                                 "池子 %4 份")
+                      .arg(mainTabs).arg(mirrorTabs).arg(view->documents().size())
+                      .arg(view->poolCount()));
+            check(uiState().value(QStringLiteral("mainDocId")).toInt() >= 0
+                      && uiState().value(QStringLiteral("mainDocId")).toInt()
+                             == uiState().value(QStringLiteral("mirrorDocId")).toInt(),
+                  QStringLiteral("两栏当前看的是同一份文档（同一份，不是拷贝）"));
+
             /*
-             * 再验一次"主栏换了文档，镜像跟着换"：新建一个空白标签（主栏变成
-             * 空文档），镜像也该变空。
-             *
-             * 这里**不改成"改正文看镜像跟不跟"**：那会把文档标成"已修改"，
-             * 后面 closeAllTabs 就会弹「保存 / 不保存」那块卡片等用户回答 ——
-             * 自检里没有用户，整串就卡在那儿（实测：后面十几条"标签还在"）。
+             * 独立：在主栏再开一份文档 —— 主栏多一条标签并切过去，
+             * 第二栏保持原样（还看着原来那一份、标签也不多不少）。
              */
-            dispatch(QStringLiteral("new"));
+            const int beforeMainTabs =
+                uiState().value(QStringLiteral("mainTabCount")).toInt();            const int beforeMirrorDoc =
+                uiState().value(QStringLiteral("mirrorDocId")).toInt();
+            const QString beforeMirrorText =
+                uiState().value(QStringLiteral("mirrorText")).toString();
+            const int second = view->newDocument();
+            QCoreApplication::processEvents();
+            check(second >= 0
+                      && uiState().value(QStringLiteral("mainTabCount")).toInt()
+                             == beforeMainTabs + 1
+                      && uiState().value(QStringLiteral("mirrorTabCount")).toInt() == 1,
+                  QStringLiteral("主栏新开一份：只有主栏多出标签，第二栏不动"),
+                  QStringLiteral("主 %1 条 / 第二栏 %2 条")
+                      .arg(uiState().value(QStringLiteral("mainTabCount")).toInt())
+                      .arg(uiState().value(QStringLiteral("mirrorTabCount")).toInt()));
+            check(uiState().value(QStringLiteral("mirrorDocId")).toInt() == beforeMirrorDoc
+                      && uiState().value(QStringLiteral("mirrorText")).toString()
+                             == beforeMirrorText,
+                  QStringLiteral("主栏切到别的文档之后，第二栏还看着原来那一份"));
+
+            /* 切回文件那一份，好接着验"同一份文档改一边两边都变" */
+            const int backToFile = view->indexOfPath(srcPath);
+            if (backToFile >= 0)
+                view->activateDocument(backToFile);
+            QCoreApplication::processEvents();
+            check(backToFile >= 0 && view->filePath() == QFileInfo(srcPath).absoluteFilePath(),
+                  QStringLiteral("分栏用例：切回文件那一份"));
+
+            /*
+             * 共用：两栏现在看的是同一份文档，在主栏把正文改掉，
+             * 第二栏读到的必须是新内容。改完把修改标记清掉（下面还要
+             * closeAllTabs，留着"已修改"会弹「保存 / 不保存」卡片等回答）。
+             */
+            const QString edited = mainText + QStringLiteral("// edited in main\n");
+            view->setText(edited);
             for (int i = 0; i < 3; ++i)
                 QCoreApplication::processEvents();
-            check(view->currentText().isEmpty()
-                      && uiState().value(QStringLiteral("mirrorText")).toString().isEmpty(),
-                  QStringLiteral("主栏换成空白标签之后，镜像栏也跟着空了"));
+            check(uiState().value(QStringLiteral("mirrorText")).toString() == edited,
+                  QStringLiteral("同一份文档：主栏改了，第二栏立刻就是新内容"));
+            view->setModified(false);
+            for (int i = 0; i < 3; ++i)
+                QCoreApplication::processEvents();
+
+            /*
+             * 分栏之后正文**真的分成两块**（用户报的："上下分栏没有展开"）。
+             *
+             * 只验 splitMode / 标签条数是查不出这个的：那两条标签栏确实分了，
+             * 但布局里 mainPane / mirrorPaneHolder 的锚点过约束（四个边都锚着、
+             * 又给了 width / height），QML 里锚点赢、显式尺寸被丢掉 → 两块都铺满
+             * 整块正文区叠在一起，屏幕上看着就是"没分开"。
+             *
+             * 量的是**场景坐标**：两栏的父壳不是同一个（mainPane / mirrorPaneHolder），
+             * 直接比 y() 没意义。
+             */
+            {
+                auto *mainView = qobject_cast<EditorViewItem *>(
+                    uiState().value(QStringLiteral("mainPane")).value<QObject *>());
+                auto *mirrorView = qobject_cast<EditorViewItem *>(
+                    uiState().value(QStringLiteral("mirrorPane")).value<QObject *>());
+                check(mainView != nullptr && mirrorView != nullptr,
+                      QStringLiteral("分栏几何：拿得到两栏的编辑器对象"));
+
+                if (mainView && mirrorView) {
+                    auto sceneAt = [](QQuickItem *it) {
+                        return it->mapToItem(nullptr, QPointF(0, 0));
+                    };
+                    auto detailOf = [&](const QPointF &mainAt, const QPointF &mirrorAt) {
+                        return QStringLiteral("主 %1,%2 %3x%4 / 第二栏 %5,%6 %7x%8")
+                            .arg(mainAt.x()).arg(mainAt.y())
+                            .arg(mainView->width()).arg(mainView->height())
+                            .arg(mirrorAt.x()).arg(mirrorAt.y())
+                            .arg(mirrorView->width()).arg(mirrorView->height());
+                    };
+
+                    /* 左右分栏（上面 dispatch 的就是它） */
+                    const QPointF mainRight = sceneAt(mainView);
+                    const QPointF mirrorRight = sceneAt(mirrorView);
+                    const QString rightDetail = detailOf(mainRight, mirrorRight);
+                    check(mirrorRight.x() >= mainRight.x() + mainView->width() - 2,
+                          QStringLiteral("左右分栏：第二栏在主栏右边（不是叠在一起）"),
+                          rightDetail);
+                    check(qAbs(mainView->width() - mirrorView->width()) <= 4,
+                          QStringLiteral("左右分栏：两栏一样宽（各占一半）"), rightDetail);
+
+                    /*
+                     * 两条标签栏要**贴在一起**：交界处只有那条 1px 的分界线，
+                     * 不许留缝（用户报的"两栏 tab 之间不要有间隙"）。
+                     */
+                    {
+                        const QVariantMap lay =
+                            uiState().value(QStringLiteral("splitLayout")).toMap();
+                        const QVariantMap mt =
+                            lay.value(QStringLiteral("mainTab")).toMap();
+                        const QVariantMap rt =
+                            lay.value(QStringLiteral("mirrorTab")).toMap();
+                        const QString tabDetail =
+                            QStringLiteral("上栏标签 %1..%2 / 下栏标签 %3..%4（y %5 / %6）")
+                                .arg(mt.value(QStringLiteral("x")).toInt())
+                                .arg(mt.value(QStringLiteral("x")).toInt()
+                                     + mt.value(QStringLiteral("w")).toInt())
+                                .arg(rt.value(QStringLiteral("x")).toInt())
+                                .arg(rt.value(QStringLiteral("x")).toInt()
+                                     + rt.value(QStringLiteral("w")).toInt())
+                                .arg(mt.value(QStringLiteral("y")).toInt())
+                                .arg(rt.value(QStringLiteral("y")).toInt());
+                        check(qAbs((mt.value(QStringLiteral("x")).toInt()
+                                    + mt.value(QStringLiteral("w")).toInt())
+                                   - rt.value(QStringLiteral("x")).toInt()) <= 1
+                              && mt.value(QStringLiteral("y")).toInt()
+                                 == rt.value(QStringLiteral("y")).toInt(),
+                              QStringLiteral("左右分栏：两条标签栏贴在一起（中间只有 1px 分界线）"),
+                              tabDetail);
+                    }
+
+                    /* 上下分栏：第二栏要落到**下面**，两块上下拼满整块正文区 */
+                    dispatch(QStringLiteral("splitDown"));
+                    for (int i = 0; i < 3; ++i)
+                        QCoreApplication::processEvents();
+                    const QPointF mainDown = sceneAt(mainView);
+                    const QPointF mirrorDown = sceneAt(mirrorView);
+                    const QString downDetail = detailOf(mainDown, mirrorDown);
+                    check(mirrorDown.y() >= mainDown.y() + mainView->height() - 2,
+                          QStringLiteral("上下分栏：第二栏在主栏下面（不是叠在一起）"),
+                          downDetail);
+
+                    /*
+                     * 下面那一栏的标签栏必须**紧贴在它自己那一栏正文上面**
+                     * （用户报的："这个 tab 没有显示在下面一栏紧贴"）——
+                     * 原来两条标签栏都摞在最顶上，下面那一栏的 tab 离它那一栏
+                     * 有大半屏远。
+                     */
+                    {
+                        const QVariantMap lay =
+                            uiState().value(QStringLiteral("splitLayout")).toMap();
+                        const QVariantMap mt =
+                            lay.value(QStringLiteral("mainTab")).toMap();
+                        const QVariantMap rt =
+                            lay.value(QStringLiteral("mirrorTab")).toMap();
+                        const QVariantMap mv =
+                            lay.value(QStringLiteral("mirrorView")).toMap();
+                        const QString tabDetail =
+                            QStringLiteral("下栏标签 y %1..%2 / 下栏正文 y %3 / 上栏标签 y %4..%5")
+                                .arg(rt.value(QStringLiteral("y")).toInt())
+                                .arg(rt.value(QStringLiteral("y")).toInt()
+                                     + rt.value(QStringLiteral("h")).toInt())
+                                .arg(mv.value(QStringLiteral("y")).toInt())
+                                .arg(mt.value(QStringLiteral("y")).toInt())
+                                .arg(mt.value(QStringLiteral("y")).toInt()
+                                     + mt.value(QStringLiteral("h")).toInt());
+                        check(qAbs((rt.value(QStringLiteral("y")).toInt()
+                                    + rt.value(QStringLiteral("h")).toInt())
+                                   - mv.value(QStringLiteral("y")).toInt()) <= 2,
+                              QStringLiteral("上下分栏：下面那条标签栏紧贴在下栏正文上方"),
+                              tabDetail);
+                        check(rt.value(QStringLiteral("y")).toInt()
+                                  > mt.value(QStringLiteral("y")).toInt()
+                                    + mt.value(QStringLiteral("h")).toInt() + 100,
+                              QStringLiteral("上下分栏：下面那条标签栏跟着它那一栏到了中间"),
+                              tabDetail);
+                    }
+
+                    /*
+                     * 两块正文都落在正文区里；下面那一栏短出来的正好是它自己
+                     * 那条标签栏（35px）+ 中间那条缝。
+                     */
+                    check(mainView->height() - mirrorView->height() >= 30
+                          && mainView->height() - mirrorView->height() <= 56,
+                          QStringLiteral("上下分栏：下栏比上栏矮一条标签栏（它自己的那条）"),
+                          downDetail);
+                    check(qAbs(mainView->width() - mirrorView->width()) <= 4,
+                          QStringLiteral("上下分栏：两条都是整幅宽"), downDetail);
+
+                    /*
+                     * 光 item 对上还不够：**原生控件**也得跟着新几何摆
+                     * （它是子窗口，位置/尺寸由 applyGeometry 从 item 算出来）。
+                     * 控件停在旧尺寸上时会盖住分隔线，屏幕上就是"没分开"。
+                     */
+                    auto widgetDetail = [](const char *who, EditorViewItem *v) {
+                        const QVariantMap g = v->paneGeometryForTest();
+                        return QStringLiteral("%1 item %2x%3 @%4,%5 / 控件 %6x%7")
+                            .arg(QString::fromLatin1(who))
+                            .arg(g.value(QStringLiteral("itemW")).toInt())
+                            .arg(g.value(QStringLiteral("itemH")).toInt())
+                            .arg(g.value(QStringLiteral("sceneX")).toInt())
+                            .arg(g.value(QStringLiteral("sceneY")).toInt())
+                            .arg(g.value(QStringLiteral("widgetW")).toInt())
+                            .arg(g.value(QStringLiteral("widgetH")).toInt());
+                    };
+                    const QVariantMap mg = mainView->paneGeometryForTest();
+                    const QVariantMap rg = mirrorView->paneGeometryForTest();
+                    check(qAbs(mg.value(QStringLiteral("itemW")).toInt()
+                               - mg.value(QStringLiteral("widgetW")).toInt()) <= 2
+                          && qAbs(mg.value(QStringLiteral("itemH")).toInt()
+                                  - mg.value(QStringLiteral("widgetH")).toInt()) <= 2,
+                          QStringLiteral("上下分栏：主栏的原生控件跟着 item 摆（没停在旧高度）"),
+                          widgetDetail("主栏", mainView));
+                    check(qAbs(rg.value(QStringLiteral("itemW")).toInt()
+                               - rg.value(QStringLiteral("widgetW")).toInt()) <= 2
+                          && qAbs(rg.value(QStringLiteral("itemH")).toInt()
+                                  - rg.value(QStringLiteral("widgetH")).toInt()) <= 2,
+                          QStringLiteral("上下分栏：第二栏的原生控件也跟着 item 摆"),
+                          widgetDetail("第二栏", mirrorView));
+                }
+            }
 
             dispatch(QStringLiteral("splitNone"));
             for (int i = 0; i < 3; ++i)
                 QCoreApplication::processEvents();
             check(uiState().value(QStringLiteral("splitMode")).toString().isEmpty(),
                   QStringLiteral("dispatch(splitNone) 之后回到单栏"));
+            check(uiState().value(QStringLiteral("mirrorTabCount")).toInt() == 0,
+                  QStringLiteral("取消分栏之后第二栏把标签都放回去了"));
+            /*
+             * 取消分栏只把**第二栏**关掉，主栏自己的标签一条都不能少 ——
+             * 分栏时在主栏多开的那一份也还在。
+             */
+            check(view->documents().size() == beforeMainTabs + 1,
+                  QStringLiteral("取消分栏不影响主栏自己的标签"),
+                  QStringLiteral("剩 %1 条（分栏前 %2 条 + 分栏期间新开的 1 条）")
+                      .arg(view->documents().size()).arg(beforeMainTabs));
+
+            /*
+             * 第二栏最后一条标签关掉 = 整条分栏收起。
+             *
+             * 用户报的"右边那条标签上的小叉点了没反应"就是这一步：小叉本身
+             * 是好的（closeDocument 之后那一栏确实空了），坏在**紧接着又自动
+             * 补了一份主栏当前文档回去**（原来那条 syncSplitWithDocuments），
+             * 标签当场长回来，看着就是点了没用。所以这里钉两件事：
+             *   * 走和小叉**同一条路**（closeTab(index, 第二栏那个对象)）；
+             *   * 关完之后第二栏空着、分栏也收起（不是补一条回来）。
+             */
+            dispatch(QStringLiteral("splitRight"));
+            for (int i = 0; i < 3; ++i)
+                QCoreApplication::processEvents();
+            const QVariant mirrorPane =
+                uiState().value(QStringLiteral("mirrorPane"));
+            check(uiState().value(QStringLiteral("mirrorTabCount")).toInt() == 1
+                      && mirrorPane.value<QObject *>() != nullptr,
+                  QStringLiteral("复核：重新分栏之后拿得到第二栏那个对象、里面有一条标签"));
+
+            QVariant closeRet;
+            QMetaObject::invokeMethod(qmlRoot, "closeTab", Q_RETURN_ARG(QVariant, closeRet),
+                                      Q_ARG(QVariant, QVariant(0)),
+                                      Q_ARG(QVariant, mirrorPane));
+            for (int i = 0; i < 3; ++i)
+                QCoreApplication::processEvents();
+            check(uiState().value(QStringLiteral("mirrorTabCount")).toInt() == 0,
+                  QStringLiteral("第二栏最后一条标签关掉了（小叉那条路真的关得掉）"));
+            check(uiState().value(QStringLiteral("splitMode")).toString().isEmpty(),
+                  QStringLiteral("第二栏关空之后分栏整条收起（不再自动补一份回来）"),
+                  QStringLiteral("splitMode='%1' 第二栏标签 %2 条")
+                      .arg(uiState().value(QStringLiteral("splitMode")).toString())
+                      .arg(uiState().value(QStringLiteral("mirrorTabCount")).toInt()));
+
+            /*
+             * ---- 上下分栏 + md 预览：那个"源码 / 预览"开关必须还在 ----
+             *
+             * 用户报的："上下分栏后，md 文档预览，不能切换了，按钮不见了。"
+             *
+             * 开关在界面上只画一次，而上下分栏时下面那一栏的标签栏是挂在
+             * 正文块（paneHolder）里的 —— 预览一开，正文块整块收起来，
+             * 开关要是画在那条上就跟着没了，于是切不回源码。
+             * 所以它必须落在**预览时也看得见**的那条标签栏上（上面那条）。
+             */
+            {
+                const QString mdPath = dir.filePath(QStringLiteral("split-preview.md"));
+                check(writeFile(mdPath, QByteArray("## title\n\nbody\n")),
+                      QStringLiteral("准备一份 md（验分栏下的预览开关）"));
+                view->openFile(mdPath);
+                for (int i = 0; i < 3; ++i)
+                    QCoreApplication::processEvents();
+                check(uiState().value(QStringLiteral("canPreviewMarkdown")).toBool(),
+                      QStringLiteral("分栏预览：这份 md 可以预览"));
+
+                dispatch(QStringLiteral("splitDown"));
+                for (int i = 0; i < 3; ++i)
+                    QCoreApplication::processEvents();
+
+                /*
+                 * 先把预览归零再开：这个偏好是上次退出时记下来的（设置里那一项），
+                 * 不一定就是关着的 —— 不归零的话下面"切上去 / 切回来"两次判断
+                 * 会正好反过来。
+                 */
+                if (uiState().value(QStringLiteral("markdownPreview")).toBool()) {
+                    dispatch(QStringLiteral("toggleMarkdownPreview"));
+                    for (int i = 0; i < 3; ++i)
+                        QCoreApplication::processEvents();
+                }
+                check(!uiState().value(QStringLiteral("markdownPreview")).toBool(),
+                      QStringLiteral("分栏预览：起点是源码模式"));
+
+                dispatch(QStringLiteral("toggleMarkdownPreview"));
+                for (int i = 0; i < 3; ++i)
+                    QCoreApplication::processEvents();
+                const QString previewWhy =
+                    QStringLiteral("预览 %1 / 能预览 %2 / 当前栏文件 %3 / splitMode %4")
+                        .arg(uiState().value(QStringLiteral("markdownPreview")).toBool() ? 1 : 0)
+                        .arg(uiState().value(QStringLiteral("canPreviewMarkdown")).toBool() ? 1 : 0)
+                        .arg(uiState().value(QStringLiteral("previewFile")).toString())
+                        .arg(uiState().value(QStringLiteral("splitMode")).toString());
+                check(uiState().value(QStringLiteral("markdownPreview")).toBool(),
+                      QStringLiteral("分栏预览：上下分栏下预览开得起来"), previewWhy);
+
+                const QVariantMap lay =
+                    uiState().value(QStringLiteral("splitLayout")).toMap();
+                const bool mainActs =
+                    lay.value(QStringLiteral("mainTabActions")).toBool();
+                const bool mirrorActs =
+                    lay.value(QStringLiteral("mirrorTabActions")).toBool();
+                const bool mainShown =
+                    lay.value(QStringLiteral("mainTabShown")).toBool();
+                const QString previewDetail =
+                    QStringLiteral("开关：上栏 %1 / 下栏 %2；上栏那条看得见 %3")
+                        .arg(mainActs ? 1 : 0).arg(mirrorActs ? 1 : 0)
+                        .arg(mainShown ? 1 : 0);
+                check(mainActs && !mirrorActs && mainShown,
+                      QStringLiteral("上下分栏开着预览时，「源码 / 预览」开关还在看得见的那条上"),
+                      previewDetail);
+
+                /* 切得回去才算有用（按钮在但点不动一样是坏的） */
+                dispatch(QStringLiteral("toggleMarkdownPreview"));
+                for (int i = 0; i < 3; ++i)
+                    QCoreApplication::processEvents();
+                check(!uiState().value(QStringLiteral("markdownPreview")).toBool(),
+                      QStringLiteral("上下分栏开着预览时切得回源码"));
+
+                dispatch(QStringLiteral("splitNone"));
+                for (int i = 0; i < 3; ++i)
+                    QCoreApplication::processEvents();
+                /* 收尾：把这份 md 关掉，别影响后面的检查 */
+                const int mdTab = view->indexOfPath(mdPath);
+                if (mdTab >= 0)
+                    view->closeDocument(mdTab);
+                for (int i = 0; i < 3; ++i)
+                    QCoreApplication::processEvents();
+            }
         }
 
         dispatch(QStringLiteral("closeAllTabs"));
@@ -2368,6 +2784,7 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
     const double probeX = 300.0;
     const double probeY = 120.0;
     QMetaObject::invokeMethod(qmlRoot, "openTabMenu",
+                              Q_ARG(QVariant, QVariant()),      /* 哪一栏：给空 = 当前栏 */
                               Q_ARG(QVariant, QVariant(0)),
                               Q_ARG(QVariant, QVariant()),
                               Q_ARG(QVariant, QVariant(probeX)),

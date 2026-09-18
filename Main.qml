@@ -98,7 +98,12 @@ Rectangle {
      * Markdown 预览（见 qml/components/MarkdownView.qml）
      * ---------------------------------------------------------------- */
 
-    /* 预览开着没（正文区显示渲染结果还是源码） */
+    /*
+     * 预览看的是**当前那一栏**（activeView）的正文。
+     *
+     * 分栏之后两栏可能看着两份不同的文件，所以"预览哪一份"这件事必须跟着
+     * 焦点走 —— 用户点了右边那一栏再点预览，看到的就是右边那一份。
+     */
     property bool markdownPreview: false
     /* 渲染好的 HTML（给 MarkdownView 的 html 属性） */
     property string markdownHtml: ""
@@ -112,18 +117,19 @@ Rectangle {
      */
     property bool markdownPreviewPreferred: false
 
-    /* 当前这份文档能不能预览 Markdown（标签栏那个开关显不显示） */
+    /* 当前这一栏（哪一栏，不是哪一份文档）能不能预览 Markdown */
     readonly property bool canPreviewMarkdown: {
-        if (!view || !view.hasDocument)
+        var v = activeView()
+        if (!v || !v.hasDocument)
             return false
-        var path = String(view.filePath || "")
+        var path = String(v.filePath || "")
         if (path === "")
             return false
         return /\.(md|markdown|mdown|mkd|mdtext)$/i.test(path)
     }
 
     /*
-     * 按当前文档重算预览该不该开着，并重新渲染一遍。
+     * 按当前那一栏重算预览该不该开着，并重新渲染一遍。
      *
      * 每次切换都重渲染（不做缓存）：一份 md 几毫秒，而"改了源码预览不跟着变"
      * 是更难查也更烦人的 bug。触发点：换文档、正文变了、存盘了、用户点开关。
@@ -144,9 +150,10 @@ Rectangle {
             markdownHtml = ""
             return
         }
-        var path = String(view.filePath || "")
+        var v = activeView()
+        var path = v ? String(v.filePath || "") : ""
         var dir = path !== "" ? path.substring(0, path.lastIndexOf("/")) : ""
-        markdownHtml = Cmd.markdownHtml(view.currentText(), dir)
+        markdownHtml = Cmd.markdownHtml(v.currentText(), dir)
         markdownHint = markdownHtml === "" ? "这份文档是空的" : ""
     }
 
@@ -163,7 +170,7 @@ Rectangle {
         if (markdownPreview)
             refreshMarkdown()
         else
-            view.requestEditorFocus()
+            activeView().requestEditorFocus()
     }
 
     /* ------------------------------------------------------------------
@@ -171,17 +178,49 @@ Rectangle {
      * ---------------------------------------------------------------- */
 
     /*
-     * 分栏时有两栏。编辑器那边记着"最后被点的是哪一栏"（EditorViewItem 的
-     * paneFocus），这里现问它 —— 不做成属性是因为"点一下右边"到"菜单命令执行"
-     * 之间可能没有信号，现问永远是最新的。
+     * 分栏时有两栏，两栏是**对等**的编辑组（各自一组标签，共用一份文档池，
+     * 见 qml/components/EditorArea.qml）。编辑器那边记着"最后被点的是哪一栏"
+     * （EditorViewItem 的 paneFocus），这里读它 —— 读的是**属性**（不是
+     * 函数调用），所以绑在它上面的东西会跟着焦点自动重算。
      */
     function activeView() {
-        if (editor.splitting && editor.mirrorView && editor.mirrorView.hasPaneFocus())
+        if (editor.splitting && editor.mirrorView && editor.mirrorView.activePane)
             return editor.mirrorView
         return view
     }
 
-    /* 某一栏被点了：标记只能有一个（两栏都标着的话命令会落到先问到的那个） */
+    /* 前面那一栏现在打开着哪一份（没有文档就是 null；菜单 / 标签用） */
+    function activeDoc() {
+        var v = activeView()
+        if (!v || !v.hasDocument)
+            return null
+        var docs = v.documents
+        var i = v.currentIndex
+        return (i >= 0 && i < docs.length) ? docs[i] : null
+    }
+
+    /*
+     * 视图级设置（字号 / 字体 / 行高 / 换行 / 行号 / 各种竖线 / 缩放 …）
+     * 要**两栏一起**改。
+     *
+     * 这些设置每栏各存一份（Scintilla 的视图选项是视图级的），只改当前那一栏
+     * 的话分栏之后两栏看着就不一样了 —— 用户改的是"编辑器怎么显示"，
+     * 不是"左边那一栏怎么显示"。文档级的东西（语言 / 编码 / 换行符）不走这里，
+     * 那些是按文档设的。
+     */
+    function applyToPanes(fn) {
+        if (editor.mainView)
+            fn(editor.mainView)
+        if (editor.splitting && editor.mirrorView)
+            fn(editor.mirrorView)
+    }
+
+    /*
+     * 某一栏被点了：标记只能有一个（两栏都标着的话命令会落到先问到的那个）。
+     *
+     * paneFocus 在 C++ 侧是可写属性（见 EditorViewItem.h），赋值的同时它会把
+     * "当前编辑器"（instance()）也指过来 —— 快捷键那几条最终就发给它。
+     */
     function notePaneFocus(pane) {
         if (editor.mainView)
             editor.mainView.paneFocus = false
@@ -189,53 +228,83 @@ Rectangle {
             editor.mirrorView.paneFocus = false
         if (pane)
             pane.paneFocus = true
+        /*
+         * "当前栏"变了，预览要按新那一栏重算（两栏可能看着不同的文件：
+         * 点一下右边，md 开关和预览内容都得跟着右边走）。
+         */
+        applyMarkdownPreference()
     }
 
     /* ------------------------------------------------------------------
      * 分栏（tab 右键菜单那三条，见 js/EditorMenus.js 的 tabMenu）
      * ---------------------------------------------------------------- */
 
-    /* tab 右键菜单里那三条的可用状态 */
-    function splitState() {
-        return { canSplit: view.hasDocument, mode: editor.splitMode }
+    /*
+     * tab 右键菜单里那三条的可用状态。
+     *
+     * canSplit 看的是**右键点中的那一栏**里有没有文档（不是"主栏有没有"）——
+     * 分栏之后主栏完全可能是空的，而右边那一栏开着东西。
+     */
+    function splitState(pane) {
+        var v = pane ? pane : activeView()
+        return { canSplit: !!(v && v.hasDocument),
+                 mode: editor.splitMode,
+                 count: v ? v.documents.length : 0 }
     }
 
     /*
      * 开 / 关 / 换分栏方向。
      *
-     * 两件事必须一起做：布局（editor.splitMode）和绑定（editor.bindMirror ——
-     * 把主栏的正文推给镜像栏）。只做一半的话就是"分了两栏，右边一直空着"。
+     * 两件事必须一起做：布局（editor.splitMode）和第二栏有没有内容
+     * （editor.openMirrorWithCurrent —— 把**当前那一份**放进新分出来的那一栏）。
+     * 只做一半的话就是"分了两栏，另一边一直空着"。
      */
     function setSplit(mode) {
         var next = (editor.splitMode === mode) ? "" : mode
-        if (next !== "" && !view.hasDocument)
+        if (next !== "" && (!activeView() || !activeView().hasDocument))
             return
         editor.splitMode = next
-        Cmd.remember("splitMode", next)
-        if (next === "")
+        if (next === "") {
             editor.unbindMirror()
-        else
-            editor.bindMirror()
-        /* 切完把焦点还给主编辑器：用户刚看完菜单，接着多半要打字 */
-        Qt.callLater(function () { if (view.hasDocument) view.requestEditorFocus() })
+        } else {
+            /*
+             * 分栏时把"当前那一份"放进第二栏（VS Code 里 split editor 也是
+             * 把当前这个标签挪到新组里）。第二栏之后想换别的文件，点它自己
+             * 那条标签栏就行 —— 两栏是各自独立的标签。
+             */
+            editor.openMirrorWithCurrent()
+        }
+        /* 切完把焦点还给当前那一栏：用户刚看完菜单，接着多半要打字 */
+        Qt.callLater(function () {
+            var v = activeView()
+            if (v && v.hasDocument)
+                v.requestEditorFocus()
+        })
     }
 
-    /* 启动时只**记下**分栏模式：那时还没有文档，真绑等第一个文档打开 */
-    function restoreSplit() {
-        var mode = Cmd.recall("splitMode", "")
-        if (mode === "right" || mode === "down")
-            editor.splitMode = mode
-    }
-
-    /* 文档池变了：分栏该绑的绑上（启动恢复那条路走到这里才算完成） */
-    function syncSplitWithDocuments() {
+    /*
+     * 第二栏被关空了（最后一条标签关掉）：这一栏就别留着了，整条收起。
+     *
+     * 用户报的"右边那条小叉点了没反应"就是这里：小叉本身是好的
+     * （closeDocument 之后 documents 确实空了），但紧接着那一下
+     * "第二栏空了就补一份主栏当前文档"又把标签长了回来 —— 屏幕上看着
+     * 就是点了没用。所以补那一份的逻辑去掉了，改成"空了就退出分栏"。
+     */
+    function leaveSplitForEmptyMirror() {
         if (editor.splitMode === "")
             return
-        if (view.hasDocument)
-            editor.bindMirror()
-        else
-            editor.unbindMirror()
+        editor.splitMode = ""
+        editor.unbindMirror()
     }
+
+    /*
+     * 分栏**不跨启动记着**：程序退在"两栏"的样子上，下次打开还是单栏
+     * （用户要的就是这个 —— 分栏是一次性的看文档动作，不该变成启动布局）。
+     *
+     * 所以这里没有 restoreSplit：splitMode 开局恒为 ""，想分栏点右键菜单 /
+     * Alt+Shift+2。原来那个"记下来 + 下次照原样开"的写法连设置项
+     * （editor/splitMode）一起去掉了，免得留一个谁也不读的键。
+     */
 
     // ---- 左侧列表宽度（可由中间间隙拖动调整） ----
     property real folderTreeWidth: 300
@@ -429,7 +498,8 @@ Rectangle {
      * （renameTreeFile 会把新路径同步给编辑器标签）。
      */
     function currentTreePath() {
-        var path = view.filePath
+        var v = activeView()
+        var path = v ? String(v.filePath || "") : ""
         return isManagedPath(path) ? path : ""
     }
 
@@ -508,6 +578,9 @@ Rectangle {
      *
      * 树上没有"条目"了，点开的是一份真实的 md，所以走 openFile() 那条路 ——
      * 已经开着就切回那条标签（按路径认），Ctrl+S 直接写回这份文件。
+     *
+     * 打开在**当前那一栏**上（和 VS Code 一样：文件开在刚点过的那一组里），
+     * 另一栏不动。
      */
     function openTreeFile(rowOrPath) {
         var path = (typeof rowOrPath === "string") ? rowOrPath : rowOrPath.path
@@ -517,17 +590,21 @@ Rectangle {
         selectedPath = path
         editor.previewItem = null
 
-        var index = view.indexOfPath(path)
+        var v = activeView()
+        if (!v)
+            return
+
+        var index = v.indexOfPath(path)
         if (index >= 0) {
-            view.activateDocument(index)
-            view.requestEditorFocus()
+            v.activateDocument(index)
+            v.requestEditorFocus()
             return
         }
 
-        if (view.openFile(path) < 0)
-            Cmd.alert("打开失败", view.lastError)
+        if (v.openFile(path) < 0)
+            Cmd.alert("打开失败", v.lastError)
         else
-            view.requestEditorFocus()
+            v.requestEditorFocus()
     }
 
     /* ------------------------------------------------------------------
@@ -550,8 +627,12 @@ Rectangle {
             return
         }
 
-        /* 打开着的那个标签也要跟着换，否则下一次 Ctrl+S 会写回旧名字 */
-        view.updateDocumentPath(path, newPath)
+        /*
+         * 打开着的那个标签也要跟着换，否则下一次 Ctrl+S 会写回旧名字。
+         * 文档池是两栏共用的，所以哪一栏开着它、开在哪个标签上都不用管 ——
+         * 两边都会看到新名字。
+         */
+        applyToPanes(function (v) { v.updateDocumentPath(path, newPath) })
         if (selectedPath === path)
             selectedPath = newPath
     }
@@ -562,15 +643,23 @@ Rectangle {
      * 问句和关标签都是异步的（卡片答完才走信号回来，见 AskCard.qml），
      * 所以"删"这一步得当成回调传进去 —— 用户按取消就整条链停下，
      * 磁盘上那份一动不动。
+     *
+     * 分栏时两栏可能都开着它（同一份文档），所以两栏都要关 —— 关掉一条
+     * 标签不会动文档池里那一份，另一栏那条还挂在那儿。
      */
     function deleteTreeFile(path) {
         askConfirm("删除文件", "确定删除这一份吗？\n\n" + path, function () {
-            var index = view.indexOfPath(path)
-            if (index < 0) {
+            var pairs = []
+            if (editor.mainView && editor.mainView.indexOfPath(path) >= 0)
+                pairs.push({ pane: editor.mainView, path: path })
+            if (editor.splitting && editor.mirrorView
+                    && editor.mirrorView.indexOfPath(path) >= 0)
+                pairs.push({ pane: editor.mirrorView, path: path })
+            if (pairs.length === 0) {
                 removeTreeFile(path)        /* 没开着，直接删 */
                 return
             }
-            requestCloseTabs([index], function () { removeTreeFile(path) })
+            closeTheseTabs(pairs, function () { removeTreeFile(path) })
         })
     }
 
@@ -707,7 +796,8 @@ Rectangle {
      * ---------------------------------------------------------------- */
 
     function commentPrefix() {
-        var lang = view.language
+        var v = activeView()
+        var lang = v ? v.language : "plain"
         if (lang === "python" || lang === "bash" || lang === "yaml"
                 || lang === "perl" || lang === "ruby" || lang === "makefile")
             return "#"
@@ -725,49 +815,57 @@ Rectangle {
     }
 
     function newFile() {
-        view.newDocument()
+        var v = activeView()
+        if (!v)
+            return
+        v.newDocument()
         editor.previewItem = null
-        view.requestEditorFocus()
+        v.requestEditorFocus()
     }
 
     function openFile() {
         var path = Cmd.openFileDialog()
         if (path === "")
             return
-        if (view.openFile(path) < 0)
-            Cmd.alert("打开失败", view.lastError)
+        var v = activeView()
+        if (!v)
+            return
+        if (v.openFile(path) < 0)
+            Cmd.alert("打开失败", v.lastError)
         else {
             editor.previewItem = null
-            view.requestEditorFocus()
+            v.requestEditorFocus()
         }
     }
 
     function saveFile() {
-        if (!view.hasDocument)
+        var v = activeView()
+        if (!v || !v.hasDocument)
             return false
         /*
          * 剪贴板内容现在是真实文件（日期目录里的 md），打开它就带着路径，
          * Ctrl+S 走的是普通保存。只有真正的未命名空白文档才需要问路径。
          */
-        if (view.filePath === "")
+        if (v.filePath === "")
             return saveFileAs()
-        if (!view.saveCurrent()) {
-            Cmd.alert("保存失败", view.lastError)
+        if (!v.saveCurrent()) {
+            Cmd.alert("保存失败", v.lastError)
             return false
         }
         return true
     }
 
     function saveFileAs() {
-        if (!view.hasDocument)
+        var v = activeView()
+        if (!v || !v.hasDocument)
             return false
-        var suggested = view.filePath !== "" ? Cmd.fileNameOf(view.filePath)
-                                             : view.displayName + ".txt"
+        var suggested = v.filePath !== "" ? Cmd.fileNameOf(v.filePath)
+                                          : v.displayName + ".txt"
         var path = Cmd.saveFileDialog(suggested)
         if (path === "")
             return false
-        if (!view.saveCurrentAs(path)) {
-            Cmd.alert("保存失败", view.lastError)
+        if (!v.saveCurrentAs(path)) {
+            Cmd.alert("保存失败", v.lastError)
             return false
         }
         return true
@@ -776,25 +874,31 @@ Rectangle {
     /*
      * 关一个标签。
      *
+     * pane 不给就是"当前那一栏"；标签栏点小叉 / 右键菜单会显式传是**哪一栏**
+     * 的哪一个标签（分栏之后两栏各有一组标签，不能想当然）。
+     *
      * 没改动的当场就关（和以前一样同步返回真假）；有未保存改动时先弹
      * 「保存 / 不保存 / 取消」那块卡片（见 qml/components/AskCard.qml）——
      * 卡片是原生小窗、答完走信号回来，所以这条路上**返回值只能当"这一刻
      * 关了没"看**（返回 false 不代表用户取消了）。要"关掉之后接着做点什么"
      * （比如删文件），走 requestCloseTabs(下标, 回调)。
      */
-    function closeTab(index) {
-        var docs = view.documents
+    function closeTab(index, pane) {
+        var v = pane ? pane : activeView()
+        if (!v)
+            return false
+        var docs = v.documents
         if (index === undefined || index === null || index < 0)
-            index = view.currentIndex
+            index = v.currentIndex
         if (index < 0 || index >= docs.length)
             return false
 
         if (docs[index].modified) {
-            requestCloseTabs([index], null)
+            requestCloseTabs([index], null, v)
             return false
         }
 
-        finishCloseTab(index)
+        finishCloseTab(index, v)
         return true
     }
 
@@ -803,22 +907,49 @@ Rectangle {
      * 答完再接着关下一个；中途按"取消"整串停下 —— 这就是以前那个
      * for 循环 + return 的语义，只是现在要跨帧等回答。
      *
-     * 队列里存的是**当时那一份的身份**（下标 + 标题 + 路径），不是光存下标：
-     * 卡片是非模态的，等回答这段时间用户还能去关别的标签，下标会跟着挪
-     * （见 locateQueued）。
+     * 队列里存的是**当时那一份的身份**（哪一栏 + 下标 + 标题 + 路径），
+     * 不是光存下标：卡片是非模态的，等回答这段时间用户还能去关别的标签，
+     * 下标会跟着挪（见 locateQueued）。
      */
     property var closeQueue: []         /* 等着关的那些标签，从后往前 */
     property var closeQueueThen: null   /* 整串关完之后接着做的事 */
     property var pendingClose: null     /* 正在等回答的那一条；null = 没在等 */
 
-    function requestCloseTabs(indices, then) {
+    /*
+     * 关掉指定的几个标签（每一条自己带"哪一栏 + 哪一份文件"）。
+     *
+     * 给"删文件之前先把它开着的标签关掉"用：分栏时两栏可能同时开着它，
+     * 而两栏的标签下标是各自算的，所以只能一条一条点名。
+     */
+    function closeTheseTabs(pairs, then) {
+        if (!pairs || pairs.length === 0) {
+            if (then)
+                then()
+            return
+        }
+        for (var i = 0; i < pairs.length; ++i)
+            closeQueue.push({ pane: pairs[i].pane, index: -1, title: "",
+                              path: pairs[i].path })
         if (then)
             closeQueueThen = then
-        var docs = view.documents
+        pumpCloseQueue()
+    }
+
+    /*
+     * 关掉某一栏里的一串标签（快捷键 / 菜单那一类，下标是那一栏自己的）。
+     */
+    function requestCloseTabs(indices, then, pane) {
+        var v = pane ? pane : activeView()
+        if (!v)
+            return
+        if (then)
+            closeQueueThen = then
+        var docs = v.documents
         for (var i = 0; i < indices.length; ++i) {
             var d = docs[indices[i]]
             if (d)
-                closeQueue.push({ index: indices[i], title: d.title, path: d.filePath })
+                closeQueue.push({ pane: v, index: indices[i], title: d.title,
+                                  path: d.filePath })
         }
         pumpCloseQueue()
     }
@@ -830,19 +961,19 @@ Rectangle {
         while (closeQueue.length > 0) {
             var entry = closeQueue.shift()
             var index = locateQueued(entry)
-            if (index < 0)
+            if (index < 0 || !entry.pane)
                 continue                /* 等回答期间被别处关掉了，跳过 */
 
-            if (view.documents[index].modified) {
+            if (entry.pane.documents[index].modified) {
                 pendingClose = entry
-                saveAsk.ask("“" + entry.title + "”有未保存的修改。",
+                saveAsk.ask("“" + entry.pane.documents[index].title + "”有未保存的修改。",
                             "要保存这些修改吗？",
                             [ { label: "保存", primary: true },
                               { label: "不保存" },
                               { label: "取消" } ])
                 return
             }
-            finishCloseTab(index)
+            finishCloseTab(index, entry.pane)
         }
 
         var then = closeQueueThen
@@ -858,14 +989,19 @@ Rectangle {
      * 宁可漏关一个，也不能关错文件。
      */
     function locateQueued(entry) {
-        var docs = view.documents
+        var v = entry.pane
+        if (!v)
+            return -1
+        /* 按路径认最稳（两栏的文档池是同一份，关哪一栏都是同一份文件） */
+        if (entry.path !== "") {
+            var byPath = v.indexOfPath(entry.path)
+            if (byPath >= 0)
+                return byPath
+        }
+        var docs = v.documents
         var i = entry.index
-        if (i >= 0 && i < docs.length
-                && docs[i].title === entry.title
-                && docs[i].filePath === entry.path)
+        if (i >= 0 && i < docs.length && docs[i].title === entry.title)
             return i
-        if (entry.path !== "")
-            return view.indexOfPath(entry.path)
         return -1
     }
 
@@ -884,29 +1020,46 @@ Rectangle {
             return
         }
         var index = locateQueued(entry)
-        if (index < 0) {
+        if (index < 0 || !entry.pane) {
             /* 问的那一份已经不在了：宁可什么都不关，也不能关错文件 */
             closeQueue = []
             closeQueueThen = null
             return
         }
         if (choice === 0) {
-            view.activateDocument(index)
+            /*
+             * 存的是**那一栏那一份**：先切过去再走普通保存那条路
+             * （saveFile 作用在"当前栏"上，所以这里要先把它切到前台）。
+             */
+            notePaneFocus(entry.pane)
+            entry.pane.activateDocument(index)
             if (!saveFile()) {          /* 存不下：和以前一样，什么都不做 */
                 closeQueue = []
                 closeQueueThen = null
                 return
             }
         }
-        finishCloseTab(index)
+        finishCloseTab(index, entry.pane)
         pumpCloseQueue()
     }
 
     /* 真把标签关掉（问句已经答完，或者本来就不需要问） */
-    function finishCloseTab(index) {
-        var docs = view.documents
-        var closedPath = (index >= 0 && index < docs.length) ? docs[index].filePath : ""
-        view.closeDocument(index)
+    function finishCloseTab(index, pane) {
+        var v = pane ? pane : activeView()
+        if (!v)
+            return
+        var docs = v.documents
+        var closedPath = (index >= 0 && index < docs.length) ? String(docs[index].filePath)
+                                                             : ""
+        v.closeDocument(index)
+
+        /*
+         * 第二栏最后一条标签关掉了 = 这一栏不用了：顺手把分栏收起。
+         * （用户点右边那个小叉，要的就是"这一栏没了"；不收的话右边会留一条
+         * 空标签栏，看着像没关干净。见 leaveSplitForEmptyMirror。）
+         */
+        if (editor.mirrorView && v === editor.mirrorView && v.documents.length === 0)
+            leaveSplitForEmptyMirror()
 
         /*
          * 左树那一行的蓝底跟着撤掉。
@@ -915,50 +1068,94 @@ Rectangle {
          * 看着像那份还开着。蓝底本来就是"你点开的是哪一份文件"
          * （selectedPath，见 openTreeFile / locateCurrentItem），关掉的正是它
          * 就该清掉 —— 留着的唯一结果就是"界面上没有这个文件了，树上却还选着"。
+         *
+         * 分栏时另一栏可能还开着同一份，那就不该撤（文件还在界面上）。
          */
-        if (closedPath !== "" && closedPath === selectedPath)
+        if (closedPath !== "" && closedPath === selectedPath
+                && !pathStillOpen(closedPath))
             selectedPath = ""
 
-        if (view.documents.length === 0)
+        if (editor.mainView && editor.mainView.documents.length === 0
+                && (!editor.splitting || (editor.mirrorView
+                                          && editor.mirrorView.documents.length === 0)))
             editor.previewItem = null
     }
 
+    /* 这个路径还开在某一栏里吗（分栏时两栏都要看） */
+    function pathStillOpen(path) {
+        if (path === "")
+            return false
+        if (editor.mainView && editor.mainView.indexOfPath(path) >= 0)
+            return true
+        if (editor.splitting && editor.mirrorView
+                && editor.mirrorView.indexOfPath(path) >= 0)
+            return true
+        return false
+    }
+
     /* 从后往前关，前面的下标才不会跟着挪 */
-    function closeTabs(indices) {
+    function closeTabs(indices, pane) {
         indices.sort(function (a, b) { return b - a })
-        requestCloseTabs(indices, null)
+        requestCloseTabs(indices, null, pane)
     }
 
     /*
      * 关掉除 index 之外的标签。
      *
-     * index 不给就是"当前标签"（菜单栏 / 快捷键那条路的语义）；
-     * 标签右键菜单会传**点中的那一个** —— 右键点的标签未必是激活的，
-     * 不传的话"关闭其他"会把用户刚点的那一个也关掉。
+     * index / pane 不给就是"当前那一栏的当前标签"（菜单栏 / 快捷键那条路的
+     * 语义）；标签右键菜单会传**点中的那一个**（以及它是哪一栏）—— 右键点的
+     * 标签未必是激活的，不传的话"关闭其他"会把用户刚点的那一个也关掉。
      */
-    function closeOtherTabs(index) {
+    function closeOtherTabs(index, pane) {
+        var v = pane ? pane : activeView()
+        if (!v)
+            return
         if (index === undefined || index === null)
-            index = view.currentIndex
+            index = v.currentIndex
         var rest = []
-        for (var i = 0; i < view.documents.length; ++i)
+        for (var i = 0; i < v.documents.length; ++i)
             if (i !== index) rest.push(i)
-        closeTabs(rest)
+        closeTabs(rest, v)
     }
 
-    function closeAllTabs() {
+    function closeAllTabs(pane) {
+        var v = pane ? pane : activeView()
+        if (!v)
+            return
         var all = []
-        for (var i = 0; i < view.documents.length; ++i)
+        for (var i = 0; i < v.documents.length; ++i)
             all.push(i)
-        closeTabs(all)
+        closeTabs(all, v)
     }
 
+    /*
+     * 全部保存（"文件"菜单那一条）。
+     *
+     * 分栏时两栏各自的标签都要存到 —— 文档池是共用的，同一份文档被两栏同时
+     * 开着时只存一遍（按"存过哪些路径"去重，免得弹两次同一个对话框）。
+     */
     function saveAll() {
-        for (var i = 0; i < view.documents.length; ++i) {
-            if (!view.documents[i].modified)
+        var done = ({})
+        var panes = [ editor.mainView ]
+        if (editor.splitting && editor.mirrorView)
+            panes.push(editor.mirrorView)
+        for (var p = 0; p < panes.length; ++p) {
+            var v = panes[p]
+            if (!v)
                 continue
-            view.activateDocument(i)
-            if (!saveFile())
-                return
+            for (var i = 0; i < v.documents.length; ++i) {
+                var d = v.documents[i]
+                if (!d.modified)
+                    continue
+                var key = d.filePath !== "" ? d.filePath : ("untitled:" + i)
+                if (done[key])
+                    continue
+                done[key] = true
+                notePaneFocus(v)
+                v.activateDocument(i)
+                if (!saveFile())
+                    return
+            }
         }
     }
 
@@ -967,11 +1164,15 @@ Rectangle {
      *
      * 落点和菜单栏那套不一样：菜单栏是 openFor（挂在控件正下方），
      * 这里是 openAtPoint —— 菜单左上角紧贴鼠标右键的那一点。
-     * 条目见 js/EditorMenus.js 的 tabMenu（关闭 / 关闭其他 / 关闭全部）。
+     * 条目见 js/EditorMenus.js 的 tabMenu（关闭 / 关闭其他 / 关闭全部 + 分栏）。
+     *
+     * pane 是**右键点中的那一条标签栏属于哪一栏**：分栏之后两条标签栏各有
+     * 自己的一组标签，"关闭其他"必须以那一栏为准。
      */
-    function openTabMenu(index, anchor, x, y) {
+    function openTabMenu(pane, index, anchor, x, y) {
+        var v = pane ? pane : activeView()
         ddMenu.openAtPoint(anchor, x, y,
-                           Menus.tabMenu(view, index, shortcutOverrides(), splitState()))
+                           Menus.tabMenu(v, index, shortcutOverrides(), splitState(v)))
     }
 
     /* name -> 当前生效的快捷键。菜单里写的是出厂默认值，改过键的要以这份为准 */
@@ -997,7 +1198,7 @@ Rectangle {
      * 就是菜单里弹出的条目。
      */
     function editMenuActs() {
-        var items = Menus.editMenu(view, shortcutOverrides(), {
+        var items = Menus.editMenu(activeView(), shortcutOverrides(), {
             can: canPreviewMarkdown,
             on: markdownPreview,
             canFormat: currentFormatEngine() !== ""
@@ -1017,7 +1218,7 @@ Rectangle {
      * （见 js/EditorMenus.js 的 editMenu），所以这里也把 preview 写死成 true。
      */
     function editMenuPreviewActs() {
-        var items = Menus.editMenu(view, shortcutOverrides(), {
+        var items = Menus.editMenu(activeView(), shortcutOverrides(), {
             can: canPreviewMarkdown,
             on: markdownPreview,
             canFormat: currentFormatEngine() !== "",
@@ -1036,9 +1237,16 @@ Rectangle {
         return out
     }
 
-    function tabMenuActs(index) {
-        var items = Menus.tabMenu(view, index === undefined ? 0 : index,
-                                  shortcutOverrides(), splitState())
+    /*
+     * tab 右键菜单的动作名（自检用）。
+     *
+     * pane 不给就用当前那一栏 —— 自检模拟的是"在界面上右键一条标签"，
+     * 走的是和 openTabMenu 同一个构造。
+     */
+    function tabMenuActs(index, pane) {
+        var v = pane ? pane : activeView()
+        var items = Menus.tabMenu(v, index === undefined ? 0 : index,
+                                  shortcutOverrides(), splitState(v))
         var out = []
         for (var i = 0; i < items.length; ++i)
             out.push(items[i] && items[i].act !== undefined ? String(items[i].act) : "separator")
@@ -1053,7 +1261,7 @@ Rectangle {
      * 有一份，自检要认的就是它到底给了哪几档。
      */
     function settingsMenuActs() {
-        var items = Menus.settingsMenu(view, shortcutOverrides())
+        var items = Menus.settingsMenu(activeView(), shortcutOverrides())
         var out = []
         for (var i = 0; i < items.length; ++i) {
             if (items[i] && items[i].act !== undefined)
@@ -1069,7 +1277,7 @@ Rectangle {
      * 自检据此确认新的两条竖线开关确实进了菜单，而不是只在 C++ 里有属性。
      */
     function viewMenuActs() {
-        var items = Menus.viewMenu(view, shortcutOverrides())
+        var items = Menus.viewMenu(activeView(), shortcutOverrides())
         var out = []
         for (var i = 0; i < items.length; ++i) {
             if (items[i] && items[i].act !== undefined)
@@ -1250,9 +1458,10 @@ Rectangle {
      * 重开一次菜单就通了。
      */
     function currentFormatEngine() {
-        if (!view.hasDocument)
+        var v = activeView()
+        if (!v || !v.hasDocument)
             return ""
-        return Fmt.engineLabel(view.language, view.filePath)
+        return Fmt.engineLabel(v.language, v.filePath)
     }
 
     /* ------------------------------------------------------------------
@@ -1274,11 +1483,6 @@ Rectangle {
         var v = activeView()
         if (!v || !v.hasDocument)
             return
-        if (v.readOnly) {
-            notify("格式化", "这一栏是只读的（分栏的镜像那一栏）。要点它一下、"
-                             + "让命令落到它身上，或者回主栏去改。")
-            return
-        }
         var engine = Fmt.engineLabel(v.language, v.filePath)
         if (engine === "") {
             notify("格式化", "这个语言没有可用的格式化器。\n\n"
@@ -1301,7 +1505,7 @@ Rectangle {
     /* 把 JSON 重排一遍（不依赖任何外部工具，见 Formatter 的内置那几样） */
     function formatCurrentAsJson() {
         var v = activeView()
-        if (!v || !v.hasDocument || v.readOnly)
+        if (!v || !v.hasDocument)
             return
         var before = v.currentText()
         var after = Fmt.format(before, "json", v.filePath)
@@ -1316,30 +1520,35 @@ Rectangle {
      * 校验（中文用词 / 代码语法，见 src/Checker.h）
      * ---------------------------------------------------------------- */
 
+    /*
+     * 校验**当前那一栏**（分栏时两栏可能看着两份不同的文件，校验的是用户
+     * 正在看的那一份）。结果里那个"跳过去"要跳回**同一栏**，所以把那一栏
+     * 记下来（checkPane），点卡片上的问题时按它跳。
+     */
+    property var checkPane: null
+
     function runCheck() {
-        if (!view.hasDocument) {
+        var v = activeView()
+        if (!v || !v.hasDocument) {
             notify("校验", "先打开一份文件。")
             return
         }
-        /*
-         * 校验**始终针对主栏那一份**（view），不是 activeView()：分栏时镜像栏
-         * 只是同一份正文的影子，校验两遍没有意义，而且结果里的行号要能对应上
-         * 那个"跳过去"的动作（跳的是主栏）。
-         */
-        checkCard.docTitle = view.displayName
+        checkPane = v
+        checkCard.docTitle = v.displayName
         checkCard.parentTransient = window
         checkCard.placeInParent()
         checkCard.show()
-        Check.check(view.currentText(), view.language, view.filePath)
+        Check.check(v.currentText(), v.language, v.filePath)
     }
 
     /* 卡片上点一条问题：跳到正文那一行，并把出问题那一段选中 */
     function jumpToIssue(row, col, endCol) {
-        if (!view.hasDocument)
+        var v = (checkPane && checkPane.hasDocument) ? checkPane : activeView()
+        if (!v || !v.hasDocument)
             return
-        view.gotoLine(row)
-        view.selectRange(row, col, row, Math.max(col + 1, endCol))
-        view.requestEditorFocus()
+        v.gotoLine(row)
+        v.selectRange(row, col, row, Math.max(col + 1, endCol))
+        v.requestEditorFocus()
     }
 
     /* 卡片上"复制结果"：把问题清单拼成一段文字进剪贴板 */
@@ -1361,7 +1570,8 @@ Rectangle {
      * ---------------------------------------------------------------- */
 
     function compareCurrentWithFile() {
-        compareTabWithFile(view.currentIndex)
+        var v = activeView()
+        compareTabWithFile(v ? v.currentIndex : -1, v)
     }
 
     /*
@@ -1369,9 +1579,14 @@ Rectangle {
      *
      * 这一份用**编辑器里的正文**（可能有未保存的改动，用户想看的正是"我现在
      * 这份和那个文件差在哪"）；另一份从磁盘读（它没开在编辑器里，看不到内存）。
+     *
+     * pane 不给就是当前那一栏（分栏时两栏各有各的标签下标）。
      */
-    function compareTabWithFile(index) {
-        var docs = view.documents
+    function compareTabWithFile(index, pane) {
+        var v = pane ? pane : activeView()
+        if (!v)
+            return
+        var docs = v.documents
         var doc = (index >= 0 && index < docs.length) ? docs[index] : null
         if (!doc) {
             notify("文件对比", "先打开一份文件。")
@@ -1388,11 +1603,11 @@ Rectangle {
             return
         }
         /* 第 index 个标签的正文：先切到它读一份，再切回来 */
-        var wasIndex = view.currentIndex
-        view.activateDocument(index)
-        var thisText = view.currentText()
+        var wasIndex = v.currentIndex
+        v.activateDocument(index)
+        var thisText = v.currentText()
         if (wasIndex !== index && wasIndex >= 0)
-            view.activateDocument(wasIndex)
+            v.activateDocument(wasIndex)
 
         Differ.compare(thisText, otherText, doc.filePath, other)
         diffCard.parentTransient = window
@@ -1436,7 +1651,7 @@ Rectangle {
     }
 
     function showFind(replace) {
-        if (!view.hasDocument)
+        if (!activeView() || !activeView().hasDocument)
             return
         if (replace) editor.findBar.openReplace()
         else editor.findBar.openFind()
@@ -1451,28 +1666,33 @@ Rectangle {
     }
 
     function gotoLine() {
-        if (!view.hasDocument)
+        var v = activeView()
+        if (!v || !v.hasDocument)
             return
-        var line = Cmd.askLineNumber(view.lineCount, view.cursorLine)
+        var line = Cmd.askLineNumber(v.lineCount, v.cursorLine)
         if (line > 0) {
-            view.gotoLine(line)
-            view.requestEditorFocus()
+            v.gotoLine(line)
+            v.requestEditorFocus()
         }
     }
 
+    /* 换行 / 行号 / 空白字符是**视图级**设置，两栏一起改（见 applyToPanes） */
     function toggleWrap() {
-        view.wrapEnabled = !view.wrapEnabled
-        Cmd.remember("wrap", view.wrapEnabled ? "1" : "0")
+        var on = !view.wrapEnabled
+        applyToPanes(function (v) { v.wrapEnabled = on })
+        Cmd.remember("wrap", on ? "1" : "0")
     }
 
     function toggleLineNumbers() {
-        view.lineNumbersVisible = !view.lineNumbersVisible
-        Cmd.remember("lineNumbers", view.lineNumbersVisible ? "1" : "0")
+        var on = !view.lineNumbersVisible
+        applyToPanes(function (v) { v.lineNumbersVisible = on })
+        Cmd.remember("lineNumbers", on ? "1" : "0")
     }
 
     function toggleWhitespace() {
-        view.whitespaceVisible = !view.whitespaceVisible
-        Cmd.remember("whitespace", view.whitespaceVisible ? "1" : "0")
+        var on = !view.whitespaceVisible
+        applyToPanes(function (v) { v.whitespaceVisible = on })
+        Cmd.remember("whitespace", on ? "1" : "0")
     }
 
     function showShortcuts() {
@@ -1683,37 +1903,51 @@ Rectangle {
         if (act.indexOf("commentFontSize:") === 0) {
             var cpx = parseInt(act.substring(16))
             if (!isNaN(cpx) && cpx >= 0 && cpx <= 72)
-                view.commentFontPixelSize = cpx
+                applyToPanes(function (v) { v.commentFontPixelSize = cpx })
             return
         }
-        if (act.indexOf("font:") === 0) { view.fontFamily = act.substring(5); return }
+        if (act.indexOf("font:") === 0) {
+            var fam = act.substring(5)
+            applyToPanes(function (v) { v.fontFamily = fam })
+            return
+        }
         if (act.indexOf("lineHeight:") === 0) {
             var lhf = parseFloat(act.substring(11))
+            /* 越界由 C++ 侧夹住（1.0 ~ 3.0） */
             if (!isNaN(lhf))
-                view.lineHeightFactor = lhf     // 越界由 C++ 侧夹住（1.0 ~ 3.0）
+                applyToPanes(function (v) { v.lineHeightFactor = lhf })
             return
         }
         /* 设置面板上的"行高 − / 行高 +"：按档位表走一格（表在 js/EditorMenus.js） */
         if (act === "lineHeightDown" || act === "lineHeightUp") {
-            view.lineHeightFactor =
-                Menus.stepLineHeight(view.lineHeightFactor, act === "lineHeightUp" ? 1 : -1)
+            var nextLh = Menus.stepLineHeight(view.lineHeightFactor,
+                                              act === "lineHeightUp" ? 1 : -1)
+            applyToPanes(function (v) { v.lineHeightFactor = nextLh })
             return
         }
-        if (act.indexOf("lang:") === 0) { view.language = act.substring(5); return }
-        if (act.indexOf("encoding:") === 0) { view.encoding = act.substring(9); return }
-        if (act.indexOf("eol:") === 0) { view.eolMode = act.substring(4); return }
+        /*
+         * 语言 / 编码 / 换行符是**按文档**设的（Scintilla 的样式表在文档里），
+         * 所以只作用在"当前那一栏当前那一份"上 —— 另一栏看的是别的文件时
+         * 不该被顺手改掉。
+         */
+        if (act.indexOf("lang:") === 0) { activeView().language = act.substring(5); return }
+        if (act.indexOf("encoding:") === 0) {
+            activeView().encoding = act.substring(9)
+            return
+        }
+        if (act.indexOf("eol:") === 0) { activeView().eolMode = act.substring(4); return }
         if (act.indexOf("menu:") === 0) { topBar.openGroup(act.substring(5)); return }
         if (act.indexOf("folder:") === 0) { activateFolder(act.substring(7)); return }
 
         /*
          * 滚动条右键那七条：scroll:<h|v>:<动作>（见 js/EditorMenus.js 的
          * scrollBarMenu）。动作直接落到 QScrollBar 那一套上，见
-         * EditorViewItem::scrollBarAction。
+         * EditorViewItem::scrollBarAction。滚的是**弹菜单那一栏**。
          */
         if (act.indexOf("scroll:") === 0) {
             var scrollParts = act.split(":")
             if (scrollParts.length === 3)
-                view.scrollBarAction(scrollParts[1], scrollParts[2])
+                activeView().scrollBarAction(scrollParts[1], scrollParts[2])
             return
         }
 
@@ -1752,7 +1986,6 @@ Rectangle {
             closeOtherTabs(parseInt(act.substring(12)))
             return
         }
-
         /* ---- 文件 ---- */
         if (act === "new") { newFile(); return }
         if (act === "open") { openFile(); return }
@@ -1779,10 +2012,15 @@ Rectangle {
         if (act === "save") { saveFile(); return }
         if (act === "saveAs") { saveFileAs(); return }
         if (act === "saveAll") { saveAll(); return }
-        if (act === "closeTab") { closeTab(view.currentIndex); return }
+        /*
+         * 关标签这一类（菜单栏 / 快捷键 / 标签右键菜单）作用在**当前那一栏**上
+         * —— 分栏之后两栏各有自己的一组标签，"关当前标签"就是关前面那一栏里
+         * 当前那一个。
+         */
+        if (act === "closeTab") { closeTab(activeView().currentIndex); return }
         if (act === "closeOtherTabs") { closeOtherTabs(); return }
         if (act === "closeAllTabs") { closeAllTabs(); return }
-        if (act === "print") { view.printDocument(); return }
+        if (act === "print") { activeView().printDocument(); return }
         /* 刷新 = 重扫磁盘（文件可能在别的程序里被改过 / 删过），再重建左树 */
         if (act === "refresh") { Store.rescan(); refresh(); return }
         /* 退出 = 真退出进程（理由见上面 quitAsk 那段：有便签时关窗口退不掉） */
@@ -1801,7 +2039,12 @@ Rectangle {
         if (act === "deleteLine") { activeView().deleteLine(); return }
         if (act === "duplicateLine") { activeView().duplicateLine(); return }
         if (act === "toggleComment") { activeView().toggleComment(commentPrefix()); return }
-        if (act === "toggleReadOnly") { view.readOnly = !view.readOnly; return }
+        /* 只读是**视图级**的，两栏一起切（免得只有一栏打不了字，像坏了） */
+        if (act === "toggleReadOnly") {
+            var ro = !view.readOnly
+            applyToPanes(function (v) { v.readOnly = ro })
+            return
+        }
         if (act === "formatCode") { formatCurrent(); return }
         if (act === "formatJson") { formatCurrentAsJson(); return }
         if (act === "toggleMarkdownPreview") { toggleMarkdownPreview(); return }
@@ -1817,7 +2060,8 @@ Rectangle {
         /* ---- 文件对比 ---- */
         if (act === "compareWithFile") { compareCurrentWithFile(); return }
         if (act.indexOf("compareTab:") === 0) {
-            compareTabWithFile(parseInt(act.substring(11)))
+            var cmpView = activeView()
+            compareTabWithFile(parseInt(act.substring(11)), cmpView)
             return
         }
 
@@ -1833,45 +2077,52 @@ Rectangle {
         if (act === "findPrev") { findStep(false); return }
         if (act === "goto") { gotoLine(); return }
 
-        /* ---- 视图 ---- */
-        if (act === "zoomIn") { view.zoomIn(); return }
-        if (act === "zoomOut") { view.zoomOut(); return }
-        if (act === "zoomReset") { view.zoomReset(); return }
+        /* ---- 视图（这一组都是**视图级**设置，两栏一起改，见 applyToPanes） ---- */
+        if (act === "zoomIn") { applyToPanes(function (v) { v.zoomIn() }); return }
+        if (act === "zoomOut") { applyToPanes(function (v) { v.zoomOut() }); return }
+        if (act === "zoomReset") { applyToPanes(function (v) { v.zoomReset() }); return }
         if (act === "toggleWrap") { toggleWrap(); return }
         if (act === "toggleLineNumbers") { toggleLineNumbers(); return }
         if (act === "toggleWhitespace") { toggleWhitespace(); return }
         if (act === "toggleIndentGuides") {
-            view.indentGuidesVisible = !view.indentGuidesVisible
-            Cmd.remember("indentGuides", view.indentGuidesVisible ? "1" : "0")
+            var guides = !view.indentGuidesVisible
+            applyToPanes(function (v) { v.indentGuidesVisible = guides })
+            Cmd.remember("indentGuides", guides ? "1" : "0")
             return
         }
         if (act === "toggleGutterLine") {
-            view.gutterLineVisible = !view.gutterLineVisible
-            Cmd.remember("gutterLine", view.gutterLineVisible ? "1" : "0")
+            var gutter = !view.gutterLineVisible
+            applyToPanes(function (v) { v.gutterLineVisible = gutter })
+            Cmd.remember("gutterLine", gutter ? "1" : "0")
             return
         }
         if (act === "toggleRuler") {
-            view.rulerVisible = !view.rulerVisible
-            Cmd.remember("rulerVisible", view.rulerVisible ? "1" : "0")
+            var ruler = !view.rulerVisible
+            applyToPanes(function (v) { v.rulerVisible = ruler })
+            Cmd.remember("rulerVisible", ruler ? "1" : "0")
             return
         }
         /* 字数参考线列号：菜单里的固定档位（rulerColumn:80）走这条 */
         if (act.indexOf("rulerColumn:") === 0) {
             var rc = parseInt(act.substring(12))
             if (!isNaN(rc) && rc >= 1 && rc <= 2000)
-                view.rulerColumn = rc
+                applyToPanes(function (v) { v.rulerColumn = rc })
             return
         }
         /* 自定义列号：弹一个整数输入框（原生 QInputDialog，见 Cmd.askRulerColumn） */
         if (act === "rulerColumnAsk") {
             var picked = Cmd.askRulerColumn(view.rulerColumn)
             if (picked > 0)
-                view.rulerColumn = picked
+                applyToPanes(function (v) { v.rulerColumn = picked })
             return
         }
-        if (act === "toggleFolding") { view.foldingEnabled = !view.foldingEnabled; return }
-        if (act === "foldAll") { view.foldAll(); return }
-        if (act === "unfoldAll") { view.unfoldAll(); return }
+        if (act === "toggleFolding") {
+            var fold = !view.foldingEnabled
+            applyToPanes(function (v) { v.foldingEnabled = fold })
+            return
+        }
+        if (act === "foldAll") { applyToPanes(function (v) { v.foldAll() }); return }
+        if (act === "unfoldAll") { applyToPanes(function (v) { v.unfoldAll() }); return }
 
         /* ---- 其它 ---- */
         if (act === "shortcuts") { showShortcuts(); return }
@@ -2036,14 +2287,35 @@ Rectangle {
              * （让开一点点才是卡片下方两角圆角的保命条件，见 EditorArea.editorCardState）。
              */
             editorCard: editor.editorCardState(),
-            /* 分栏（自检核对 dispatch 和镜像绑定） */
+            /* 分栏（自检核对 dispatch 和两栏各自的文档） */
             splitMode: editor.splitMode,
             /* Markdown 预览（自检核对开关和那份右键菜单） */
             markdownPreview: window.markdownPreview,
             previewSelection: editor.previewSelectedText,
             canPreviewMarkdown: window.canPreviewMarkdown,
-            previewFile: window.view ? String(window.view.filePath) : "",
+            previewFile: window.activeView() ? String(window.activeView().filePath) : "",
+            /*
+             * 两栏各自的正文 / 标题 / 当前文档号（自检核对"两栏是独立的
+             * 标签栏，但同一份文档改一边另一边也变"）。
+             */
             mirrorText: editor.mirrorView ? editor.mirrorView.currentText() : "",
+            mainText: window.view ? window.view.currentText() : "",
+            mainTabCount: window.view ? window.view.documents.length : 0,
+            mirrorTabCount: editor.mirrorView ? editor.mirrorView.documents.length : 0,
+            mainDocId: window.view ? window.view.currentDocId() : -1,
+            mirrorDocId: editor.mirrorView ? editor.mirrorView.currentDocId() : -1,
+            mainViewPath: window.view ? String(window.view.filePath) : "",
+            mirrorViewPath: editor.mirrorView ? String(editor.mirrorView.filePath) : "",
+            /*
+             * 两栏**对象本身**（不是下标 / 拷贝）。
+             *
+             * 自检要按"哪一栏"发命令时得拿到那个 EditorViewItem：标签栏点小叉
+             * 走的就是 tabCloseRequested(pane, index) → closeTab(index, pane)，
+             * 自检要复现"点右栏那个小叉"就必须传同一个对象进去。
+             */
+            mainPane: editor.mainView,
+            mirrorPane: editor.mirrorView,
+            splitLayout: editor.splitLayoutState(),
 
             /*
              * 查找栏几何（自检量"两个输入框一样长、圆角、左右有间隙"）。
@@ -2178,8 +2450,7 @@ Rectangle {
          */
         markdownPreviewPreferred = Cmd.recall("markdownPreview", "0") === "1"
 
-        /* 分栏也按上次的样子回来（只记模式，真绑等第一个文档打开） */
-        restoreSplit()
+        /* 分栏不在启动时恢复：开局就是单栏（见上面那段说明） */
 
         /*
          * 展开状态：设置里存的是"哪些文件夹开着"（一行一个 key）。
@@ -2208,6 +2479,9 @@ Rectangle {
         /*
          * 恢复上次的字号 / 换行 / 行号 / 空白字符设置。
          * 字号出厂默认 12（见 EditorArea.editorFontSize 与 EditorViewItem）。
+         * 这些是**视图级**设置，两栏一起设（第二栏这会儿还没建出来，
+         * 它在 EditorArea 里直接绑 editorFontSize / 自己读同一份设置，
+         * 见分栏那一段）。
          */
         var size = parseInt(Cmd.recall("fontSize", "12"))
         if (!isNaN(size) && size >= 6 && size <= 72)
@@ -2239,6 +2513,20 @@ Rectangle {
         var rulerCol = parseInt(Cmd.recall("rulerColumn", "120"))
         view.rulerColumn = (!isNaN(rulerCol) && rulerCol >= 1 && rulerCol <= 2000)
                            ? rulerCol : 120
+
+        /* 上面这些是"两栏一起"的设置，第二栏建得比这里晚，补设一遍 */
+        applyToPanes(function (v) {
+            v.commentFontPixelSize = view.commentFontPixelSize
+            v.fontFamily = view.fontFamily
+            v.lineHeightFactor = view.lineHeightFactor
+            v.wrapEnabled = view.wrapEnabled
+            v.lineNumbersVisible = view.lineNumbersVisible
+            v.whitespaceVisible = view.whitespaceVisible
+            v.indentGuidesVisible = view.indentGuidesVisible
+            v.gutterLineVisible = view.gutterLineVisible
+            v.rulerVisible = view.rulerVisible
+            v.rulerColumn = view.rulerColumn
+        })
     }
 
     Connections { target: Store; function onChanged() { window.refresh() } }
@@ -2312,11 +2600,13 @@ Rectangle {
         }
 
         /*
-         * 文档池变了（打开 / 关闭 / 切标签）：分栏要跟着开 / 关，
-         * Markdown 预览也要按新文档重算。
+         * 文档池变了（打开 / 关闭 / 切标签）：预览要按新文档重算。
+         *
+         * 分栏**不在这里**跟着开 / 关：布局只由 setSplit（用户点的）和
+         * "第二栏被关空"（见 leaveSplitForEmptyMirror）决定 —— 原来这里有一条
+         * "第二栏空着就补一份主栏当前文档"，它正是"右边小叉点了没反应"的原因。
          */
         function onDocumentsChanged() {
-            window.syncSplitWithDocuments()
             window.applyMarkdownPreference()
         }
 
@@ -2339,6 +2629,20 @@ Rectangle {
         function onPaneFocused() { window.notePaneFocus(editor.mirrorView) }
     }
 
+    /*
+     * 第二栏那几个"跟着主栏走"的设置变化时也要照样记下来（两边是同一套值，
+     * 只是信号是从第二栏发出来的 —— 比如用户在第二栏按了 Ctrl+滚轮缩放）。
+     */
+    Connections {
+        target: editor.mirrorView
+        function onFontChanged() {
+            Cmd.remember("fontSize", String(editor.view.fontPixelSize))
+        }
+        function onWrapChanged() {
+            Cmd.remember("wrap", editor.view.wrapEnabled ? "1" : "0")
+        }
+    }
+
     Connections {
         target: editor.view
 
@@ -2354,14 +2658,52 @@ Rectangle {
                 Cmd.alert("出错了", message)
         }
 
-        /* 编辑区里按下右键：弹 QML 那套"编辑"菜单（见 openEditorContextMenu） */
+        /* 主栏里按下右键：弹 QML 那套"编辑"菜单（见 openEditorContextMenu） */
         function onContextMenuRequested(x, y) {
+            window.notePaneFocus(editor.view)
             window.openEditorContextMenu(x, y)
         }
 
         /* 滚动条上按下右键：同一个组件，条目换成滚动那七条 */
         function onScrollBarContextMenuRequested(horizontal, x, y) {
+            window.notePaneFocus(editor.view)
             window.openScrollBarContextMenu(horizontal, x, y)
+        }
+
+        /*
+         * 主栏那一份正文变了：第二栏如果正看着**同一份文档**，它的画面也得
+         * 重画（两栏是同一个底层文档，Scintilla 不会自己通知另一个视图）。
+         *
+         * 这就是"改一边另一边立刻变"。m_syncing 那类防回环在这里不需要：
+         * mirrorPane 的 refreshSharedDocument() 只做 viewport 重画，不写正文。
+         */
+        function onTabsChanged() {
+            if (editor.splitting && editor.mirrorView)
+                editor.mirrorView.refreshSharedDocument()
+        }
+    }
+
+    Connections {
+        target: editor.mirrorView
+
+        function onErrorOccurred(message) {
+            if (!Cmd.selfTestMode)
+                Cmd.alert("出错了", message)
+        }
+
+        function onContextMenuRequested(x, y) {
+            window.notePaneFocus(editor.mirrorView)
+            window.openEditorContextMenu(x, y)
+        }
+
+        function onScrollBarContextMenuRequested(horizontal, x, y) {
+            window.notePaneFocus(editor.mirrorView)
+            window.openScrollBarContextMenu(horizontal, x, y)
+        }
+
+        function onTabsChanged() {
+            if (editor.mainView)
+                editor.mainView.refreshSharedDocument()
         }
     }
 
@@ -3049,16 +3391,16 @@ Rectangle {
                  */
                 previewItem: null
 
-                onTabCloseRequested: (index) => window.closeTab(index)
-                onTabCloseAllRequested: window.closeAllTabs()
+                onTabCloseRequested: (pane, index) => window.closeTab(index, pane)
+                onTabCloseAllRequested: (pane) => window.closeAllTabs(pane)
                 onNewTabRequested: window.newFile()
                 onClipboardRefreshRequested: window.refresh()
                 /*
-                 * tab 右键菜单：把"被右键的标签 + 鼠标在标签里的坐标"转给
-                 * openTabMenu —— 菜单左上角要落在鼠标那一点上。
+                 * tab 右键菜单：把"哪一栏的哪个标签 + 鼠标在标签里的坐标"
+                 * 转给 openTabMenu —— 菜单左上角要落在鼠标那一点上。
                  */
-                onTabContextMenuRequested: (index, anchor, x, y) =>
-                    window.openTabMenu(index, anchor, x, y)
+                onTabContextMenuRequested: (pane, index, anchor, x, y) =>
+                    window.openTabMenu(pane, index, anchor, x, y)
 
                 /* ---- Markdown 预览（见 qml/components/MarkdownView.qml） ---- */
                 markdownPreview: window.markdownPreview

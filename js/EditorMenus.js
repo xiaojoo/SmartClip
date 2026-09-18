@@ -525,13 +525,14 @@ function helpMenu(ov) {
 }
 
 /*
- * 内容区标签栏的右键菜单（点 tab 弹出，见 qml/components/EditorArea.qml）。
+ * 内容区标签栏的右键菜单（点 tab 弹出，见 qml/components/TabStrip.qml）。
  *
- * index 是**右键点中的那个**标签，不是当前激活的那个 —— 右键一个没激活的
- * 标签时两者不是同一个，"关闭其他"必须以点中的为基准，否则会把用户刚点的
- * 那一个一起关掉。所以这里用带下标的动作 closeTab:<i> / closeOthers:<i>，
- * 由 Main.qml 的 dispatch 解析（纯命令名的 closeTab / closeOtherTabs
- * 仍然是"当前标签"，菜单栏和快捷键走那条）。
+ * view 是**被右键的那一条标签栏属于哪一栏**（分栏之后有两条，各有各的一组
+ * 标签）。index 是那一栏里**右键点中的那个**标签，不是当前激活的那个 ——
+ * 右键一个没激活的标签时两者不是同一个，"关闭其他"必须以点中的为基准，
+ * 否则会把用户刚点的那一个一起关掉。所以这里用带下标的动作
+ * closeTab:<i> / closeOthers:<i>，由 Main.qml 的 dispatch 解析（纯命令名的
+ * closeTab / closeOtherTabs 仍然是"当前栏的当前标签"，菜单栏和快捷键走那条）。
  *
  * 只有关闭类命令：保存 / 另存为这些作用在"当前文档"上，而右键点的标签
  * 未必是当前那个，放进来会动错文件。
@@ -544,7 +545,7 @@ function tabMenu(view, index, ov, split) {
                    ? ov["closeTab"] : "Ctrl+W"
     /*
      * split 是当前的分栏状态（"" / "right" / "down"），由 Main.qml 现算传进来：
-     *   canSplit  这份文档能不能分栏（没有打开的文档就不能）
+     *   canSplit  这一栏里有没有文档可以分（没有就不能分）
      *   mode      现在分的是哪种（打勾用）
      */
     var s = split || {}
@@ -559,18 +560,19 @@ function tabMenu(view, index, ov, split) {
           disabled: count < 1 },
         { separator: true },
         /*
-         * 分栏（同一份文档摆在两栏里，快捷键 Alt+Shift+2 / Alt+Shift+3
-         * 和 vs 那些编辑器一个习惯）。
+         * 分栏：分成两个**各自独立**的编辑组（各有各的标签栏，共用同一份
+         * 文档池 —— 同一份文件在两边都能看到对方的改动）。
+         * 快捷键 Alt+Shift+2 / Alt+Shift+3 和 VS 那些编辑器一个习惯。
          *
          * 取消分栏只在真分了的时候可用 —— 没分栏时那一条是灰的，
          * 免得用户点了发现什么都没发生。
          */
-        { label: "左右分栏", act: "splitRight", shortcut: "Alt+Shift+2",
+        { label: "向右拆分编辑器", act: "splitRight", shortcut: "Alt+Shift+2",
           icon: "split-right", checked: mode === "right", disabled: !canSplit },
-        { label: "上下分栏", act: "splitDown", shortcut: "Alt+Shift+3",
+        { label: "向下拆分编辑器", act: "splitDown", shortcut: "Alt+Shift+3",
           icon: "split-down", checked: mode === "down", disabled: !canSplit },
         { label: "取消分栏", act: "splitNone", icon: "close",
-          disabled: !canSplit || mode === "" },
+          disabled: mode === "" },
         { separator: true },
         /* 文件对比：拿这一份去和另一个文件比（见 src/Diff.h） */
         { label: "与此文件对比…", act: "compareTab:" + index, icon: "diff",

@@ -173,6 +173,7 @@ qt_add_qml_module(SmartClip
         qml/components/FolderTree.qml
         qml/components/SettingsPanel.qml
         qml/components/StatusBar.qml
+        qml/components/TabStrip.qml
         qml/components/ToolButton.qml
         qml/components/TopBar.qml
         qml/components/WindowControls.qml

@@ -9,10 +9,17 @@
 #include <QVariantList>
 #include <QVector>
 
+#include <memory>
+
+/*
+ * QsciDocument 必须是**完整类型**（不能只前置声明）：Doc / DocRef 里各存了
+ * 一份**值**（它自己就是引用计数的壳子，见 .cpp 里那段说明）。
+ */
+#include <Qsci/qscidocument.h>
+
 class QWidget;
 class QsciScintilla;
 class QsciLexer;
-class QsciDocument;
 
 class ClipboardStore;
 
@@ -125,11 +132,17 @@ class EditorViewItem : public QQuickItem {
 
     Q_PROPERTY(bool foldingEnabled READ foldingEnabled WRITE setFoldingEnabled NOTIFY foldingChanged)
     Q_PROPERTY(bool readOnly READ readOnly WRITE setReadOnly NOTIFY readOnlyChanged)
-    Q_PROPERTY(int zoomPercent READ zoomPercent NOTIFY zoomChanged)
+    /*
+     * 当前缩放百分比。
+     *
+     * 本来只读（缩放是命令式的：zoomIn / zoomOut 直接改 Scintilla 的 zoom），
+     * 现在**可写** —— 分栏之后第二栏要跟着主栏走，而"跟"只能靠 QML 绑定，
+     * 绑定就得有个可写的口子（见 EditorArea.qml 里 mirrorPane 的 zoomPercent）。
+     */
+    Q_PROPERTY(int zoomPercent READ zoomPercent WRITE setZoomPercent NOTIFY zoomChanged)
 
     /* ---- 文档 / 标签 ---- */
-    Q_PROPERTY(bool hasDocument READ hasDocument NOTIFY documentsChanged)
-    Q_PROPERTY(QVariantList documents READ documents NOTIFY documentsChanged)
+    Q_PROPERTY(bool hasDocument READ hasDocument NOTIFY documentsChanged)    Q_PROPERTY(QVariantList documents READ documents NOTIFY documentsChanged)
     Q_PROPERTY(int currentIndex READ currentIndex NOTIFY currentChanged)
     Q_PROPERTY(QString filePath READ filePath NOTIFY currentChanged)
     Q_PROPERTY(QString displayName READ displayName NOTIFY currentChanged)
@@ -364,8 +377,16 @@ public:
     void setReadOnly(bool on);
 
     int zoomPercent() const { return m_zoomPercent; }
+    /* 直接定一个缩放百分比（夹在 -10 ~ 20，和 zoomIn / zoomOut 一个范围） */
+    void setZoomPercent(int percent);
 
-    bool hasDocument() const { return m_current >= 0 && m_current < m_docs.size(); }
+    /*
+     * 这一栏当前有没有打开着文档。
+     *
+     * 注意判的是**这一栏的标签列表**（m_open），不是池子 —— 分栏之后池子里
+     * 有东西不代表这一栏开着什么。
+     */
+    bool hasDocument() const { return m_current >= 0 && m_current < m_open.size(); }
     QVariantList documents() const;
     int currentIndex() const { return m_current; }
     QString filePath() const;
@@ -572,6 +593,28 @@ public:
     Q_INVOKABLE QVariantMap horizontalScrollState() const;
 
     /*
+     * 自检用：把编辑控件拉窄 deltaWidth，**当场**读一次横条状态，再把宽度还原。
+     *
+     * 拖分栏分隔线 / 拉窗口走的就是这一个效果：编辑控件宽度变了、一页文本宽
+     * （hNewPage）跟着变小，而我们这边重算横向范围是排到下一轮的
+     * （applyGeometry 里那个 singleShot）。返回的就是"宽度已经变了、重算还没轮到"
+     * 的那一拍 —— 用户报的"拖分隔线时底下横条一闪一闪"必须在那一拍里量，
+     * 转一次事件循环就看不到了。
+     */
+    Q_INVOKABLE QVariantMap horizontalScrollAfterNarrowForTest(int deltaWidth);
+
+    /*
+     * 自检用：这一栏的 geometry —— QML item（场景坐标）和它那块**原生控件**
+     * 各摆在哪、多大。
+     *
+     * 两边必须一样大：原生控件是子窗口，尺寸是 applyGeometry() 从 item 几何
+     * 算出来的。只对上 item、对不上控件时，屏幕上就是"该分的地方没分开"
+     * —— 用户报的"上下分栏没有展开"就是这种（分栏时 item 高度变了，
+     * 但那块原生窗口还停在旧高度上，把分隔线整个盖住）。
+     */
+    Q_INVOKABLE QVariantMap paneGeometryForTest() const;
+
+    /*
      * 滚动条的右键动作（"滚动到这里 / 左边缘 / 翻页 / 滚一行"那七条）。
      *
      * axis 传 "h" / "v"，what 传下面这几个之一：
@@ -597,21 +640,31 @@ public:
     Q_INVOKABLE bool triggerScrollBarContextMenu(bool horizontal, int pos = -1);
 
     /* ------------------------------------------------------------------
-     * 分栏（同一个文档摆在两个编辑区里，见 qml/components/EditorArea.qml）
+     * 分栏（两个**独立**编辑组，同一份文档池 —— 和 VS Code 一样）
      *
-     * 做法是"**镜像**"而不是"两个视图共用一份 QsciDocument"：
+     * 这是第二版做法。第一版是"镜像"：右栏由左栏把正文推过来、只读，
+     * 两栏永远显示同一份文档（见 git 历史）。用户要的是 VS Code 那种：
+     * 两栏各有自己的标签栏，可以**各自**看不同的文件；看同一份文件时，
+     * 在任意一栏改，另一栏立刻就变。
      *
-     *   两个 EditorViewItem 各自有一份 QsciDocument，一份是**主**（sourceView），
-     *   另一份是**镜像**。主那边正文一变（textChanged），镜像跟着灌一份；
-     *   在镜像里打字也接受，但下一次主的改动会覆盖它 —— 界面上镜像那份是
-     *   只读的（见 mirror 属性），所以这条路实际上走不到。
+     * 做法：文档池共享，视图状态各自一份。
      *
-     * 为什么不做成"真正共用一份文档"（QsciDocument 支持挂多个视图）：
-     *   那样要在两个视图之间共享**文档池、修改标记、视图状态、关闭/重命名
-     *   那一整套生命周期**，而这个类现在把这些全放在自己的 m_docs 里
-     *   （40 多处读写）。改成共享池等于把编辑器内核重写一遍，风险远大于
-     *   收益：镜像方案下"改了能立刻在另一边看到"这个用户要的效果是**一样的**，
-     *   代价只是分栏右侧不能编辑（标了只读，界面上不骗人）。
+     *   Doc（这个类私有的那个结构）现在用 shared_ptr 持有，两个栏拿到的是
+     *   **同一个** Doc —— 正文（QsciDocument）、路径、语言、修改标记只有一份，
+     *   所以"在左边打字右边立刻变"是天然的（它们本来就是同一份文档），
+     *   不需要任何同步代码。
+     *
+     *   每个栏另有自己的一份 DocRef：光标 / 滚动位置是**视图状态**，两栏
+     *   各看各的位置才对（用户就是想让它们对着文件的不同地方）。
+     *
+     *   QsciDocument 自己就是引用计数的壳子（见 third/qscintilla 的
+     *   qscidocument.cpp）：每个栏把自己那份 DocRef 的 m_doc 指向同一个底层
+     *   文档时，引用计数会自己涨；谁最后放手谁负责归还。所以这里**不需要**
+     *   自己写一套引用计数。
+     *
+     * 池子里有哪些文档、什么时候加一个 / 删一个，由静态的 s_pool 广播给
+     * 所有活着的实例（见 .cpp 的 broadcastPool）：任何一栏打开 / 关闭文件，
+     * 别的栏的池子跟着加 / 减，只是**不跟着切标签**（切标签是每个栏自己的事）。
      * ------------------------------------------------------------------ */
 
     Q_PROPERTY(int docId READ docId WRITE setDocId NOTIFY boundChanged)
@@ -624,27 +677,74 @@ public:
      * 分栏之后工程里有两个 EditorViewItem，而 instance()（"当前编辑器是谁"）
      * 只能有一个答案 —— 靠"最后构造"来定是不可靠的（实测 QML 的构造顺序
      * 和声明顺序不一致）。写 QML 的人说哪一份是主栏，就是哪一份。
+     * 之后"用户点了哪一栏"会让它跟着走（见 setPaneFocus）。
      */
     Q_PROPERTY(bool mainEditor READ mainEditor WRITE setMainEditor NOTIFY boundChanged)
 
-    Q_INVOKABLE void bindTo(EditorViewItem *source);
+    /*
+     * 让这一栏**取消分栏**：把它自己打开的那些标签放回池子、关掉自己。
+     *
+     * 文档本身不删（池子里可能还有别的栏在看），它只是不再显示它们 ——
+     * 所以取消分栏之后主栏那些标签一个都不少。
+     */
     Q_INVOKABLE void unbind();
 
     /*
-     * 用户最后**在哪个栏里点了 / 打了字**（Main.qml 用它决定命令发给谁）。
-     * 它自己不会变，由 QML 在栏位获得焦点时调 noteFocus()。
+     * 分栏刚开、池子里已经有一份文档时，把它拉进这一栏并显示出来。
+     *
+     * 这一栏在构造时是空的（池子里的东西不进新栏的标签栏），所以"启动时按
+     * 上次的分栏模式开局"和"点右键菜单分栏"都要显式叫一下 —— 否则分出来的
+     * 那一栏是个空壳，看着像分栏没生效。
+     *
+     * 传的是**文档号**（currentDocId），不是池子里的位置：池子里会有人
+     * 过期（关掉的文档留着空位），位置会变，文档号不会。
      */
-    Q_INVOKABLE void noteFocus();
+    Q_INVOKABLE void openPoolDocument(int docId);
+
+    /* 池子里现在有几份文档（自检 / 诊断用） */
+    Q_INVOKABLE int poolCount() const;
+    /* 这一栏里有没有开着这个文档号的标签（自检用） */
+    Q_INVOKABLE bool hasPoolDocument(int docId) const;
+    /* 当前这一份的文档号（-1 = 没打开任何文档） */
+    Q_INVOKABLE int currentDocId() const;
+    /* 这份文档在第几个标签上（自检用；找不到返回 -1） */
+    Q_INVOKABLE int tabIndexOfDocId(int docId) const;
+
+    /*
+     * 另一栏改了正文，把这一栏的画面重画一遍。
+     *
+     * 两栏看同一份文档时，底层是**同一个** Scintilla 文档，但两个视图各有
+     * 自己的缓存，Scintilla 不会替另一个视图重画 —— 不叫这一下就是"在左边
+     * 打字，右边那半屏还是旧的，得滚一下才刷新"。
+     *
+     * 只在"两边看的是同一份文档"时才有意义；不同文档时它只是白重画一次，
+     * 无害（所以调用方不必先判断）。
+     */
+    Q_INVOKABLE void refreshSharedDocument();
+
+    /*
+     * 用户最后**在哪个栏里点了 / 打了字**（Main.qml 用它决定命令发给谁）。
+     *
+     * 这是个**可写属性**：QML 那边（notePaneFocus）一次只把一栏标上 true、
+     * 别的栏清成 false，所以它得能被赋值。C++ 侧 setPaneFocus() 顺手把
+     * "当前编辑器"（s_instance）也指过来。
+     */
+    Q_PROPERTY(bool paneFocus READ hasPaneFocus WRITE setPaneFocus NOTIFY paneFocusChanged)
+    /*
+     * "用户点的是这一栏"的**只读**版本，给 QML 的绑定用（哪个属性变化都要有
+     * NOTIFY，绑定才会重算 —— Main.qml 的 activeView 就挂在这上面）。
+     */
+    Q_PROPERTY(bool activePane READ hasPaneFocus NOTIFY paneFocusChanged)
     /* 这个栏是不是最后被操作的那个（Main.qml 拼"当前编辑器"用） */
     bool hasPaneFocus() const { return m_paneFocus; }
     void setPaneFocus(bool on);
 
-    /* 分栏那三个属性的读写（说明见上面那组 Q_PROPERTY） */
+    /* 分栏那几个属性的读写（说明见上面那组 Q_PROPERTY） */
     int docId() const { return m_docId; }
     void setDocId(int id);
     bool mirror() const { return m_mirror; }
     void setMirror(bool on);
-    bool bound() const { return m_source != nullptr; }
+    bool bound() const { return m_mirror; }
     bool mainEditor() const { return m_mainEditor; }
     void setMainEditor(bool on);
 
@@ -653,6 +753,16 @@ signals:
     void boundChanged();
     /* 这个栏被点了（Main.qml 接住：把"当前编辑器"切到它） */
     void paneFocused();
+    /* 这一栏的"最后被点的是我"标记变了 */
+    void paneFocusChanged();
+    /*
+     * 这一栏的标签状态（标题 / 修改标记 / 池子里多了一份）变了，
+     * 别的栏收到就把自己的标签栏重算一遍。
+     *
+     * 正文不走这条 —— 两栏看的是同一份文档，改哪边都是改同一个东西；
+     * 这里走的是"界面上的账目"，所以用队列连接、允许晚一拍。
+     */
+    void tabsChanged();
 
     void paddingChanged();
     void fontChanged();
@@ -707,9 +817,25 @@ protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
 
 private:
-    /* 一条打开的文档（正文在 Scintilla 那边，这里放元信息 + 视图位置） */
+    /*
+     * 一条打开的文档。
+     *
+     * 这是**文档池里的那一份**，两个栏看到的是同一个（shared_ptr）：
+     * 正文、路径、语言、编码、修改标记只有一份，"在左边改、右边立刻变"
+     * 就是天然的。光标 / 滚动位置不在这里 —— 那是视图状态，每个栏各一份
+     * （见下面的 DocRef）。
+     */
     struct Doc {
-        QsciDocument *document = nullptr;  // 见 .cpp 里为什么用指针
+        /*
+         * 底层文档句柄。
+         *
+         * 用**值**而不是指针：QsciDocument 自己就是引用计数的壳子
+         * （第三个 qscintilla 的 qscidocument.cpp 里 nr_attaches / nr_displays），
+         * 每个栏把自己那份 DocRef.m_doc 拷一份过去，引用计数自己就涨；
+         * 谁最后放手谁负责把底层文档归还给 Scintilla 的池子。
+         * 不需要自己写引用计数。
+         */
+        QsciDocument m_doc;
         QString filePath;
         QString language = QStringLiteral("plain");
         QString encoding = QStringLiteral("UTF-8");
@@ -722,15 +848,43 @@ private:
          */
         bool modified = false;
         int untitledNo = 0;                // 未命名标签的序号
-        long cursorPos = 0;                // 光标绝对位置（切标签时恢复）
-        int firstVisibleLine = 0;           // 首行（保持滚动位置）
-        int xOffset = 0;                    // 横向滚动偏移
+        /*
+         * 文档号：一份文档一个，**永不变**（s_nextDocId 单调递增）。
+         *
+         * 两个栏靠它对"说的是哪一份"：池子里的**位置**会因为别人关掉文档
+         * 而变（池子留着过期的空位），文档号不会。分栏开局、自检断言都用它。
+         */
+        int id = 0;
     };
 
+    /*
+     * 某个栏里的一个标签：指向池子里那份文档，外加**这个栏自己的**视图状态。
+     *
+     * 同一份文档在两个栏里各有一条 DocRef —— 正文是共享的，光标和滚动
+     * 位置不是（两栏各看各的位置）。
+     */
+    struct DocRef {
+        std::shared_ptr<Doc> doc;
+        /*
+         * 本栏显示这一份用的那层壳（QsciDocument 的引用计数靠它涨，见
+         * Doc::m_doc）。shown 是"这一栏有没有挂上它"—— QsciDocument 没有
+         * 公开的判空接口，所以自己记一个。
+         */
+        QsciDocument m_doc;
+        bool shown = false;
+        long cursorPos = 0;                // 光标绝对位置（切标签时恢复）
+        int firstVisibleLine = 0;          // 首行（保持滚动位置）
+        int xOffset = 0;                   // 横向滚动偏移
+    };
     static QString languageForPath(const QString &path);
 
     void ensureWrapped();
     void applyGeometry();
+    /*
+     * 盯住所有祖先的位置 / 尺寸变化（见 .cpp 里的说明）：原生子窗口按场景坐标
+     * 摆，而 item 自己的 geometryChange 感知不到"父壳整体挪位置、尺寸不变"。
+     */
+    void watchAncestorGeometry();
 
     /*
      * 把两条竖线补到编辑控件最底边（横向滚动条那一条，正文区画不到那里）。
@@ -744,11 +898,59 @@ private:
     /* 把正文灌进当前文档（不动文档元信息） */
     void setContentCurrent(const QString &text);
 
+    /* ---- 文档池（两个栏共用，见上面那段说明） ---- */
+
     /*
-     * 分栏：把源那个编辑区**当前这一份**搬过来（正文 + 元信息，不搬视图状态）。
-     * 见上面那组 Q_PROPERTY 的说明；由 bindTo() 接的信号驱动。
+     * 往池子里放一份新文档（newDocument / openFile 走它），并广播给所有栏。
+     * 返回它在**这一栏**标签列表里的下标（-1 = 失败）。
+     *
+     * 打开文件时别的栏要跟着切过去（用户点了左树上一份文件，两栏都该显示它）；
+     * 新建空白文档同理 —— 都是一条明确的"打开一个东西"的动作。
      */
-    void syncFromSource();
+    int appendPoolDocument(const std::shared_ptr<Doc> &doc);
+    /* 把这一栏里下标 index 那个标签放回池子（不删文档本身） */
+    void releaseDocument(int index);
+    /*
+     * 把池子（s_pool）对齐到这一栏的文档表上。
+     *
+     * 池子是"整个编辑器里开着哪些文档"的唯一真相；每个栏都留一份**同样顺序**
+     * 的表，所以"这一栏开着哪几份"（m_open）和池子下标在两边是一致的。
+     * 别的栏开 / 关文档时都要走一遍它。
+     */
+    void syncPoolFromRegistry();
+
+    /* 把这一栏自己的标签状态（标题 / 修改标记）重发一遍 */
+    void refreshTabs();
+
+    /*
+     * 让这一栏离开当前文档（视图切回 scratch），并把视图状态存下来。
+     * 关标签 / 换标签 / 取消分栏都从这里过 —— 顺序错了就是踩已释放的
+     * Scintilla 文档（见 releaseDocument 里那段说明）。
+     */
+    void detachFromCurrentDocument();
+
+    /*
+     * 视图状态（光标 / 首行 / 横向偏移）的存与取，只动这一栏自己的账 */
+    void saveCurrentViewState();
+    void applyStoredViewState();
+
+    /*
+     * 这一栏的标签列表（m_open）与池子下标之间的小工具。
+     *
+     * 对外（QML）一律用"标签下标"（0 = 最左边那条标签），跟用户看到的一致；
+     * 池子下标只在内部用来对齐两边共用的那份账。
+     */
+    /* 某个标签对应 m_docs 里第几份；没打开返回 -1 */
+    int slotOfTab(int tabIndex) const;
+    /* m_docs 第 slot 份在这一栏的标签栏里是第几条；没打开返回 -1 */
+    int tabOfSlot(int slot) const;
+    /* 把 docId 那一份加进这一栏的标签栏并切过去；返回标签下标或 -1 */
+    int openDocumentById(int docId, bool activate);
+    /* 这一栏当前那个标签对应池子里的下标（-1 = 没打开任何文档） */
+    int currentDocSlot() const;
+
+    /* 取消分栏：把自己打开的标签全放回池子 */
+    void releaseAllDocuments();
 
     /* 去掉边框、深色滚动条 */
     void styleChrome();
@@ -867,26 +1069,43 @@ private:
     /* 横向滚动条那一条上的补线控件（见 .cpp 里的 BottomLines） */
     QPointer<QWidget> m_bottomLines;
 
-    QVector<Doc> m_docs;
+    /*
+     * 池子里有哪几份文档（全局的，顺序 = 打开顺序）。
+     *
+     * 这个表是**给"哪一份是哪一份"用的**（切标签 / 关标签 / 自检）；界面上
+     * 那个标签栏用的是 m_open（这一栏开着哪几份）—— 两栏是独立的标签，
+     * 池子里的一共有哪些跟"这一栏显示什么"是两件事。
+     */
+    QVector<DocRef> m_docs;
+    /*
+     * 这一栏**打开着**的标签：值是 m_docs 的下标，顺序就是标签栏从左到右。
+     *
+     * 分栏之后两栏各有一份 —— "像 VS Code 那样，两栏是独立的 tab"就是它。
+     */
+    QVector<int> m_open;
+    /* m_current 是 m_open 里的位置（-1 = 这一栏没有打开任何文档） */
     int m_current = -1;
-    int m_untitledCounter = 0;
+    /*
+     * 未命名文档的编号计数。
+     *
+     * 放在**池子**这一层编号（见 appendPoolDocument）：两个栏都能开新文件，
+     * 各编各的话会出现两个"未命名 1"。静态的 s_untitledCounter 就是它。
+     */
     /* 没有打开任何文档时视图挂着的空文档（见 closeDocument 里的说明） */
     QsciDocument *m_scratch = nullptr;
 
     /* ---- 分栏（见上面那组 Q_PROPERTY 的说明） ---- */
-    /* 这份视图是不是"镜像"（右边那一栏）：是的话正文由 bindTo 那个源推过来 */
+    /* 这一栏是不是"第二栏"（只影响界面上的语气和自检怎么认，行为上两栏对等） */
     bool m_mirror = false;
-    /* 源视图（镜像才有；非空时它的 textChanged 会灌到这边来） */
-    QPointer<EditorViewItem> m_source;
     /* 这个栏是不是最后被操作的那个（Main.qml 据此挑"当前编辑器"） */
     bool m_paneFocus = false;
     /* 这一份是不是主编辑器（QML 指定；见 mainEditor 那个 Q_PROPERTY） */
     bool m_mainEditor = false;
     /*
-     * 正在把源的正文灌进镜像（或者反过来）。
+     * 正在按池子广播调整自己的标签（加 / 删）。
      *
-     * 镜像灌正文时会连着发 textChanged / modifiedChanged，那些信号会
-     * 反过来去改源（或者把镜像标成"已修改"）—— 灌的时候挡住这一圈。
+     * 调整过程中会连着发 documentsChanged / textChanged 一类信号，那些信号
+     * 会反过来再去动池子 —— 这一圈要挡住（和以前 m_syncing 同一个作用）。
      */
     bool m_syncing = false;
     /* QML 给的文档身份号（自检和界面用它认"这是哪一栏"） */
@@ -950,9 +1169,24 @@ private:
     /* 正在切文档 / 灌正文：这期间的 modified 通知不算"用户改动" */
     bool m_bulkLoading = false;
 
+    /* 已经接上位置/尺寸信号的祖先（见 watchAncestorGeometry） */
+    QVector<QPointer<QQuickItem>> m_watchedAncestors;
+
     static ClipboardStore *s_store;
     static QWidget *s_hostWidget;
     static EditorViewItem *s_instance;
     /* 所有活着的实例（syncAllGeometry 要挨个摆，见那边的说明） */
     static QVector<QPointer<EditorViewItem>> s_all;
+    /*
+     * 文档池：所有栏打开着的文档，按打开顺序排。
+     *
+     * weak_ptr 是故意的：文档什么时候删由 shared_ptr 的引用计数说了算，
+     * 这里只是"有哪几份、什么顺序"的账本（新开一栏时按它对一遍池子）。
+     * 过期的那几条（没人持有了）在 poolCount 里顺手清掉。
+     */
+    static QVector<std::weak_ptr<Doc>> s_pool;
+    /* 未命名文档的编号（池子级的，见 m_docs 上面那段） */
+    static int s_untitledCounter;
+    /* 文档号发号器（一份文档一个，永不变 —— 见 Doc::id） */
+    static int s_nextDocId;
 };
