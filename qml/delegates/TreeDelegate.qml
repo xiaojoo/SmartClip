@@ -44,6 +44,14 @@ Rectangle {
      * （见 FolderTree.iconColumnXs）。
      */
     readonly property real iconCellX: iconCellItem ? iconCellItem.mapToItem(null, 0, 0).x : -1
+
+    /*
+     * 自检用：**展开箭头**那一格在场景里的 x（文件行没有箭头，给 -1）。
+     *
+     * 标题「项目」的左边缘要对齐的就是它（用户要的"树往左靠、标题别动"），
+     * 见 FolderTree.firstRowChevronPanelX。
+     */
+    readonly property real chevronCellX: chevronItem ? chevronItem.mapToItem(null, 0, 0).x : -1
     readonly property color textBright:  "#e8e8e8"
     readonly property color textColor:   "#bbbbbb"
     readonly property color textMuted:   "#7d7d7d"
@@ -112,6 +120,7 @@ Rectangle {
         anchors.rightMargin: 6
 
         AppIcon {
+            id: chevronItem
             visible: root.isFolder
             provider: icons
             kind: modelData.expanded ? "chevron-down" : "chevron-right"

@@ -563,6 +563,13 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
         return result.toList();
     };
 
+    /* 读标题「项目 ∨」那份"看哪一份"菜单的条目清单（同上，见 treeScopeMenuActs） */
+    auto treeScopeMenuActs = [qmlRoot]() {
+        QVariant result;
+        QMetaObject::invokeMethod(qmlRoot, "treeScopeMenuActs", Q_RETURN_ARG(QVariant, result));
+        return result.toList();
+    };
+
     /*
      * 读左树某一类行的**右键**菜单条目（见 Main.qml 的 treeRowMenuActs）。
      * kind 传 "file" / "folder"：找树里第一个这一类行，用它构造菜单。
@@ -2847,6 +2854,49 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
                              "排序 / 导入文件夹 / 保存位置 / 收起面板"),
               acts);
 
+        /*
+         * 标题「项目 ∨」那份是**看哪一份**（和 PyCharm 一样三条），和 ⋯ 那份分开：
+         * 标题管视图、工具按钮管动作（用户报的"项目弹框改成图里那三项"）。
+         */
+        {
+            QString scopeActs;
+            for (const QVariant &a : treeScopeMenuActs())
+                scopeActs += (scopeActs.isEmpty() ? QString() : QStringLiteral(" | "))
+                             + a.toString();
+            check(scopeActs == QStringLiteral("treeScope:project | treeScope:projectFiles"
+                                              " | treeScope:openFiles"),
+                  QStringLiteral("标题「项目」菜单 = 项目 / 项目文件 / 打开的文件"),
+                  scopeActs);
+
+            /*
+             * 三条都真的切得动：平铺那两条一个文件夹行都不该有，
+             * 切回"项目"还得是原来那棵树。
+             */
+            const int treeFolderRows = treeState().value(QStringLiteral("folderRows")).toInt();
+            check(treeFolderRows > 0, QStringLiteral("默认那份（项目）里有文件夹行"),
+                  QStringLiteral("实际 %1 行").arg(treeFolderRows));
+
+            dispatch(QStringLiteral("treeScope:projectFiles"));
+            settle();
+            {
+                const QVariantMap s = treeState();
+                check(s.value(QStringLiteral("scope")).toString() == QLatin1String("projectFiles")
+                          && s.value(QStringLiteral("folderRows")).toInt() == 0
+                          && s.value(QStringLiteral("rows")).toInt() > 0,
+                      QStringLiteral("切到「项目文件」：所有文件平铺，一行文件夹都没有"),
+                      QStringLiteral("scope=%1 行 %2 / 文件夹行 %3")
+                          .arg(s.value(QStringLiteral("scope")).toString())
+                          .arg(s.value(QStringLiteral("rows")).toInt())
+                          .arg(s.value(QStringLiteral("folderRows")).toInt()));
+            }
+
+            dispatch(QStringLiteral("treeScope:project"));
+            settle();
+            check(treeState().value(QStringLiteral("scope")).toString() == QLatin1String("project")
+                      && treeState().value(QStringLiteral("folderRows")).toInt() > 0,
+                  QStringLiteral("切回「项目」：树还是原来那棵（文件夹行回来了）"));
+        }
+
         const QVariantMap ui = uiState();
         check(ui.value(QStringLiteral("treeToolbarButtons")).toInt() == 7,
               QStringLiteral("标题栏摆着七个工具按钮（新建 / 刷新 / 定位 / 全折 / 全展 / 更多 / 收起）"),
@@ -3012,6 +3062,31 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
                 check(folderX > 0 && fileX > 0 && qAbs(folderX - fileX) < 0.5,
                       QStringLiteral("左树：一级 / 二级图标左边对齐"),
                       QStringLiteral("文件夹图标 x=%1 / 文件图标 x=%2").arg(folderX).arg(fileX));
+            }
+
+            /*
+             * 标题「项目」的左边要和一级行的**展开箭头**对齐（用户报的"树往左靠、
+             * 标题别动"，观感照 PyCharm：项目那一行正好在标题下面）。
+             *
+             * 量的是**文字**的左边缘（FolderTree.titleTextX），不是那个胶囊 ——
+             * 胶囊左右各留 5px，看着没对齐的正是字。
+             *
+             * 比的是**面板坐标**里的两个数：列表能横向滚（leftMargin 那几 px 就在
+             * contentX 上），滚过之后箭头/图标的场景坐标会挪，而标题在列表外面不动
+             * —— 直接比场景坐标会随滚动飘。
+             */
+            {
+                const QVariantMap s = treeState();
+                const double panelX = s.value(QStringLiteral("panelX")).toDouble();
+                const double titlePanelX =
+                    s.value(QStringLiteral("titleTextX")).toDouble() - panelX;
+                const double chevronPanelX =
+                    s.value(QStringLiteral("firstChevronPanelX")).toDouble();
+                check(chevronPanelX > 0 && qAbs(titlePanelX - chevronPanelX) <= 1.0,
+                      QStringLiteral("左树：标题「项目」和一级行的展开箭头左边对齐"),
+                      QStringLiteral("标题 x=%1 / 箭头 x=%2（面板坐标，1px 是取整误差）")
+                          .arg(titlePanelX)
+                          .arg(chevronPanelX));
             }
 
             /*

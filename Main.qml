@@ -374,7 +374,49 @@ Rectangle {
 
     ClipboardModel { id: cbm; onChanged: window.rebuild() }
 
-    function rebuild() { treeRows = Folders.buildTree(cbm.nodes, expanded) }
+    /*
+     * 左树在看哪一份（标题「项目 ∨」那个菜单选的，见 Menus.treeScopeMenu）：
+     *   "project"       整棵树（日期目录 + 里面的文件）—— 默认
+     *   "projectFiles"  所有文件平铺（不带目录那层）
+     *   "openFiles"     只列现在打开着的标签
+     * 只活在内存里：重开程序还是回到整棵树（默认那个最不容易让人找不着东西）。
+     */
+    property string treeScope: "project"
+
+    /* 现在打开着的文件路径（两栏都算）："打开的文件"那个视图用它筛 */
+    function openPaths() {
+        var out = []
+        var panes = [editor.mainView, editor.mirrorView]
+        for (var p = 0; p < panes.length; ++p) {
+            var v = panes[p]
+            if (!v)
+                continue
+            var docs = v.documents
+            for (var i = 0; i < docs.length; ++i) {
+                var path = docs[i] ? String(docs[i].path) : ""
+                if (path !== "" && out.indexOf(path) < 0)
+                    out.push(path)
+            }
+        }
+        return out
+    }
+
+    function rebuild() {
+        if (treeScope === "projectFiles")
+            treeRows = Folders.flatFiles(cbm.nodes)
+        else if (treeScope === "openFiles")
+            treeRows = Folders.openFiles(cbm.nodes, openPaths())
+        else
+            treeRows = Folders.buildTree(cbm.nodes, expanded)
+    }
+
+    /* 换"看哪一份"（菜单里那三条走这儿；换完重建一遍行） */
+    function switchTreeScope(scope) {
+        if (treeScope === scope)
+            return
+        treeScope = scope
+        rebuild()
+    }
 
     /*
      * 重新读一遍数据。
@@ -1321,6 +1363,17 @@ Rectangle {
         return out
     }
 
+    /* 标题「项目 ∨」那份"看哪一份"菜单的动作名（自检核对用，同上） */
+    function treeScopeMenuActs() {
+        var items = Menus.treeScopeMenu(treeScope)
+        var out = []
+        for (var i = 0; i < items.length; ++i) {
+            if (items[i] && items[i].act !== undefined)
+                out.push(String(items[i].act))
+        }
+        return out
+    }
+
     /*
      * 左树当前状态（自检量"全部折叠 / 全部展开 / 收起面板 / 定位"用）。
      *
@@ -1361,7 +1414,26 @@ Rectangle {
                  /* 亮着蓝底的行：文件夹必须恒为 0，文件最多 1（见 FolderTree.highlightCounts） */
                  highlighted: folderTree.highlightCounts(),
                  /* 一级 / 二级图标各落在哪一列上（必须一样，见 FolderTree.iconColumnXs） */
-                 iconColumns: folderTree.iconColumnXs() }
+                 iconColumns: folderTree.iconColumnXs(),
+                 /* 树那块面板自己的 x（标题和箭头都换算成面板坐标再比，见 titleTextX） */
+                 panelX: folderTree.mapToItem(null, 0, 0).x,
+                 /* 标题「项目」左边缘的 x（必须和一级行的展开箭头对齐，见 titleTextX） */
+                 titleTextX: folderTree.titleTextX(),
+                 /* 一级那行的展开箭头在**面板坐标**里的 x（折算掉横向滚动，自检用） */
+                 firstChevronPanelX: folderTree.firstRowChevronPanelX(),
+                 /* 现在在看哪一份（project / projectFiles / openFiles，见 switchTreeScope） */
+                 scope: treeScope,
+                 /* 树里现在有几行文件夹（"项目文件"那个视图必须是 0） */
+                 folderRows: folderRowCount() }
+    }
+
+    /* 当前行里有多少行是文件夹（自检用；"项目文件 / 打开的文件"两个视图里是 0） */
+    function folderRowCount() {
+        var n = 0
+        for (var i = 0; i < treeRows.length; ++i)
+            if (treeRows[i] && treeRows[i].kind === "folder")
+                ++n
+        return n
     }
 
     /*
@@ -1961,6 +2033,8 @@ Rectangle {
         }
         /* ---- 左侧项目树（标题栏那排按钮 / 标题上的"更多"菜单） ---- */
         if (act === "treeNew") { newEntry(); return }
+        /* "看哪一份"：标题「项目 ∨」那个菜单（见 js/EditorMenus.js 的 treeScopeMenu） */
+        if (act.indexOf("treeScope:") === 0) { switchTreeScope(act.substring(10)); return }
         if (act === "treeLocate") { locateCurrentItem(); return }
         if (act === "treeExpandAll") { setAllFolders(true); return }
         if (act === "treeCollapseAll") { setAllFolders(false); return }
@@ -2602,6 +2676,9 @@ Rectangle {
          */
         function onDocumentsChanged() {
             window.applyMarkdownPreference()
+            /* "打开的文件"那个视图列的就是这些标签：开 / 关一个都要跟着重排 */
+            if (window.treeScope === "openFiles")
+                window.rebuild()
         }
 
         /* 换了文档（切标签）：预览按当前这份重算（从 md 切到 .cpp 时自动关掉） */
@@ -2621,6 +2698,11 @@ Rectangle {
     Connections {
         target: editor.mirrorView
         function onPaneFocused() { window.notePaneFocus(editor.mirrorView) }
+        /* 第二栏开 / 关标签也要重排"打开的文件"那个视图（两栏都算） */
+        function onDocumentsChanged() {
+            if (window.treeScope === "openFiles")
+                window.rebuild()
+        }
     }
 
     /*
@@ -3318,7 +3400,12 @@ Rectangle {
                 onHideRequested: window.toggleFolderTree()
                 /* 当前标签不是左树里的文件时，准星按钮置灰（没什么可定位的） */
                 locateEnabled: window.canLocateCurrent()
-                /* 标题"项目 ∨"和右边那个 ⋯ 弹的是同一份菜单 */
+                /*
+                 * 标题「项目 ∨」弹的是"看哪一份"（项目 / 项目文件 / 打开的文件），
+                 * 右边那个 ⋯ 弹的还是那排操作 —— 和 PyCharm 一样分工。
+                 */
+                onScopeMenuRequested: (anchor) =>
+                    ddMenu.openFor(anchor, Menus.treeScopeMenu(window.treeScope))
                 onMenuRequested: (anchor) =>
                     ddMenu.openFor(anchor, Menus.treeMenu(window.treeMenuState(),
                                                           window.shortcutOverrides()))

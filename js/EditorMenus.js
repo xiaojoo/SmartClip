@@ -624,7 +624,33 @@ function notesMenu(state, ov) {
 }
 
 /*
- * 左侧项目树标题栏的"更多"菜单（也挂在标题"项目 ∨"上，见 FolderTree.qml）。
+ * 左侧项目树标题「项目 ∨」弹的那份菜单：**看哪一份**（和 PyCharm 一样三条）。
+ *
+ *   project       整棵树（日期目录 + 里面的文件）—— 默认
+ *   projectFiles  所有文件平铺，不带目录这一层
+ *   openFiles     只列现在打开着的那些标签
+ *
+ * 为什么和 treeMenu 分开：标题管"看哪一份"、右边那个 ⋯ 管"做什么"
+ * （新建 / 刷新 / 展开折叠 / 导入…），和 PyCharm 的分工一样 —— 两边的
+ * 条目对一个弹窗来说太多了，混在一起找起来更慢。
+ *
+ * 动作名由 Main.qml 的 dispatch 解析（treeScope:project / …），switchScope 在那边。
+ */
+function treeScopeMenu(scope) {
+    var current = scope ? String(scope) : "project"
+    return [
+        { label: "项目", act: "treeScope:project", icon: "folder",
+          checked: current === "project" },
+        { label: "项目文件", act: "treeScope:projectFiles", icon: "file",
+          checked: current === "projectFiles" },
+        { label: "打开的文件", act: "treeScope:openFiles", icon: "open",
+          checked: current === "openFiles" }
+    ]
+}
+
+/*
+ * 左侧项目树标题栏右边那个 ⋯ 的"更多"菜单（**不再**挂在标题"项目 ∨"上，
+ * 标题那份是 treeScopeMenu）。
  *
  * state 由 Main.qml 的 treeMenuState() 给：
  *   { folderCount, openCount, itemCount, entryCount, rootPath, importedCount,

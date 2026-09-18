@@ -52,8 +52,10 @@ Rectangle {
     signal hideRequested()
     /* 定位当前标签（准星按钮）：在哪一组、第几行由 Main 那边算 */
     signal locateRequested()
-    /* 标题 / "更多"都要弹出同一份菜单；anchor 传被点的那个控件 */
+    /* 标题栏右边那个 ⋯ 弹的操作菜单；anchor 传被点的那个控件 */
     signal menuRequested(var anchor)
+    /* 标题「项目 ∨」弹的"看哪一份"（项目 / 项目文件 / 打开的文件）；同上 */
+    signal scopeMenuRequested(var anchor)
 
     /* 标题栏到底摆了几个按钮（自检用，见 src/SelfTest.cpp） */
     readonly property int toolbarButtonCount: toolRow.children.length
@@ -65,6 +67,17 @@ Rectangle {
      */
     readonly property int toolButtonSize: 20
     readonly property int toolIconSize: 13
+
+    /*
+     * 一级行的**展开箭头**落在面板的哪一列上 —— 标题「项目」的左边缘要对齐它
+     * （用户报的"树往左靠、标题别动"，观感照 PyCharm：项目那一行正好在标题下面）。
+     *
+     *   5  ListView 的 leftMargin（见下面 view 里那一条）
+     *   6  一级行的缩进（TreeDelegate.iconInset 的底数）
+     * 两个数加起来是 11，和标题文字的左边缘一样 —— 这个"凑上"是**故意**的：
+     * 改任一处，另一处都要跟着改（自检里钉了这条，见 SelfTest.cpp）。
+     */
+    readonly property int treeChevronInset: 5 + 6
 
     /*
      * 准星按钮能不能点（由 Main 按"当前标签是不是左树里的文件"给）。
@@ -163,6 +176,32 @@ Rectangle {
         return { folder: folderX, file: fileX }
     }
 
+    /*
+     * 标题「项目」那两个字的左边缘在场景里的 x（自检用）。
+     *
+     * 和 iconColumnXs 同一套口径（都是 mapToItem(null, …) 的场景坐标），
+     * 自检直接比这两个数 —— 量的是**画出来**的位置，不是把常数再抄一遍。
+     */
+    function titleTextX() {
+        return titleLabel.mapToItem(null, 0, 0).x
+    }
+
+    /*
+     * 一级那一行的**展开箭头**在面板坐标里的 x（自检用）。
+     *
+     * 列表能横向滚（leftMargin 那几 px 就体现在 contentX 上）：内容跟着 contentX
+     * 左右挪，而标题在列表外面不动 —— 所以要折回"没滚动时"的那一列。
+     * contentItem.x = -contentX，所以**静止值 = 现在量到的 + contentX**
+     * （实测量过：自检里 contentX=-5、箭头在 17，静止就是那 12）。
+     */
+    function firstRowChevronPanelX() {
+        var it = view.itemAtIndex(0)
+        if (!it)
+            return -1
+        return it.chevronCellX - root.mapToItem(null, 0, 0).x + view.contentX
+    }
+
+
     readonly property color borderColor: "#43454a"
     readonly property color textBright:  "#ced0d6"
     readonly property color textMuted:   "#6f737a"
@@ -195,7 +234,14 @@ Rectangle {
             Rectangle {
                 id: titleButton
                 anchors.left: parent.left
-                anchors.leftMargin: 6
+                /*
+                 * 左边缘让**文字**落在一级行展开箭头那一列上（root.treeChevronInset）。
+                 *
+                 * 这个胶囊左右各留 5px（宽度 = 内容 + 10、里面那行居中），
+                 * 所以左边距要减掉左边那 5px —— 写成算式而不是写死数字：
+                 * 哪天改胶囊的留白，对齐不会跟着坏。
+                 */
+                anchors.leftMargin: root.treeChevronInset - (width - titleRow.implicitWidth) / 2
                 anchors.verticalCenter: parent.verticalCenter
                 height: 22
                 width: titleRow.implicitWidth + 10
@@ -206,7 +252,13 @@ Rectangle {
                     id: titleRow
                     anchors.centerIn: parent
                     spacing: 4
-                    Label { text: "项目"; color: root.textBright; font.pixelSize: 12; font.bold: true }
+                    Label {
+                        id: titleLabel
+                        text: "项目"
+                        color: root.textBright
+                        font.pixelSize: 12
+                        font.bold: true
+                    }
                     AppIcon { provider: icons; kind: "chevron-down"; tint: root.textMuted; size: 10 }
                 }
 
@@ -215,10 +267,16 @@ Rectangle {
                     anchors.fill: parent
                     hoverEnabled: true
                     cursorShape: Qt.PointingHandCursor
-                    onClicked: root.menuRequested(titleButton)
+                    /*
+                     * 标题弹的是"看哪一份"（项目 / 项目文件 / 打开的文件，
+                     * 见 Menus.treeScopeMenu）；右边那个 ⋯ 弹的还是那排操作
+                     * （menuRequested）—— 和 PyCharm 一样，标题管视图、
+                     * 工具按钮管动作。
+                     */
+                    onClicked: root.scopeMenuRequested(titleButton)
                 }
 
-                AppToolTip { hovered: titleHit.containsMouse; text: "项目树选项" }
+                AppToolTip { hovered: titleHit.containsMouse; text: "看哪一份文件" }
             }
 
             RowLayout {
@@ -329,7 +387,14 @@ Rectangle {
                 boundsBehavior: Flickable.StopAtBounds
                 model: root.rows
 
-                leftMargin: 10
+                /*
+                 * 左内边距：**5**（原来是 10）。
+                 *
+                 * 一级行的展开箭头 = 这个 5 + 行内缩进 6 = 面板 x=11，正好和标题
+                 * 「项目」那两个字的左边缘对齐（用户要的"树往左靠、标题别动"，
+                 * 观感照 PyCharm）。改这个数要连 root.treeChevronInset 一起看。
+                 */
+                leftMargin: 5
                 topMargin: 8
                 bottomMargin: 8
 

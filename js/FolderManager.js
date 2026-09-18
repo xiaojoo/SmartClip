@@ -87,3 +87,55 @@ function firstDateKey(nodes) {
             return nodes[i].key
     return ""
 }
+
+/*
+ * 「项目文件」那个视图：所有文件平铺，**不带目录这一层**。
+ *
+ * 目录只是"穿过去"，一个文件夹行都不出 —— 想找某个文件时不用先想它在哪个
+ * 日期目录里。depth 一律给 1：和"日期目录里的那些文件"同一档缩进，
+ * 图标也就落在平时那一列上（见 TreeDelegate.iconInset）。
+ */
+function flatFiles(nodes) {
+    var out = []
+    collectFiles(nodes || [], out)
+    return out
+}
+
+function collectFiles(list, out) {
+    for (var i = 0; i < list.length; ++i) {
+        var node = list[i]
+        if (!node)
+            continue
+        if (node.kind === "file") {
+            out.push({
+                kind: "file",
+                key: node.key,
+                label: node.label,
+                depth: 1,
+                path: node.path,
+                entries: node.entries,
+                size: node.size,
+                imported: !!node.imported,
+                dateKey: node.dateKey
+            })
+            continue
+        }
+        collectFiles(node.children || [], out)
+    }
+}
+
+/*
+ * 「打开的文件」那个视图：平铺里**只留现在打开着的那些**（openPaths 是路径表）。
+ *
+ * 平铺之后按路径筛，顺序就是平铺那个顺序（按日期/时间），不是标签顺序 ——
+ * 标签顺序在顶上那条标签栏里已经有了，这里要的是"我开着的那几份都有哪些"。
+ */
+function openFiles(nodes, openPaths) {
+    var all = flatFiles(nodes)
+    var wanted = openPaths || []
+    var out = []
+    for (var i = 0; i < all.length; ++i)
+        if (wanted.indexOf(all[i].path) >= 0)
+            out.push(all[i])
+    return out
+}
