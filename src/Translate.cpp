@@ -251,7 +251,18 @@ void LlmClient::setDefaultTarget(const QString &value) {
 }
 
 bool LlmClient::localRunning() const {
-    return m_proc && m_proc->state() != QProcess::NotRunning;
+    /* 自检可以假装它起来了（见 setLocalReadyForTest）：那条路不用真进程 */
+    return m_localReadyForTest || (m_proc && m_proc->state() != QProcess::NotRunning);
+}
+
+void LlmClient::setLocalReadyForTest(bool on) {
+    if (m_localReadyForTest == on)
+        return;
+    m_localReadyForTest = on;
+    emit localRunningChanged();
+    /* 和 pollLocalReady 探通之后是同一句：这才是"排队那条该发出去"的时刻 */
+    if (on)
+        flushPending();
 }
 
 /* ---- 贴图"图上选字"的两个设置（见 Translate.h） ---- */
@@ -377,7 +388,12 @@ QString LlmClient::recognize(const QString &imageDataUrl, const QString &target,
 QString LlmClient::ask(const QString &systemPrompt, const QString &userText,
                        const QString &busyStatus) {
     const QString token = QStringLiteral("a%1").arg(++m_nextToken);
+    askWithToken(token, systemPrompt, userText, busyStatus);
+    return token;
+}
 
+void LlmClient::askWithToken(const QString &token, const QString &systemPrompt,
+                             const QString &userText, const QString &busyStatus) {
     auto failLater = [this, token](const QString &reason) {
         if (m_inFlight > 0 && --m_inFlight == 0)
             setBusy(false);
@@ -387,15 +403,15 @@ QString LlmClient::ask(const QString &systemPrompt, const QString &userText,
 
     if (userText.trimmed().isEmpty()) {
         failLater(QStringLiteral("没有要交给模型的内容"));
-        return token;
+        return;
     }
     if (chatUrl().isEmpty()) {
         failLater(QStringLiteral("还没配置接口地址（设置 → 模型）"));
-        return token;
+        return;
     }
     if (m_mode == QLatin1String("api") && m_model.trimmed().isEmpty()) {
         failLater(QStringLiteral("还没填模型名（设置 → 模型）"));
-        return token;
+        return;
     }
     /* 本地模式还没起来：和翻译那条一样排队等它加载完（见 post 里那段说明） */
     if (m_mode == QLatin1String("local") && !localRunning()) {
@@ -409,7 +425,7 @@ QString LlmClient::ask(const QString &systemPrompt, const QString &userText,
         setStatus(QStringLiteral("正在启动本地模型…"));
         if (!startLocal())
             failPending(m_status);
-        return token;
+        return;
     }
 
     QJsonArray messages;
@@ -434,7 +450,6 @@ QString LlmClient::ask(const QString &systemPrompt, const QString &userText,
     send(token, busyStatus.trimmed().isEmpty() ? QStringLiteral("正在请求模型…")
                                                : busyStatus,
          body, false);
-    return token;
 }
 
 void LlmClient::probe() {
@@ -794,8 +809,12 @@ void LlmClient::flushPending() {
             /*
              * 自定义提示词那条（见 ask）：排进队时把 system 提示词寄存在
              * source 里（所以它没过 post 那道"翻译"的规矩），重新起来时原样还回去。
+             *
+             * token 必须用**排队时那个**：调用方等的就是它，重新发一次 ask()
+             * 会另发一个 token，结果回来对不上就被丢掉了（见 askWithToken）。
              */
-            ask(request.source, request.text, QStringLiteral("正在请求模型…"));
+            askWithToken(request.token, request.source, request.text,
+                         QStringLiteral("正在请求模型…"));
         } else {
             post(request.token, request.text, request.target, request.source, request.probe);
         }

@@ -23,7 +23,8 @@ import SmartClip.Globals 1.0
  *
  * 横向滚动：行很长时两栏各自横滚（用同一个 contentX，滚一边另一边跟着走）。
  *
- * 和 CheckCard 一样是独立的 Window（Qt.Tool + 无边框）：理由见那边的注释。
+ * 是独立的 Window（Qt.Tool + 无边框），不是 Popup.Window：Popup.Window 的
+ * x/y 在 Windows 上写不进去，卡片会贴在左上角（见 DocCard.qml 开头那段）。
  */
 Window {
     id: root

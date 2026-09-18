@@ -7,7 +7,6 @@
 #include <QJsonObject>
 #include <QHash>
 #include <QRegularExpression>
-#include <QSettings>
 #include <QStringList>
 #include <QVariantMap>
 
@@ -203,6 +202,23 @@ QStringList splitLines(const QString &text) {
             l.chop(1);
     }
     return lines;
+}
+
+/*
+ * "3 条问题" / "未发现问题" —— 报条数的地方都走它。
+ *
+ * 0 条**不能**写成"0 条问题"（用户报过状态栏那句"只发现本地那 0 条问题"，
+ * 读着像话没说完）；这个函数是唯一一处写这个话术的地方。
+ */
+QString issueCountText(int count) {
+    return count == 0 ? QStringLiteral("未发现问题")
+                      : QStringLiteral("%1 条问题").arg(count);
+}
+
+/* 同一件事的前半句："本地发现 3 条问题，…"；0 条时说"本地没问题" */
+QString localCountPrefix(int count) {
+    return count == 0 ? QStringLiteral("本地没问题，")
+                      : QStringLiteral("本地发现 %1 条问题，").arg(count);
 }
 
 QVariantMap makeIssue(int row, int col, int endRow, int endCol, const QString &severity,
@@ -447,8 +463,6 @@ QList<QVariantMap> checkChinese(const QStringList &lines, const QString &languag
 
 Checker::Checker(LlmClient *llm, QObject *parent)
     : QObject(parent), m_llm(llm) {
-    m_enabled = QSettings().value(QStringLiteral("check/enabled"), false).toBool();
-
     if (m_llm) {
         /*
          * 模型那部分回来了。token 要对得上 —— 校验期间用户可能已经换了一份
@@ -468,12 +482,22 @@ Checker::Checker(LlmClient *llm, QObject *parent)
                         m_issues.append(m);
                     emit issuesChanged();
                     setBusy(false);
-                    setStatus(model.isEmpty()
-                                  ? QStringLiteral("校验完成：只发现本地那 %1 条问题")
-                                        .arg(m_local.size())
-                                  : QStringLiteral("校验完成：共 %1 条问题（模型补了 %2 条）")
-                                        .arg(m_local.size())
-                                        .arg(model.size()));
+                    /*
+                     * 一句话说清结论。
+                     *
+                     * 0 条**不能**写成"只发现本地那 0 条问题"（用户报过：读着像没说完）
+                     * —— 那就是"未发现问题"。条数的话术统一走 issueCountText。
+                     */
+                    const int total = m_local.size() + model.size();
+                    if (total == 0)
+                        setStatus(QStringLiteral("未发现问题"));
+                    else if (model.isEmpty())
+                        setStatus(QStringLiteral("校验完成：%1（都是本地规则报的）")
+                                      .arg(issueCountText(total)));
+                    else
+                        setStatus(QStringLiteral("校验完成：共 %1 条问题（其中模型补了 %2 条）")
+                                      .arg(total)
+                                      .arg(model.size()));
                     emit checked(model.size());
                 });
         connect(m_llm, &LlmClient::failed, this,
@@ -487,9 +511,12 @@ Checker::Checker(LlmClient *llm, QObject *parent)
                      * 模型那条路失败**不影响本地结果**：本地那几条已经列出来了，
                      * 状态里说清楚"模型那部分没跑成"，用户至少还能拿到本地结论。
                      */
-                    setStatus(QStringLiteral("模型校验没跑成（%1）；本地发现 %2 条问题")
-                                  .arg(error)
-                                  .arg(m_local.size()));
+                    setStatus(m_local.isEmpty()
+                                  ? QStringLiteral("模型校验没跑成（%1）；本地也没发现问题")
+                                        .arg(error)
+                                  : QStringLiteral("模型校验没跑成（%1）；本地发现 %2 条问题")
+                                        .arg(error)
+                                        .arg(m_local.size()));
                     emit checked(0);
                 });
         connect(m_llm, &LlmClient::settingsChanged, this,
@@ -501,15 +528,22 @@ Checker::Checker(LlmClient *llm, QObject *parent)
          */
         connect(m_llm, &LlmClient::localRunningChanged, this,
                 [this]() { emit llmStateChanged(); });
+        /*
+         * 等模型那几秒到几十秒要看得见。
+         *
+         * 本地模型冷启动是"起 llama-server + 加载 gguf"一整套，几十秒很正常；
+         * 这期间校验自己那句话一直写着"正在问模型…"，看着就像卡死了（用户报过）。
+         * Llm 那边其实一直在报进度（正在启动本地推理服务… / 模型加载中…），
+         * 把它接过来，前面挂上本地已经发现几条。
+         */
+        connect(m_llm, &LlmClient::statusChanged, this, [this]() {
+            if (!m_busy || m_token.isEmpty())
+                return;
+            const QString progress = m_llm->status();
+            if (!progress.isEmpty())
+                setStatus(localCountPrefix(m_local.size()) + progress);
+        });
     }
-}
-
-void Checker::setEnabled(bool on) {
-    if (m_enabled == on)
-        return;
-    m_enabled = on;
-    QSettings().setValue(QStringLiteral("check/enabled"), on);
-    emit settingsChanged();
 }
 
 bool Checker::llmReady() const {
@@ -550,7 +584,7 @@ QString Checker::modelSummary() const {
     if (m_llm->mode() == QLatin1String("local")) {
         if (!llmReady())
             return QStringLiteral("本地模型还没配好（见左边「模型」那一栏）"
-                                  "—— 开着校验也只会跑本地规则。");
+                                  "—— 现在只会跑本地规则。");
         /* 只显示文件名：模型那一栏里那条路径整条太长，这里只是"用的是哪个" */
         const QString path = m_llm->localModel().trimmed();
         const int cut = qMax(path.lastIndexOf(QLatin1Char('/')),
@@ -565,7 +599,7 @@ QString Checker::modelSummary() const {
 
     if (!llmReady())
         return QStringLiteral("接口模型还没配好（见左边「模型」那一栏）"
-                              "—— 开着校验也只会跑本地规则。");
+                              "—— 现在只会跑本地规则。");
     return QStringLiteral("模型：接口 · %1（%2）")
         .arg(m_llm->model().trimmed(), m_llm->apiBase().trimmed());
 }
@@ -601,22 +635,21 @@ void Checker::clear() {
 
 QString Checker::resultSummary() const {
     if (m_issues.isEmpty())
-        return m_status.isEmpty() ? QStringLiteral("没发现问题") : m_status;
+        return m_status.isEmpty() ? QStringLiteral("未发现问题") : m_status;
     return QStringLiteral("发现 %1 条问题").arg(m_issues.size());
 }
 
 /*
  * 走不走模型那条路。
  *
- * 三个条件：开关开着、接口配好了、正文**不太长**。
+ * 两个条件：接口配好了、正文**不太长**。
  * 最后那条：校验要给行号，正文太长（几万字）时模型数行号会数错，
  * 而且超了上下文还得截断 —— 截断之后行号就彻底对不上了。
  * 所以超过 kMaxModelChars 就只跑本地规则，并在状态里说明。
  */
 bool Checker::wantsModel(const QString &text) const {
     static constexpr int kMaxModelChars = 12000;
-    return m_enabled && llmReady() && text.size() <= kMaxModelChars
-           && !text.trimmed().isEmpty();
+    return llmReady() && text.size() <= kMaxModelChars && !text.trimmed().isEmpty();
 }
 
 QString Checker::replyFormat() const {
@@ -689,8 +722,7 @@ int Checker::checkLocalOnly(const QString &text, const QString &language) {
     for (const QVariantMap &m : m_local)
         m_issues.append(m);
     setBusy(false);
-    setStatus(m_local.isEmpty() ? QStringLiteral("本地规则：没发现问题")
-                                : QStringLiteral("本地规则：发现 %1 条问题").arg(m_local.size()));
+    setStatus(QStringLiteral("本地规则：") + issueCountText(m_local.size()));
     emit issuesChanged();
     return m_local.size();
 }
@@ -700,26 +732,18 @@ int Checker::check(const QString &text, const QString &language, const QString &
 
     const int localCount = checkLocalOnly(text, language);
 
-    if (!m_enabled) {
-        /* 开关关着：只给本地结论，并说清楚为什么没问模型 */
-        setStatus(localCount == 0
-                      ? QStringLiteral("校验已关闭（设置 → 校验），只跑了本地规则：没发现问题")
-                      : QStringLiteral("校验已关闭（设置 → 校验），只看本地规则：%1 条问题")
-                            .arg(localCount));
-        return localCount;
-    }
     if (!llmReady()) {
-        setStatus(QStringLiteral("还没配好大模型（设置 → 模型），只跑了本地规则：%1 条问题")
-                      .arg(localCount));
+        setStatus(QStringLiteral("还没配好大模型（设置 → 模型），只跑了本地规则：")
+                  + issueCountText(localCount));
         return localCount;
     }
     if (!wantsModel(text)) {
-        setStatus(QStringLiteral("正文太长了，只跑了本地规则：%1 条问题").arg(localCount));
+        setStatus(QStringLiteral("正文太长了，只跑了本地规则：") + issueCountText(localCount));
         return localCount;
     }
 
     setBusy(true);
-    setStatus(QStringLiteral("本地发现 %1 条问题，正在问模型…").arg(localCount));
+    setStatus(localCountPrefix(localCount) + QStringLiteral("正在问模型…"));
     m_lastError.clear();
     /*
      * 只发正文本身：**不发文件名、不发路径**。校验是内容层面的事，

@@ -30,14 +30,13 @@ class LlmClient;
  * 才收，定位不到的直接丢掉 —— 那是它在编。宁可少报几条，也不能给用户一堆
  * 点不到的假问题。
  *
- * 开关在设置面板（QSettings 的 check/enabled，默认关）：这是要联网、
- * 要花 token 的功能，不打招呼就替用户发请求不合适。
+ * 入口只有一个：编辑区右键 → 「校验当前文件」（"编辑"菜单 / Ctrl+Shift+K 也是
+ * 同一条）。**不做自动校验** —— 这是要联网、要花 token 的功能，用户点了才发请求。
+ * 结果也不弹卡片，而是推回编辑区画波浪线（见 EditorViewItem::setCheckIssues），
+ * 鼠标停上去看详情。
  */
 class Checker final : public QObject {
     Q_OBJECT
-
-    /* 总开关（设置面板那个勾） */
-    Q_PROPERTY(bool enabled READ enabled WRITE setEnabled NOTIFY settingsChanged)
 
     /*
      * 上一次校验的结果：每项
@@ -54,7 +53,7 @@ class Checker final : public QObject {
     Q_PROPERTY(QVariantList issues READ issues NOTIFY issuesChanged)
     /* 有个校验在跑（本地那部分同步做完，等模型那部分时它也一直是真的） */
     Q_PROPERTY(bool busy READ busy NOTIFY busyChanged)
-    /* 一句话状态："本地发现 3 个问题，正在问模型…" / "校验完成：共 5 个问题" */
+    /* 一句话状态："本地发现 3 条问题，正在问模型…" / "未发现问题" */
     Q_PROPERTY(QString status READ status NOTIFY statusChanged)
     /* 大模型那条支路能不能用（没配好接口就只跑本地规则，界面要说清楚） */
     Q_PROPERTY(bool llmReady READ llmReady NOTIFY llmStateChanged)
@@ -69,9 +68,6 @@ class Checker final : public QObject {
 
 public:
     explicit Checker(LlmClient *llm = nullptr, QObject *parent = nullptr);
-
-    bool enabled() const { return m_enabled; }
-    void setEnabled(bool on);
 
     QVariantList issues() const { return m_issues; }
     bool busy() const { return m_busy; }
@@ -114,11 +110,10 @@ public:
     /* 上一次模型那部分失败的原因（空串 = 没失败） */
     Q_INVOKABLE QString lastError() const { return m_lastError; }
 
-    /* 校验该不该走上模型那条路（开关开着 + 接口配好了 + 正文不太长） */
+    /* 校验该不该走上模型那条路（接口配好了 + 正文不太长） */
     Q_INVOKABLE bool wantsModel(const QString &text) const;
 
 signals:
-    void settingsChanged();
     void issuesChanged();
     void busyChanged();
     void statusChanged();
@@ -137,7 +132,6 @@ private:
 
     LlmClient *m_llm = nullptr;
 
-    bool m_enabled = false;
     bool m_busy = false;
     QString m_status;
     QString m_lastError;

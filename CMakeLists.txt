@@ -167,7 +167,6 @@ qt_add_qml_module(SmartClip
         qml/components/MarkdownView.qml
         qml/components/FindBar.qml
         qml/components/AskCard.qml
-        qml/components/CheckCard.qml
         qml/components/DiffCard.qml
         qml/components/DocCard.qml
         qml/components/FolderTree.qml

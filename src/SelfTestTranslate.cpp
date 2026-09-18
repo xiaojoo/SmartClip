@@ -19,6 +19,7 @@
 #include <QQuickItem>
 #include <QScreen>
 #include <QSettings>
+#include <QStandardPaths>
 #include <QTcpServer>
 #include <QTcpSocket>
 #include <QThread>
@@ -669,6 +670,80 @@ int SelfTest::runTranslate(TranslateCards *cards, LlmClient *llm, TrayIcon *tray
         llm->setLocalExe(oldExe);
         llm->setLocalModel(oldModel);
         llm->setLocalMmproj(oldMmproj);
+        llm->setLocalPort(oldPort);
+    }
+
+    /* =====================================================================
+     * 8) 本地模型冷启动：排队那条请求回来时 token 必须还是**原来那个**
+     *
+     * 用户报过"校验一直卡在 正在问模型…"：本地模式下点校验，请求先排队等模型
+     * 加载（几十秒），模型就绪后由 flushPending 重新发出去 —— 那一下原来又调了
+     * 一次 ask()，它**另发一个 token**，而校验那边等的还是最早那个：结果回来
+     * token 对不上，被当成过期结果丢掉，界面上就永远停在那句话上。
+     *
+     * 这里用假模型服务 + setLocalReadyForTest（自检里拉不起真的 llama-server）
+     * 走一遍"先排队、再就绪"，钉住 token 和正文。
+     * =================================================================== */
+    {
+        const QString oldMode = llm->mode();
+        const QString oldExe = llm->localExe();
+        const QString oldModel = llm->localModel();
+        const int oldPort = llm->localPort();
+
+        MockLlmServer askMock;
+        const bool listening = askMock.listen(QHostAddress::LocalHost, 0);
+        trCheck(listening, QStringLiteral("校验排队：假模型服务起得来（本地回环随机端口）"));
+        /*
+         * 这里要的是"进程起得来但什么也不干"（真 llama-server 自检里拉不起来）。
+         * 不能用一个不存在的程序：那种 start() 会当场失败，排队的请求直接被
+         * failPending 掉，根本走不到"模型就绪后 flush"那一步。
+         * ping 拿到 -m/--port 会立刻报错退出，但**它是启动成功的**，正好。
+         */
+        const QString sleeper = QStandardPaths::findExecutable(QStringLiteral("ping"));
+        if (listening && !sleeper.isEmpty()) {
+            askMock.replyContent = QStringLiteral("12|1|warn|punct|中文句子里用了半角逗号|天气不错,");
+            llm->setMode(QStringLiteral("local"));
+            llm->setLocalPort(int(askMock.serverPort()));
+            llm->setLocalExe(sleeper);
+            llm->setLocalModel(QStringLiteral("C:/models/x.gguf"));
+
+            QString finishedToken, finishedText, failedReason;
+            QObject probe;
+            QObject::connect(llm, &LlmClient::finished, &probe,
+                             [&](const QString &token, const QString &text) {
+                                 finishedToken = token;
+                                 finishedText = text;
+                             });
+            QObject::connect(llm, &LlmClient::failed, &probe,
+                             [&](const QString &, const QString &error) { failedReason = error; });
+
+            /* 服务还没起来：这一条会排队（返回的就是调用方要等的 token） */
+            const QString token = llm->ask(QStringLiteral("系统提示"), QStringLiteral("今天天气不错,散步去"),
+                                           QStringLiteral("正在校验…"));
+            const bool queued = llm->busy();
+            /* 相当于"本地模型加载完了"：和真就绪走的是同一句 flushPending */
+            llm->setLocalReadyForTest(true);
+
+            QEventLoop loop;
+            QTimer::singleShot(6000, &loop, &QEventLoop::quit);
+            QObject::connect(llm, &LlmClient::finished, &loop, &QEventLoop::quit);
+            loop.exec();
+            settle();
+
+            trCheck(queued, QStringLiteral("校验排队：服务没起来时这条是排队的（没直接发）"));
+            trCheck(finishedToken == token,
+                    QStringLiteral("校验排队：等模型的那条请求，回来时 token 还是原来那个"),
+                    finishedToken + QStringLiteral(" vs ") + token + QStringLiteral(" / ")
+                        + failedReason);
+            trCheck(finishedText.contains(QStringLiteral("半角逗号")),
+                    QStringLiteral("校验排队：那条请求按原样发了出去，也拿回了内容"),
+                    finishedText);
+
+            llm->setLocalReadyForTest(false);
+        }
+        llm->setMode(oldMode);
+        llm->setLocalExe(oldExe);
+        llm->setLocalModel(oldModel);
         llm->setLocalPort(oldPort);
     }
 

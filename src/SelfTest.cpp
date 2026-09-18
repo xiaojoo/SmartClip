@@ -3724,6 +3724,69 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
     view->setWrapEnabled(wrapAtStart);
 
     /*
+     * ================= 校验的波浪线（见 EditorViewItem::setCheckIssues） =================
+     *
+     * 校验那边给的是**行列**（第几行、这一行第几个**字**），Scintilla 要的是
+     * **字节**位置 —— 中文一个字三字节，这块换算错了波浪线就画在旁边的字上。
+     * 顺带钉住"正文一改就清掉"（改了之后行列全不作数了）。
+     */
+    {
+        const int doc = view->newDocument();
+        view->setText(QStringLiteral("第一行,没问题\n第二行也没事\n"));
+
+        QVariantMap issue;
+        issue.insert(QStringLiteral("row"), 1);
+        issue.insert(QStringLiteral("col"), 3);        /* 「,」前面是三个汉字 */
+        issue.insert(QStringLiteral("endRow"), 1);
+        issue.insert(QStringLiteral("endCol"), 4);
+        issue.insert(QStringLiteral("severity"), QStringLiteral("warn"));
+        issue.insert(QStringLiteral("message"), QStringLiteral("中文句子里用了半角「,」"));
+        issue.insert(QStringLiteral("snippet"), QStringLiteral(","));
+        issue.insert(QStringLiteral("source"), QStringLiteral("local"));
+        issue.insert(QStringLiteral("suggestion"), QStringLiteral("，"));
+        view->setCheckIssues(QVariantList{ QVariant(issue) });
+
+        const QVariantList ranges = view->checkIssueRanges();
+        /* 半角逗号是第 4 个字符（0 基的 3）、第 10 个字节：前面三个汉字各 3 字节 */
+        check(ranges.size() == 2 && ranges.at(0).toInt() == 9 && ranges.at(1).toInt() == 10,
+              QStringLiteral("波浪线画在那个半角逗号上（第 3 个字 = 第 9..10 个字节）"),
+              QStringLiteral("实际 %1").arg(ranges.size() == 2
+                                               ? QStringLiteral("%1..%2")
+                                                     .arg(ranges.at(0).toInt())
+                                                     .arg(ranges.at(1).toInt())
+                                               : QStringLiteral("%1 段").arg(ranges.size() / 2)));
+
+        /*
+         * 真的画出来了没有：正文区里数"波浪线那个色"的像素。
+         *
+         * 区间算得再对，指示器没配好 / 没刷出来屏幕上还是一条线都没有 ——
+         * 这条就是钉那个的（见 checkWavePixelStats）。
+         */
+        const QVariantList wave = view->checkWavePixelStats();
+        check(wave.value(1).toInt() > 0,
+              QStringLiteral("那条波浪线真的画在了正文里（警告色像素 > 0）"),
+              QStringLiteral("错误色 %1 / 警告色 %2").arg(wave.value(0).toInt())
+                  .arg(wave.value(1).toInt()));
+
+        /*
+         * 鼠标停在那条波浪线上 -> 弹出来的就是这条问题的说明（见 checkTipAtPoint，
+         * 悬浮那条路走的是同一个函数）。取的是上面数出来的那个像素点。
+         */
+        const int hitX = wave.value(2).toInt(), hitY = wave.value(3).toInt();
+        const QString tip = view->checkTipAtPoint(hitX, hitY);
+        check(tip.contains(QStringLiteral("半角")) && tip.contains(QStringLiteral("第 1 行")),
+              QStringLiteral("停在那条波浪线上：说明框里就是这条问题"),
+              tip.isEmpty() ? QStringLiteral("（那儿什么都没有）") : tip);
+
+        view->setText(QStringLiteral("第一行，没问题\n第二行也没事\n"));
+        check(view->checkIssueRanges().isEmpty()
+                  && view->checkTipAtPoint(hitX, hitY).isEmpty(),
+              QStringLiteral("正文一改，波浪线自动清掉（行列不再作数）"));
+
+        view->closeDocument(doc);
+    }
+
+    /*
      * ============ 截图（抓屏 -> 选区 -> 加文字 -> 合成 / 贴图） ============
      *
      * 为什么走选区窗口 QML 上那几个 test* 函数，而不是合成键鼠去点：
@@ -6113,7 +6176,7 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
      *   3) 下拉菜单首开 DropdownMenu（Popup.Window）
      *   4) 下拉菜单子菜单 —— **把主窗口压矮**再开，强制走到"顶出宿主下沿"那条路
      *
-     * 没覆盖的：CheckCard / DiffCard / DocCard（前两个要真跑一遍校验 / 对比，
+     * 没覆盖的：DiffCard / DocCard（前者要真跑一遍对比，
      * 后一个要真的排一份文档进去；几何都是内容或固定值决定的，等它们各自的
      * 用例补到那一步时再往这儿加一条同样的采样就行）。QtWidgets 那三个输入框
      * 走的是 exec()，采样器够不着（见 EditorController 里的顺序注释）。
@@ -6129,7 +6192,7 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
          *
          * Popup 型的（问句 / 设置面板 / 下拉菜单）要顺着内容项找它自己那块窗 ——
          * 和"问句是一块小卡片，没有铺满整窗的遮罩"那条一样的取法；
-         * Window 型的（CheckCard / DiffCard / DocCard / 便签菜单）本身就是原生窗。
+         * Window 型的（DiffCard / DocCard / 便签菜单）本身就是原生窗。
          * 找到主窗口就当没找到：那说明这块表面是**场景内浮层**（Popup.Item），
          * 它的几何不该拿主窗口来量。
          */

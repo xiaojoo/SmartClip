@@ -198,7 +198,8 @@ int main(int argc, char *argv[]) {
      * 编辑区校验（见 src/Checker.h）：中文用词 / 代码语法。
      *
      * 要 llm 是因为它那条"问大模型"的支路走 LlmClient::ask；本地规则那部分
-     * 不依赖网络。开关在设置面板（QSettings 的 check/enabled，默认关）。
+     * 不依赖网络。入口只有编辑区右键那条「校验当前文件」—— 不做自动校验，
+     * 用户点了才发请求，结果推回编辑区画波浪线（见 EditorViewItem）。
      */
     Checker checker(&llm);
 

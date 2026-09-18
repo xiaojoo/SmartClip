@@ -1522,8 +1522,13 @@ Rectangle {
 
     /*
      * 校验**当前那一栏**（分栏时两栏可能看着两份不同的文件，校验的是用户
-     * 正在看的那一份）。结果里那个"跳过去"要跳回**同一栏**，所以把那一栏
-     * 记下来（checkPane），点卡片上的问题时按它跳。
+     * 正在看的那一份）。
+     *
+     * 这是**手动的**：编辑区右键（或"编辑"菜单 / 快捷键）点了才跑，界面上不做
+     * 自动校验 —— 它要联网、要花 token。结果也不弹卡片，而是直接画在正文里：
+     * 出问题的地方一条波浪线，鼠标停上去弹详情（见 EditorViewItem::setCheckIssues），
+     * 那句总结落在状态栏（StatusBar 直接读 Check.status）。
+     * 所以这里先记住是哪一栏（checkPane）—— 结果回来时按它推给对应的编辑器。
      */
     property var checkPane: null
 
@@ -1534,35 +1539,24 @@ Rectangle {
             return
         }
         checkPane = v
-        checkCard.docTitle = v.displayName
-        checkCard.parentTransient = window
-        checkCard.placeInParent()
-        checkCard.show()
+        v.clearCheckIssues()
         Check.check(v.currentText(), v.language, v.filePath)
     }
 
-    /* 卡片上点一条问题：跳到正文那一行，并把出问题那一段选中 */
-    function jumpToIssue(row, col, endCol) {
-        var v = (checkPane && checkPane.hasDocument) ? checkPane : activeView()
-        if (!v || !v.hasDocument)
-            return
-        v.gotoLine(row)
-        v.selectRange(row, col, row, Math.max(col + 1, endCol))
-        v.requestEditorFocus()
-    }
+    /*
+     * 校验结果 -> 编辑区里的波浪线。
+     *
+     * 本地规则那部分（同步）和大模型那部分（异步）都会发 issuesChanged，
+     * 所以这一份代码两边都管：整份清单推给那一栏，由编辑器自己重画波浪线
+     * （见 EditorViewItem::setCheckIssues）。
+     */
+    Connections {
+        target: Check
 
-    /* 卡片上"复制结果"：把问题清单拼成一段文字进剪贴板 */
-    function copyCheckResult() {
-        var lines = []
-        lines.push("校验结果：" + Check.resultSummary())
-        var items = Check.issues
-        for (var i = 0; i < items.length; ++i) {
-            lines.push("  第 " + items[i].row + " 行  " + items[i].message
-                       + (items[i].snippet !== "" ? "   「" + items[i].snippet + "」" : ""))
+        function onIssuesChanged() {
+            if (window.checkPane && window.checkPane.hasDocument)
+                window.checkPane.setCheckIssues(Check.issues)
         }
-        if (items.length === 0)
-            lines.push("  （没有发现问题）")
-        Cmd.copyText(lines.join("\n"))
     }
 
     /* ------------------------------------------------------------------
@@ -2753,21 +2747,9 @@ Rectangle {
     }
 
     /*
-     * 校验结果卡片（见 qml/components/CheckCard.qml）。
-     *
-     * 和下拉菜单 / 设置面板同类：**独立的原生窗口**。它内容比那两块多
-     * （一列问题、每条要能点），所以不做成 Popup，而是一个 Window
-     * （理由见 CheckCard.qml 开头那段）。
+     * 校验结果没有卡片：它直接画在正文里（波浪线 + 悬浮详情），见上面
+     * runCheck 那段和 EditorViewItem::setCheckIssues。
      */
-    CheckCard {
-        id: checkCard
-        /* 自检按名字找它那块原生窗（同上） */
-        objectName: "checkCard"
-        parentTransient: window
-        onJumpRequested: (row, col, endCol) => window.jumpToIssue(row, col, endCol)
-        onRerunRequested: window.runCheck()
-        onCopyRequested: window.copyCheckResult()
-    }
 
     /* 文件对比卡片（见 qml/components/DiffCard.qml） */
     DiffCard {

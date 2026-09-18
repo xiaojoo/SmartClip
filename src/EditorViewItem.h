@@ -3,6 +3,7 @@
 #include <QColor>
 #include <QFont>
 #include <QHash>
+#include <QPair>
 #include <QPointer>
 #include <QQuickItem>
 #include <QString>
@@ -478,10 +479,40 @@ public:
     Q_INVOKABLE void gotoLine(int line);
 
     /*
-     * 选中第 row 行 col..endCol 那一段（列号 0 基）——
-     * 校验卡片上点一条问题就走它（跳过去 + 把出问题那几个字选上）。
+     * 校验结果（中文用词 / 代码语法，见 src/Checker.h）。
+     *
+     * Main.qml 在 Check.issuesChanged 里把 Check.issues 整份推过来：每一处在
+     * 正文里画一条波浪线，鼠标停上去弹一个说明框（见 .cpp 里 setCheckIssues /
+     * eventFilter 的 ToolTip 分支）。每项的口径和 Checker 那边一致：
+     *   { row, col, endRow, endCol, severity, message, snippet, source, suggestion }
+     *
+     * 正文一改、或者换了标签，这些波浪线就作废了（位置不再对得上），
+     * 所以在 textChanged / 切文档 / 关标签那几处统一清掉。
      */
-    Q_INVOKABLE void selectRange(int row, int col, int endRow, int endCol);
+    Q_INVOKABLE void setCheckIssues(const QVariantList &issues);
+    Q_INVOKABLE void clearCheckIssues();
+
+    /*
+     * 自检用：现在画着波浪线的那几段在文档里的**字节**位置
+     * （[起0, 止0, 起1, 止1, …]，空表 = 一条都没有）。
+     *
+     * 校验给的是"第几行、这一行第几个字"，Scintilla 要的是字节位置，中文一个字
+     * 三字节 —— 这块换算错了波浪线就画在旁边的字上，所以留个口子让自检钉住。
+     */
+    Q_INVOKABLE QVariantList checkIssueRanges() const;
+
+    /*
+     * 自检用：正文区里**波浪线**的像素统计 { 错误色像素数, 警告色像素数, 第一个
+     * 命中像素的 x, y }（没有就是 0,0）。查的是"那条线真的画出来了"——
+     * 光有区间还说明不了它被渲染出来。
+     */
+    Q_INVOKABLE QVariantList checkWavePixelStats() const;
+
+    /*
+     * 自检用：鼠标停在控件坐标 (x, y) 上会弹出来的那段说明（空串 = 那儿没有波浪线）。
+     * 悬浮那条路走的就是它，所以自检跟真鼠标看到的是同一份文字。
+     */
+    Q_INVOKABLE QString checkTipAtPoint(int x, int y) const;
 
 
     /*
@@ -979,6 +1010,10 @@ private:
     void applyStyle();
     /* 字体/前景/底色写进 STYLE_DEFAULT 并刷满样式表（见 .cpp 里的说明） */
     void applyDefaultStyle();
+    /* 文档位置 pos 落在第几条校验问题里（-1 = 没有；同一行上有问题也认） */
+    int checkIssueAt(long pos) const;
+    /* 一条校验问题的悬浮说明（HTML，QToolTip 用，见 .cpp） */
+    QString checkIssueHtml(int index) const;
     void applyPadding();
     /*
      * 按 lineHeightFactor 把"额外上下空白"写进 Scintilla（行高就是靠它实现的）。
@@ -1164,6 +1199,15 @@ private:
 
     /* 查找结果高亮用的指示器编号（INDIC_CONTAINER 起，避开 lexer 自己的） */
     static constexpr int kFindIndicator = 8;
+    /* 校验结果的波浪线：9 = 错误、10 = 警告（理由同上，8 已经被查找占了） */
+    static constexpr int kCheckErrorIndicator = 9;
+    static constexpr int kCheckWarnIndicator = 10;
+    /*
+     * 上一次校验推过来的问题（悬浮时按它拼说明框），以及每一处在文档里的
+     * **字节**区间（悬浮定位用）—— 两个表一一对应，clearCheckIssues 一起清。
+     */
+    QVariantList m_checkIssues;
+    QList<QPair<long, long>> m_checkRanges;
     /* 样式是否已在正确几何下应用过（见 applyGeometry 里的说明） */
     bool m_chromeApplied = false;
     /* 正在切文档 / 灌正文：这期间的 modified 通知不算"用户改动" */

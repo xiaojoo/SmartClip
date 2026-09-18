@@ -3,6 +3,7 @@ pragma ComponentBehavior: Bound
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import SmartClip.Globals 1.0
 import "../utils"
 
 /*
@@ -88,6 +89,24 @@ Rectangle {
             elide: Text.ElideMiddle
             Layout.fillWidth: true
             Layout.maximumWidth: 520
+        }
+
+        /*
+         * 上一次校验的结果（见 src/Checker.h）。
+         *
+         * 校验现在**不弹卡片**了 —— 问题直接画在正文里（波浪线 + 悬浮详情，
+         * 见 EditorViewItem::setCheckIssues），那句总结就落在这儿：
+         * 一份干净的正文点完校验也得有句话，不然看着像"点了没反应"。
+         * 它一直留到下一次校验（和编辑器里的"上次检查结果"一个意思）。
+         */
+        Label {
+            visible: Check.status !== ""
+            text: Check.status
+            color: root.mutedColor
+            font.pixelSize: 11
+            Layout.alignment: Qt.AlignVCenter
+            elide: Text.ElideRight
+            Layout.maximumWidth: 460
         }
 
         Item { Layout.fillWidth: true }

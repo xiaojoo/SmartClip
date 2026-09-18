@@ -138,11 +138,11 @@ function fileMenu(ov) {
         { label: "全部保存", act: "saveAll", icon: "save" },
         { separator: true },
         /*
-         * 校验 / 对比：都是"拿当前这份正文去做点别的"，放在文件这一组里
-         * 和保存那一类挨着。校验在设置 → 校验里有总开关（默认关）。
+         * 对比：拿当前这份正文去做点别的，和保存那一类挨着。
+         *
+         * 校验**不在这里** —— 它跟着"编辑"菜单进编辑区的右键菜单了
+         * （见下面 editMenu 里那一条）。
          */
-        { label: "校验当前文件", act: "checkFile", shortcut: "Ctrl+Shift+K",
-          icon: "spellcheck" },
         { label: "与另一个文件对比…", act: "compareWithFile", icon: "diff" },
         { separator: true },
         { label: "关闭标签", act: "closeTab", shortcut: "Ctrl+W", icon: "close" },
@@ -226,6 +226,19 @@ function editMenu(view, ov, md) {
         /* 粘贴板里的内容按 JSON 重排（不需要任何外部工具，见 Formatter 内置那几样） */
         { label: "格式化 JSON（全文重排）", act: "formatJson", icon: "format",
           disabled: !canEdit || !hasDoc },
+        /*
+         * 校验（中文用词 / 代码语法，见 src/Checker.h）。
+         *
+         * 放在格式化旁边：都是"拿这份正文跑一遍工具"，而且**入口只有这里**
+         * （编辑区右键 / 菜单栏"编辑"）—— 它要联网、要花 token，不做成自动校验，
+         * 用户点了才发请求。结果不是弹卡片，而是在正文里画出问题的位置
+         * （波浪线），鼠标停上去看详情。
+         *
+         * 只读文档照样能校验（它只是读正文），预览里不行（那上面盖着的是
+         * 渲染结果，底下那份编辑器用户看不见）。
+         */
+        { label: "校验当前文件", act: "checkFile", shortcut: "Ctrl+Shift+K",
+          icon: "spellcheck", disabled: !hasDoc || previewMode },
         { separator: true },
         { label: "Markdown 预览" + (canMd ? "" : "（仅 .md）"), act: "toggleMarkdownPreview",
           shortcut: "Ctrl+Shift+V", icon: "preview",

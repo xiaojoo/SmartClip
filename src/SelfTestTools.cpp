@@ -125,7 +125,6 @@ int SelfTest::runTools(Formatter *fmt, DiffEngine *differ, Checker *check, LlmCl
      */
     QSettings settings;
     const QVariant savedTool = settings.value(QStringLiteral("format/tool/plain"));
-    const QVariant savedEnabled = settings.value(QStringLiteral("check/enabled"));
 
     /* ------------------------------------------------------------------
      * 1. 文件对比（src/Diff.h）
@@ -423,7 +422,7 @@ int SelfTest::runTools(Formatter *fmt, DiffEngine *differ, Checker *check, LlmCl
                   QStringLiteral("干净正文：一条都不报"), check->resultSummary());
         }
 
-        /* 问题按行号排好序（卡片里显示的顺序要跟正文一致） */
+        /* 问题按行号排好序（编辑区里画波浪线的顺序要跟正文一致） */
         {
             check->checkLocalOnly(QStringLiteral("第一行有,问题\n第二行也有,问题\n"),
                                   QStringLiteral("markdown"));
@@ -451,15 +450,14 @@ int SelfTest::runTools(Formatter *fmt, DiffEngine *differ, Checker *check, LlmCl
                   QStringLiteral("提示词要求给逐字片段（回来要靠它核对位置、挡住编造）"));
         }
 
-        /* 开关关着 + 接口没配：wantsModel 必须是假（不能偷偷发请求） */
+        /*
+         * 接口没配好：wantsModel 必须是假（点了校验也不能偷偷发请求；
+         * 配好之后才走模型那条路）。
+         */
         {
-            check->setEnabled(false);
-            tcheck(!check->wantsModel(QStringLiteral("随便一段中文")),
-                  QStringLiteral("开关关着：不问模型（不偷偷发请求）"));
-            check->setEnabled(true);
             if (llm && llm->apiBase().trimmed().isEmpty()) {
                 tcheck(!check->wantsModel(QStringLiteral("随便一段中文")),
-                      QStringLiteral("开关开着但接口没配：也不问模型"));
+                      QStringLiteral("接口没配：不问模型（不偷偷发请求）"));
             }
             /* 超长正文：只跑本地（模型数行号会不准） */
             tcheck(!check->wantsModel(QString(20000, QLatin1Char('x'))),
@@ -470,7 +468,7 @@ int SelfTest::runTools(Formatter *fmt, DiffEngine *differ, Checker *check, LlmCl
         /* 空正文：不报问题，也不崩 */
         {
             check->checkLocalOnly(QString(), QStringLiteral("plain"));
-            tcheck(check->issues().isEmpty() && check->resultSummary().contains(QStringLiteral("没发现")),
+            tcheck(check->issues().isEmpty() && check->resultSummary().contains(QStringLiteral("未发现")),
                   QStringLiteral("空正文：没问题也没崩"), check->resultSummary());
         }
     }
@@ -745,10 +743,6 @@ int SelfTest::runTools(Formatter *fmt, DiffEngine *differ, Checker *check, LlmCl
         settings.setValue(QStringLiteral("format/tool/plain"), savedTool);
     else
         settings.remove(QStringLiteral("format/tool/plain"));
-    if (savedEnabled.isValid())
-        settings.setValue(QStringLiteral("check/enabled"), savedEnabled);
-    else
-        settings.remove(QStringLiteral("check/enabled"));
 
     std::fputs("\n", stdout);
     tout(QStringLiteral("工具自检：通过 %1 项，失败 %2 项").arg(gToolPassed).arg(gToolFailed));

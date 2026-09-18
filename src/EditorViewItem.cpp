@@ -28,6 +28,7 @@
 #include <QStringConverter>
 #include <QStyle>
 #include <QTimer>
+#include <QToolTip>
 #include <QWidget>
 #include <QWindow>
 
@@ -111,6 +112,8 @@ constexpr long kScFindWholeWord = 0x2;
 constexpr long kScFindMatchCase = 0x4;
 constexpr long kScFindRegexp = 0x00200000;
 constexpr long kIndicRoundBox = 7;
+/* INDIC_SQUIGGLE：波浪线（IDE 里标问题那种下划线），值取自 Scintilla 5.x */
+constexpr long kIndicSquiggle = 1;
 
 constexpr int kMaxFileBytes = 64 * 1024 * 1024;
 
@@ -128,6 +131,9 @@ inline long scColor(const QColor &c) {
 
 /* 主题色（用的时候过 scColor 打包） */
 const QColor kAccent(0x4c, 0x96, 0xd8);         // 强调蓝
+/* 校验波浪线的两档色（错误 / 警告），和界面里那两档严重度一个色 */
+const QColor kCheckError(0xff, 0x6b, 0x68);
+const QColor kCheckWarn(0xd7, 0xa8, 0x5b);
 /*
  * 编辑器里所有竖线的颜色：行号右边那条分隔线、字数参考线、缩进参考线，**同一个色**。
  *
@@ -471,6 +477,12 @@ void EditorViewItem::ensureWrapped() {
     });
 
     connect(m_sci, &QsciScintilla::textChanged, this, [this]() {
+        /*
+         * 正文一改（哪怕是我们自己灌进去的），上一次校验画的那几条波浪线就
+         * 不作数了 —— 行号 / 列号全都会跟着挪。统一清掉，等用户再点一次校验。
+         */
+        if (!m_checkIssues.isEmpty())
+            clearCheckIssues();
         if (m_bulkLoading)
             return;
         applyMargins();
@@ -1298,6 +1310,22 @@ void EditorViewItem::styleChrome() {
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETOUTLINEALPHA, long(kFindIndicator), 150L);
 
     /*
+     * 校验结果的波浪线（错误一条红的、警告一条黄的，见 setCheckIssues）。
+     *
+     * 和上面那条一样是容器指示器（8 起），所以要配 SCI_INDICSETUNDER；
+     * 波浪线的颜色就是 INDICSETFORE 那个色，Alpha 对它不起作用。
+     */
+    for (const QPair<int, QColor> &pair :
+         { QPair<int, QColor>(kCheckErrorIndicator, kCheckError),
+           QPair<int, QColor>(kCheckWarnIndicator, kCheckWarn) }) {
+        m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETSTYLE, long(pair.first),
+                             long(kIndicSquiggle));
+        m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETUNDER, long(pair.first), 1L);
+        m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETFORE, long(pair.first),
+                             scColor(pair.second));
+    }
+
+    /*
      * 注意：不要给 QsciScintilla 自己设全局 stylesheet。
      *
      * 实测写成 "QsciScintilla { background: ... }" 会让整个视口被背景色
@@ -2006,6 +2034,28 @@ bool EditorViewItem::eventFilter(QObject *watched, QEvent *event) {
     if (event->type() == QEvent::MouseButtonPress && watched == m_sci && m_sci
         && isVisible())
         emit paneFocused();
+
+    /*
+     * 鼠标停在**校验波浪线**上：弹一个说明框（和 IDE 里把鼠标移到出错的地方一样）。
+     *
+     * 走的 Qt 那套悬浮事件：鼠标停住一会儿之后，Qt 会把 ToolTip 事件发给光标下
+     * 那个控件，过滤器比控件自己先拿到它。停的位置换算成文档位置，看它落在哪条
+     * 问题上（见 checkIssueAt），有就弹详情、没有就把上一个收掉
+     * —— 鼠标从波浪线上挪开时那个框不该赖着不走。
+     *
+     * 提示框用 QToolTip：深色底是 main.cpp 里设的全局调色板给的，和界面一致。
+     */
+    if (event->type() == QEvent::ToolTip && m_sci
+        && (watched == m_sci || watched == m_sci->viewport())) {
+        auto *he = static_cast<QHelpEvent *>(event);
+        const QPoint inView = m_sci->viewport()->mapFromGlobal(he->globalPos());
+        const QString tip = checkTipAtPoint(inView.x(), inView.y());
+        if (!tip.isEmpty())
+            QToolTip::showText(he->globalPos(), tip, m_sci);
+        else
+            QToolTip::hideText();
+        return true;
+    }
 
     if (event->type() == QEvent::ContextMenu && m_sci && isVisible() && isEnabled()) {
         auto *ce = static_cast<QContextMenuEvent *>(event);
@@ -3111,6 +3161,8 @@ void EditorViewItem::detachFromCurrentDocument() {
      */
     if (!m_sci)
         return;
+    /* 校验的波浪线是画在这份文档上的，离开之前先擦掉（见 setCheckIssues） */
+    clearCheckIssues();
     m_sci->setDocument(*m_scratch);
 }
 
@@ -3273,6 +3325,9 @@ void EditorViewItem::releaseDocument(int tab) {
     if (tab < 0 || tab >= m_open.size())
         return;
 
+    /* 关掉的这一份上的校验波浪线跟着走（见 setCheckIssues） */
+    clearCheckIssues();
+
     if (hasDocument())
         saveCurrentViewState();
 
@@ -3430,6 +3485,9 @@ void EditorViewItem::activateDocument(int index) {
         return;
     if (!m_sci)
         return;
+
+    /* 要离开的这一份上的校验波浪线先擦掉（它是按那一份的正文算出来的） */
+    clearCheckIssues();
 
     if (hasDocument())
         saveCurrentViewState();
@@ -4019,44 +4077,213 @@ int EditorViewItem::replaceAll(const QString &text, const QString &replacement,
     return hits.size();
 }
 
+/*
+ * 校验结果 -> 编辑区里的波浪线。
+ *
+ * 整份清单重新画一遍（先擦后画）。位置从**行列**换算过来：走
+ * QsciScintilla::positionFromLineIndex，它按**字符**数，中文一个字算一列 ——
+ * 校验那边给的行列就是这个口径（自己按字节加列号会在中文行上错位）。
+ *
+ * 位置和区间同时存一份（m_checkRanges），鼠标停上去时不用再换算一次
+ * （见 checkIssueAt）。
+ */
+void EditorViewItem::setCheckIssues(const QVariantList &issues) {
+    clearCheckIssues();
+    if (!m_sci || !hasDocument())
+        return;
+
+    const long docLen = m_sci->SendScintilla(QsciScintillaBase::SCI_GETLENGTH);
+
+    for (const QVariant &item : issues) {
+        const QVariantMap m = item.toMap();
+        const int row = m.value(QStringLiteral("row")).toInt();
+        const int endRow = m.value(QStringLiteral("endRow")).toInt();
+        if (row < 1)
+            continue;
+
+        /*
+         * 列号夹回那一行里：模型给的列号经常越界（它数的和我们数的不是一个
+         * 口径），越界就退成"画到行尾"—— 不夹的话那条波浪线会跨到下一行去，
+         * 和说明里写的位置对不上。
+         */
+        const long lineStart = m_sci->SendScintilla(QsciScintillaBase::SCI_POSITIONFROMLINE,
+                                                    long(row - 1));
+        const long lineEnd = m_sci->SendScintilla(QsciScintillaBase::SCI_GETLINEENDPOSITION,
+                                                  long(row - 1));
+        long start = qBound(lineStart,
+                            (long)m_sci->positionFromLineIndex(row - 1,
+                                                               qMax(0, m.value(
+                                                                   QStringLiteral("col")).toInt())),
+                            lineEnd);
+        long stop = m_sci->positionFromLineIndex(qMax(0, endRow - 1),
+                                                 qMax(0, m.value(QStringLiteral("endCol")).toInt()));
+        if (stop > docLen)
+            stop = docLen;
+        /* 一个字符宽的问题（比如半角逗号）也要看得见那条波浪线 */
+        if (stop <= start)
+            stop = m_sci->SendScintilla(QsciScintillaBase::SCI_POSITIONAFTER, start);
+
+        const QString severity = m.value(QStringLiteral("severity")).toString();
+        const int indicator = severity == QLatin1String("error") ? kCheckErrorIndicator
+                                                                 : kCheckWarnIndicator;
+        m_sci->SendScintilla(QsciScintillaBase::SCI_SETINDICATORCURRENT, long(indicator));
+        m_sci->SendScintilla(QsciScintillaBase::SCI_INDICATORFILLRANGE, (unsigned long)start,
+                             (unsigned long)qMax(1L, stop - start));
+
+        m_checkIssues.append(item);
+        m_checkRanges.append({start, stop});
+    }
+
+    m_sci->viewport()->update();
+}
+
+void EditorViewItem::clearCheckIssues() {
+    m_checkIssues.clear();
+    m_checkRanges.clear();
+
+    if (!m_sci)
+        return;
+    const long docLen = m_sci->SendScintilla(QsciScintillaBase::SCI_GETLENGTH);
+    if (docLen <= 0)
+        return;
+
+    for (const int indicator : { kCheckErrorIndicator, kCheckWarnIndicator }) {
+        m_sci->SendScintilla(QsciScintillaBase::SCI_SETINDICATORCURRENT, long(indicator));
+        m_sci->SendScintilla(QsciScintillaBase::SCI_INDICATORCLEARRANGE, 0L, docLen);
+    }
+    m_sci->viewport()->update();
+}
+
+/* 自检用：波浪线的字节区间（见头文件里的说明） */
+QVariantList EditorViewItem::checkIssueRanges() const {
+    QVariantList out;
+    for (const QPair<long, long> &range : m_checkRanges) {
+        out.append(qlonglong(range.first));
+        out.append(qlonglong(range.second));
+    }
+    return out;
+}
+
+/* 自检用：那条波浪线真的画出来了吗（见头文件里的说明） */
+QVariantList EditorViewItem::checkWavePixelStats() const {
+    QVariantList out{0, 0, 0, 0};
+    if (!m_sci || !m_sciWidget || !hasDocument() || m_checkRanges.isEmpty())
+        return out;
+
+    const QImage img = m_sciWidget->grab().toImage();
+    if (img.isNull())
+        return out;
+    const qreal scale =
+        m_sciWidget->width() > 0 ? qreal(img.width()) / qreal(m_sciWidget->width()) : 1.0;
+
+    /* 正文从这几条边距右边开始（行号 / 折叠 / 分隔线，和 marginPixelStats 一个口径） */
+    int textStart = 0;
+    for (int margin = 0; margin < 3; ++margin)
+        textStart += int(m_sci->SendScintilla(QsciScintillaBase::SCI_GETMARGINWIDTHN,
+                                              long(margin)) * scale);
+    textStart = qBound(0, textStart, img.width());
+
+    /*
+     * 认色用"红占绝对多数"而不是精确比对：波浪线是抗锯齿画的，边上那些像素
+     * 是本色和底色混出来的（混到一半也有 140 多的红）。正文默认色 #d6d7da 和
+     * 那几档灰都不满足"红比绿蓝各高 40"。
+     */
+    auto reddish = [](const QColor &c) {
+        return c.red() > 110 && c.red() > c.green() + 40 && c.red() > c.blue() + 40;
+    };
+    auto amber = [](const QColor &c) {
+        return c.red() > 110 && c.green() > 80 && c.red() > c.blue() + 40
+               && c.green() > c.blue() + 20;
+    };
+
+    int err = 0, warn = 0, fx = 0, fy = 0;
+    for (int y = 0; y < img.height(); ++y) {
+        for (int x = textStart; x < img.width(); ++x) {
+            const QColor c = img.pixelColor(x, y);
+            const bool isErr = reddish(c);
+            if (isErr)
+                ++err;
+            else if (amber(c))
+                ++warn;
+            else
+                continue;
+            /* 第一个命中的像素（哪个色都算）：自检拿它当"停上去的那一点" */
+            if (fx == 0 && fy == 0) {
+                fx = x;
+                fy = y;
+            }
+        }
+    }
+    out[0] = err;
+    out[1] = warn;
+    out[2] = fx;
+    out[3] = fy;
+    return out;
+}
+
+QString EditorViewItem::checkTipAtPoint(int x, int y) const {
+    if (!m_sci)
+        return QString();
+    const long pos = m_sci->SendScintilla(QsciScintillaBase::SCI_POSITIONFROMPOINT,
+                                          (unsigned long)x, long(y));
+    const int hit = checkIssueAt(pos);
+    return hit >= 0 ? checkIssueHtml(hit) : QString();
+}
+
+/* 文档位置 pos 落在第几条问题上；不在任何一条里就看它落在哪一行（同一行上也认） */
+int EditorViewItem::checkIssueAt(long pos) const {
+    for (int i = 0; i < m_checkRanges.size(); ++i) {
+        if (pos >= m_checkRanges.at(i).first && pos < m_checkRanges.at(i).second)
+            return i;
+    }
+    if (!m_sci || m_checkRanges.isEmpty())
+        return -1;
+
+    /*
+     * 波浪线可能只有一两个字符宽，鼠标不一定停得那么准；停在**同一行**上
+     * 也把它认下来 —— IDE 里也是这样，停在那一行就能看到那一行的问题。
+     */
+    const long line = m_sci->SendScintilla(QsciScintillaBase::SCI_LINEFROMPOSITION, pos);
+    for (int i = 0; i < m_checkRanges.size(); ++i) {
+        if (m_sci->SendScintilla(QsciScintillaBase::SCI_LINEFROMPOSITION,
+                                 m_checkRanges.at(i).first) == line)
+            return i;
+    }
+    return -1;
+}
+
+/* 一条问题的悬浮说明：级别 / 第几行 / 谁报的 / 说明 / 原文片段 / 建议改法 */
+QString EditorViewItem::checkIssueHtml(int index) const {
+    const QVariantMap m = m_checkIssues.value(index).toMap();
+    const QString severity = m.value(QStringLiteral("severity")).toString();
+    const QString head = severity == QLatin1String("error") ? QStringLiteral("错误")
+                        : severity == QLatin1String("warn") ? QStringLiteral("警告")
+                                                            : QStringLiteral("提示");
+    const bool model = m.value(QStringLiteral("source")).toString() == QLatin1String("llm");
+
+    QString html = QStringLiteral("<b>%1</b> · 第 %2 行 %3<hr>%4")
+                       .arg(head)
+                       .arg(m.value(QStringLiteral("row")).toInt())
+                       .arg(model ? QStringLiteral("（大模型）") : QStringLiteral("（本地规则）"))
+                       .arg(m.value(QStringLiteral("message")).toString().toHtmlEscaped());
+
+    const QString snippet = m.value(QStringLiteral("snippet")).toString();
+    if (!snippet.isEmpty())
+        html += QStringLiteral("<br>「%1」").arg(snippet.toHtmlEscaped());
+
+    const QString suggestion = m.value(QStringLiteral("suggestion")).toString();
+    if (!suggestion.isEmpty())
+        html += QStringLiteral(" → <b>%1</b>").arg(suggestion.toHtmlEscaped());
+
+    return html;
+}
+
 void EditorViewItem::gotoLine(int line) {
     if (!m_sci || !hasDocument())
         return;
     const long total = m_sci->SendScintilla(QsciScintillaBase::SCI_GETLINECOUNT);
     const long target = qBound(1L, (long)line, qMax(1L, total));
     m_sci->SendScintilla(QsciScintillaBase::SCI_GOTOLINE, target - 1);
-    m_sci->SendScintilla(QsciScintillaBase::SCI_SCROLLCARET);
-    emit cursorChanged();
-}
-
-/*
- * 选中第 row 行从 col 到 endCol 那一段（列号 0 基）。
- *
- * 校验卡片上点一条问题就走这里：光标跳到那一行**并且把出问题的那几个字选中**，
- * 用户一眼就能看见说的是哪儿（只跳行不选中的话，一行里几十个字还得自己找）。
- * Scintilla 的位置是**绝对字符位置**，所以从行号换算一次（SCI_POSITIONFROMLINE）。
- */
-void EditorViewItem::selectRange(int row, int col, int endRow, int endCol) {
-    if (!m_sci || !hasDocument())
-        return;
-    const long total = m_sci->SendScintilla(QsciScintillaBase::SCI_GETLINECOUNT);
-    const long line = qBound(1L, (long)row, qMax(1L, total)) - 1;
-    const long lineEnd = qBound(1L, (long)endRow, qMax(1L, total)) - 1;
-
-    const long from = m_sci->SendScintilla(QsciScintillaBase::SCI_POSITIONFROMLINE, line);
-    const long to = m_sci->SendScintilla(QsciScintillaBase::SCI_POSITIONFROMLINE, lineEnd);
-    const long lineLen = m_sci->SendScintilla(QsciScintillaBase::SCI_LINELENGTH, line);
-    const long endLen = m_sci->SendScintilla(QsciScintillaBase::SCI_LINELENGTH, lineEnd);
-
-    /*
-     * 列号夹回这一行的长度：模型给的列号可能越界（它数的是"第几个字"，
-     * 和 UTF-8 的字节数不是一回事），越界就退成"选到行尾"，
-     * 而不是把选区甩到下一行去。
-     */
-    const long start = from + qBound(0L, (long)col, qMax(0L, lineLen));
-    const long stop = to + qBound(0L, (long)endCol, qMax(0L, endLen));
-
-    m_sci->SendScintilla(QsciScintillaBase::SCI_SETSEL, start, qMax(start + 1, stop));
     m_sci->SendScintilla(QsciScintillaBase::SCI_SCROLLCARET);
     emit cursorChanged();
 }

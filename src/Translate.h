@@ -228,6 +228,15 @@ public:
     Q_INVOKABLE QString ask(const QString &systemPrompt, const QString &userText,
                             const QString &busyStatus = QString());
 
+    /*
+     * 自检用：假装本地推理服务已经就绪（自检里没法真拉一个 llama-server 起来）。
+     *
+     * 只影响 localRunning()，并且**和真就绪时走同一句 flushPending()** ——
+     * 要钉的就是"模型冷启动时排队那条请求，发出去时 token 还是原来那个"
+     * （见 askWithToken 的说明）。
+     */
+    Q_INVOKABLE void setLocalReadyForTest(bool on);
+
     /* 当前有几个请求在飞（校验和翻译可能同时在跑，busy 不能谁先回来谁关掉） */
     int inFlight() const { return m_inFlight; }
 
@@ -258,6 +267,18 @@ signals:
 private:
     /* 拼出 chat/completions 的完整地址（api 模式用用户填的，本地模式用端口） */
     QString chatUrl() const;
+
+    /*
+     * ask() 的主体，token 由调用方给（ask 自己发，flushPending 用排队时那个）。
+     *
+     * 为什么要分开：本地模型冷启动时那条请求先排队，模型就绪后由 flushPending
+     * **重新发一次**。那一下要是又走 ask()，它会再发一个新 token，而调用方
+     * （校验那边）等的还是最早那个 —— 结果回来 token 对不上被当过期结果丢掉，
+     * 界面上就一直停在"正在问模型…"（用户报的"一直在卡着"）。
+     * 翻译那条（post）本来就是从上层把 token 传下来的，所以只有这条路有这问题。
+     */
+    void askWithToken(const QString &token, const QString &systemPrompt, const QString &userText,
+                      const QString &busyStatus);
     QString baseUrl() const;
     /* 真正发请求；probe 为真时不发 finished，只更新 status */
     void post(const QString &token, const QString &text, const QString &target,
@@ -322,6 +343,8 @@ private:
     QProcess *m_proc = nullptr;
     QTimer *m_readyTimer = nullptr;
     QString m_probeToken;
+    /* 自检用：假装本地服务就绪（见 setLocalReadyForTest） */
+    bool m_localReadyForTest = false;
 
     /* 配置（默认值见 .cpp 的构造函数） */
     QString m_mode;

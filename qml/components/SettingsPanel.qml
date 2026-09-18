@@ -2101,56 +2101,23 @@ Popup {
                         }
 
                         /*
-                         * 开关。**默认关**：这个功能要联网、要花 token，
-                         * 不打招呼就替用户发请求不合适。
+                         * **没有开关**：这个功能不做自动校验。
+                         *
+                         * 原来这里有个"开启校验"的勾（默认关，勾上才发给模型）。
+                         * 现在入口收成了右键菜单那一条 —— 用户点它就是要校验，
+                         * 那一下本身就是"可以发请求"的许可，再挂一道开关只会
+                         * 让人点了没反应（以为坏了）。要停就在模型那一栏把接口
+                         * 清掉，或者干脆别点。
                          */
-                        Rectangle {
+                        Text {
                             width: parent.width
-                            height: 40
-                            radius: 6
-                            color: root.rowHover
-                            border.width: 1
-                            border.color: root.borderColor
-
-                            Row {
-                                anchors.left: parent.left
-                                anchors.leftMargin: 12
-                                anchors.verticalCenter: parent.verticalCenter
-                                spacing: 10
-
-                                /* 勾选框（自己画，和界面其它地方一套观感） */
-                                Rectangle {
-                                    width: 16
-                                    height: 16
-                                    radius: 3
-                                    anchors.verticalCenter: parent.verticalCenter
-                                    color: Check.enabled ? root.accentColor : "transparent"
-                                    border.width: 1
-                                    border.color: Check.enabled ? root.accentColor
-                                                                : root.borderColor
-
-                                    Text {
-                                        anchors.centerIn: parent
-                                        visible: Check.enabled
-                                        text: "✓"
-                                        color: "#ffffff"
-                                        font.pixelSize: 11
-                                    }
-
-                                    MouseArea {
-                                        anchors.fill: parent
-                                        cursorShape: Qt.PointingHandCursor
-                                        onClicked: Check.enabled = !Check.enabled
-                                    }
-                                }
-
-                                Text {
-                                    anchors.verticalCenter: parent.verticalCenter
-                                    text: "开启校验（中文用词 / 代码语法）"
-                                    color: root.textColor
-                                    font.pixelSize: 12
-                                }
-                            }
+                            wrapMode: Text.WordWrap
+                            color: root.textColor
+                            font.pixelSize: 12
+                            text: "用法：编辑区里按右键 → 「校验当前文件」（或者按 "
+                                  + Cmd.shortcutFor("checkFile")
+                                  + "）。出问题的地方会在正文里画一条波浪线，"
+                                  + "鼠标停上去看那一条的详情。"
                         }
 
                         Text {
@@ -2158,11 +2125,11 @@ Popup {
                             wrapMode: Text.WordWrap
                             color: root.mutedColor
                             font.pixelSize: 11
-                            text: "关闭时（默认）只跑本地规则：括号配对、中英文标点混用、"
-                                  + "重复字、的地得、行尾空白 —— 毫秒出结果、不联网、不花钱。"
-                                  + "开启之后会**另外**把正文发给下面的模型，"
+                            text: "不自动校验：要联网、要花 token 的事不替你做主，点了才发请求。"
+                                  + "先跑本地规则（括号配对、中英文标点混用、重复字、的地得、"
+                                  + "行尾空白 —— 毫秒出结果、不花钱），再把正文发给下面的模型，"
                                   + "让它查用词和语法（模型报的每一条都会先在正文里核对位置，"
-                                  + "对不上的直接丢掉）。"
+                                  + "对不上的直接丢掉）。正文一改，波浪线自动清掉。"
                         }
 
                         /*
@@ -2179,16 +2146,6 @@ Popup {
                             color: Check.llmReady ? root.accentColor : "#d7a85b"
                             font.pixelSize: 11
                             text: Check.modelSummary
-                        }
-
-                        Text {
-                            width: parent.width
-                            wrapMode: Text.WordWrap
-                            color: root.mutedColor
-                            font.pixelSize: 11
-                            text: "用法：编辑区里按右键 → 「校验中文 / 代码」，或者按 "
-                                  + Cmd.shortcutFor("checkFile")
-                                  + "。结果是一张卡片，点其中一条会跳到正文里并把出问题的那一段选上。"
                         }
 
                         Text {
