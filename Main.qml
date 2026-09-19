@@ -3865,6 +3865,14 @@ Rectangle {
         onPressed: (mouse) => {
             pressSceneX = mapToItem(null, mouse.x, 0).x
             /*
+             * 按住这一整段把光标钉成 <->。
+             *
+             * cursorShape 只在鼠标停在这 5px 上时生效，拖快一点指针就跑到左树 /
+             * 编辑区那边（编辑区还是另一个原生子窗口，它自己会设光标），于是
+             * 按住不放的过程中光标闪回默认箭头（用户报的那条）。
+             */
+            Win.pushResizeCursor(Qt.SplitHCursor)
+            /*
              * 面板收起来时先把它叫回来：收起来之后标题栏那排按钮也跟着没了，
              * 这条缝（抓手这 5px）就是最自然的把手（往右拖 = 把树拉出来）。
              */
@@ -3873,6 +3881,9 @@ Rectangle {
             pressWidth = window.folderTreeWidth
             mouse.accepted = true
         }
+
+        /* 抓取被抢走（比如中途弹出别的东西）：也得还原，不然光标一直钉着 */
+        onCanceled: Win.popResizeCursor()
 
         onPositionChanged: (mouse) => {
             if (!(mouse.buttons & Qt.LeftButton))
@@ -3890,6 +3901,7 @@ Rectangle {
 
         onReleased: (mouse) => {
             mouse.accepted = true
+            Win.popResizeCursor()
             /* 拖完才记一次宽度：拖动过程中每动一像素写一次设置太浪费 */
             window.rememberTreeWidth()
         }

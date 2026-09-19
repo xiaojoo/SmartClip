@@ -937,11 +937,21 @@ Rectangle {
                             property real pressPos: 0
                             property real pressRatio: 0
 
+                            /*
+                             * 按住这一段把光标钉住（和树与内容区那条缝同一套）：
+                             * 抓手只有 splitHandleSize 宽，拖快一点指针就跑到某一栏
+                             * 正文上（编辑区是原生子窗口，自己会设光标），cursorShape
+                             * 就管不到了。方向跟着这条缝是横的还是竖的。
+                             */
                             onPressed: (mouse) => {
+                                Win.pushResizeCursor(splitHandle.vertical ? Qt.SizeVerCursor
+                                                                          : Qt.SizeHorCursor)
                                 var p = mapToItem(contentArea, mouse.x, mouse.y)
                                 pressPos = splitHandle.vertical ? p.y : p.x
                                 pressRatio = root.splitRatio
                             }
+                            onCanceled: Win.popResizeCursor()
+                            onReleased: Win.popResizeCursor()
                             onPositionChanged: (mouse) => {
                                 if (!pressed || !contentArea)
                                     return

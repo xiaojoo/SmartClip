@@ -4,6 +4,7 @@
 #include "EditorViewItem.h"
 
 #include <QAbstractNativeEventFilter>
+#include <QApplication>
 #include <QCoreApplication>
 #include <QCursor>
 #include <QDateTime>
@@ -352,6 +353,30 @@ bool WindowHelper::startSystemMove()
 void WindowHelper::refreshMask()
 {
     applyRoundedMask();
+}
+
+/*
+ * 按住拖动分隔线的那一段，光标由应用级 override 钉住（见 .h 里的说明）。
+ *
+ * 只压一次、只还一次：MouseArea 在拖动中途可能反复触发按下（比如换方向），
+ * 而 restoreOverrideCursor 是弹栈 —— 压两次还一次会把栈留歪，
+ * 之后别的地方设的光标都不对了。
+ */
+void WindowHelper::pushResizeCursor(int shape)
+{
+    if (m_resizeCursorPushed)
+        return;
+    m_resizeCursorPushed = true;
+    QApplication::setOverrideCursor(
+        QCursor(static_cast<Qt::CursorShape>(shape)));
+}
+
+void WindowHelper::popResizeCursor()
+{
+    if (!m_resizeCursorPushed)
+        return;
+    m_resizeCursorPushed = false;
+    QApplication::restoreOverrideCursor();
 }
 
 bool WindowHelper::probeEnabled() const

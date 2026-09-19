@@ -105,6 +105,22 @@ public:
     Q_INVOKABLE void refreshMask();
 
     /*
+     * 拖动分隔线期间，把光标钉死成"左右拉伸"那一枚（按住不放就一直保持）。
+     *
+     * 为什么得在 C++ 侧做：QML 的 `cursorShape` 只在鼠标**停在那个 Item 上**时才生效。
+     * 抓手只有 5px 宽，手快一点指针就跑到左树 / 编辑区那边（编辑区还是另一个原生
+     * 子窗口，它自己会设光标），于是按住拖的过程中光标闪回默认箭头 —— 用户要的是
+     * "左键没松开就一直是拉伸图标，不要闪"。
+     * QApplication 的 override 光标是**应用级**的，压过所有控件自己设的光标；
+     * 松开（或拖动被打断）时还原一次即可。
+     *
+     * shape 传 Qt 的光标枚举值（QML 那边直接写 Qt.SplitHCursor / Qt.SizeVerCursor）——
+     * 树和内容区之间是左右拉伸，上下分栏那条是上下拉伸。
+     */
+    Q_INVOKABLE void pushResizeCursor(int shape);
+    Q_INVOKABLE void popResizeCursor();
+
+    /*
      * **预热最大化**：按下"放大"那颗按钮的那一刻，先把"按 4K 渲染一帧"这笔税交掉。
      *
      * 为什么需要它：applyState ①b 那笔 4K 渲染量到 **163~194ms**，而且和屏幕上
@@ -356,6 +372,8 @@ private:
 
     /* 系统转场动画关掉了没有（attachWidget 里关的，见 DialogStyle.h） */
     bool m_transitionsDisabled = false;
+    /* 拖动分隔线期间 override 光标压了没有（保证压一次、还一次，栈不歪） */
+    bool m_resizeCursorPushed = false;
 
     /*
      * 上面那件事**到底设上了没有**，一句话人话（日志里"系统转场="那一列）。
