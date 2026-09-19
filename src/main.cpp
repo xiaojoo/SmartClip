@@ -316,17 +316,7 @@ int main(int argc, char *argv[]) {
      * build\frames-framed2），所以还是维持无边框。结论记在 WindowHelper.cpp 的
      * WM_NCCALCSIZE 那段注释里。
      */
-    /*
-     * 对照探针：`SMARTCLIP_SYSTEM_TITLE=1` 时**不**挂无边框标志，窗口就是带系统
-     * 标题栏的普通窗口，最大化整条路交给系统（配套 WindowHelper::systemTitleProbe，
-     * 那边同时让开圆角遮罩 / WM_NCCALCSIZE / SC_MAXIMIZE 拦截 / applyState 整套）。
-     * 开着它顶部会同时出现系统标题栏和自绘顶栏 —— 只用来分清"闪的那一下"到底是
-     * 我们这套无边框做法带进来的，还是这台机器 + 4K 合成本身就有的。
-     */
-    static const bool systemTitleProbe = qEnvironmentVariableIsSet("SMARTCLIP_SYSTEM_TITLE");
-    host.setWindowFlags(systemTitleProbe
-                            ? Qt::Window
-                            : (Qt::Window | Qt::FramelessWindowHint));
+    host.setWindowFlags(Qt::Window | Qt::FramelessWindowHint);
     /*
      * 主窗口**不透明**、底色就是界面底色 —— 不是 WA_TranslucentBackground。
      *

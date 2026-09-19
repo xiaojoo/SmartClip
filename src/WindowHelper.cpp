@@ -94,26 +94,6 @@ HBRUSH backdropBrush() {
 }
 
 /*
- * 诊断探针：把窗口整个交回**系统原生那一套**（`SMARTCLIP_SYSTEM_TITLE=1`）。
- *
- * 为什么要它：现在最大化是我们自己办的（无边框 + 自己摆几何 + 吃掉 SC_MAXIMIZE），
- * 出问题分不清是"这套做法"的还是"这台机器/这块 4K"的。开了这个开关，下面这些
- * 一起让开，窗口就是一个普通 Qt 窗口，最大化走系统那条路（含系统自己的转场）：
- *   * 无边框标志（`Qt::FramelessWindowHint`，见 main.cpp 里同一句判断）；
- *   * 圆角遮罩（applyRoundedMask）；
- *   * WM_NCCALCSIZE 把非客户区压成 0 那一条（不压的话标题栏会被吃掉，探针就没意义了）；
- *   * WM_SYSCOMMAND 里对 SC_MAXIMIZE / SC_RESTORE 的拦截；
- *   * applyState 那一整套"先摆几何再置状态"。
- *
- * 只用于对照观察，别当功能用：开着它界面顶部会同时出现系统标题栏和自绘顶栏。
- */
-bool systemTitleProbe()
-{
-    static const bool on = qEnvironmentVariableIsSet("SMARTCLIP_SYSTEM_TITLE");
-    return on;
-}
-
-/*
  * 系统那边这个窗口的**真实矩形**。
  *
  * 为什么不用 QWidget::geometry()：窗口状态刚变的那一拍（showMaximized / showNormal
@@ -386,26 +366,6 @@ void WindowHelper::applyRoundedMask()
         trace(QStringLiteral("applyRoundedMask：没窗口"));
         return;
     }
-    /* 对照探针：普通窗口不裁圆角（见 systemTitleProbe） */
-    if (systemTitleProbe())
-        return;
-    /*
-     * 验证开关：SMARTCLIP_NO_MASK=1 —— **完全不设窗口区域**（圆角会没有，四角是直角）。
-     *
-     * 要验的是 MSDN 那句"系统不显示窗口区域之外的任何部分"背后的机制：SetWindowRgn
-     * 会把窗口留在 GDI / 重定向表面那条路上，而那条路上换尺寸时合成器只会把上一张
-     * 表面 1:1 贴到新表面左上角、新露出来的那片是未初始化的黑。如果关掉遮罩之后
-     * 那段黑明显变短，那"圆角"和"最大化那一下的黑"就是同一件事的两头 —— 正解是
-     * Win11 的 DWMWA_WINDOW_CORNER_PREFERENCE（不用遮罩也有圆角）。
-     */
-    static const bool noMask = qEnvironmentVariableIsSet("SMARTCLIP_NO_MASK");
-    if (noMask) {
-        m_widget->clearMask();
-        m_appliedMask = QRegion();
-        m_maskApplied = true;
-        trace(QStringLiteral("applyRoundedMask：SMARTCLIP_NO_MASK=1 → 不设窗口区域（验证用）"));
-        return;
-    }
     trace(QStringLiteral("applyRoundedMask：进（%1x%2 最大=%3 半径=%4）")
               .arg(m_widget->width()).arg(m_widget->height())
               .arg(m_maximized ? 1 : 0)
@@ -597,9 +557,9 @@ public:
          *
          * 现在这个窗口是 Qt::FramelessWindowHint 出来的 WS_POPUP（实测 style=0x96000000），
          * 本来就没有非客户区 —— 实测四条路都试过：把样式位补成 CAPTION|THICKFRAME、
-         * 去掉 WS_POPUP、去掉圆角区域、甚至让窗口**生来就是普通窗口**（main.cpp 里那个
-         * 试验开关），DWM **照样不放那段最大化转场**（素材 build 下 frames-caption2、
-         * frames-nopopup、frames-nomask、frames-framed2）；而同时拿画图做对照，
+         * 去掉 WS_POPUP、去掉圆角区域、甚至让窗口**生来就是普通窗口**，DWM **照样不放
+         * 那段最大化转场**（素材 build 下 frames-caption2、frames-nopopup、
+         * frames-nomask、frames-framed2）；而同时拿画图做对照，
          * 它在这台机器上放得好好的（见 build\frames-paint）。所以"让系统转场盖住空档"
          * 这条路整个搁下（多半是因为这个窗口的"可动画"资格在创建时就定了、且 Qt 给
          * QWidget 建的是那种不参与动画的窗口类）。
@@ -609,9 +569,6 @@ public:
         case WM_NCCALCSIZE: {
             if (!(::GetWindowLongPtr(ours, GWL_STYLE) & WS_CAPTION))
                 break;   /* 没有标题栏样式：不关我们的事，交回系统 / Qt */
-            /* 对照探针：这一路要的就是"系统那条普通窗口"，别把标题栏压掉 */
-            if (systemTitleProbe())
-                break;
             if (msg->wParam) {
                 auto *params = reinterpret_cast<NCCALCSIZE_PARAMS *>(msg->lParam);
                 if (!params)
@@ -678,11 +635,9 @@ public:
             /*
              * 调试开关：SMARTCLIP_LET_SYSTEM_MAXIMIZE=1 —— 不接这两条，交给系统自己办
              * （用来验"系统那套最大化转场到底能不能放起来"：我们一吃掉 SC_MAXIMIZE，
-             * 系统就没机会放那段动画了，见下面的说明）。对照探针 SMARTCLIP_SYSTEM_TITLE
-             * 也走这里：那条要量的就是"普通窗口 + 系统那一下"长什么样。
+             * 系统就没机会放那段动画了，见下面的说明）。
              */
-            static const bool letSystem = qEnvironmentVariableIsSet("SMARTCLIP_LET_SYSTEM_MAXIMIZE")
-                                          || systemTitleProbe();
+            static const bool letSystem = qEnvironmentVariableIsSet("SMARTCLIP_LET_SYSTEM_MAXIMIZE");
             if (!letSystem) {
                 const bool restoring = (cmd == SC_RESTORE)
                                        && (self->m_maximized || self->updateMaximizedFromWindow());
@@ -894,11 +849,6 @@ void WindowHelper::toggleMaximize()
 
 void WindowHelper::prewarmMaximize()
 {
-    /* 验证开关：SMARTCLIP_NO_PREWARM=1 —— 整条不预热，和它对照点几次最大化 */
-    static const bool off = qEnvironmentVariableIsSet("SMARTCLIP_NO_PREWARM");
-    if (off)
-        return;
-
     /* 按下这一发的落点：prewarmRelease() 拿它判"松手时还在这颗按钮上吗" */
     m_prewarmPressPos = QCursor::pos();
     doPrewarm();
@@ -1079,30 +1029,6 @@ void WindowHelper::applyState(bool maximize)
     if (!m_widget)
         return;
 
-    /*
-     * 对照探针：整套让开，最大化 / 还原就一句 showMaximized() / showNormal()
-     * —— 几何、状态、转场全交给系统（见 systemTitleProbe）。
-     *
-     * 这一条存在的意义：把"我们这套做法"和"这台机器 + 这块 4K"分开。开着它如果
-     * 还是闪，那就不是 applyState 的顺序问题；如果不闪了，问题就在我们这套里。
-     */
-    if (systemTitleProbe()) {
-        trace(QStringLiteral("---- applyState(%1)：对照探针开着 → 只调 %2，其余全交给系统 ----")
-                  .arg(maximize ? QStringLiteral("最大化") : QStringLiteral("还原"),
-                       maximize ? QStringLiteral("showMaximized()")
-                                : QStringLiteral("showNormal()")));
-        if (m_maximized != maximize) {
-            m_maximized = maximize;
-            emit maximizedChanged();
-        }
-        if (maximize)
-            m_widget->showMaximized();
-        else
-            m_widget->showNormal();
-        traceSnapshot(QStringLiteral("  └ 对照探针这一拍之后"));
-        return;
-    }
-
     /* 这一小段里每一帧都记进日志（见 traceFrames） */
     traceFrames(true);
 
@@ -1189,7 +1115,8 @@ void WindowHelper::applyState(bool maximize)
          * 报的 render 时间只有 1~9ms（QSG_RENDER_TIMING，RHI 走的是 RTX 4080）。
          * 所以：异步解码图片、懒加载、预热布局**都治不了它**（每帧都要交这份税），
          * 能治的只有两条 —— 要么别在点击这一串里交（提前在别处渲染），要么换掉
-         * "离屏 FBO + 读回"这条呈现路径（GPU 直接呈现的顶层窗口，见 spike\）。
+         * "离屏 FBO + 读回"这条呈现路径（GPU 直接呈现的顶层窗口 —— 同形状同尺寸的纯
+         * QML 窗口在这台机器上量过，换尺寸那一下 0 帧黑，所以真要治就是那一整套工程）。
          */
         m_widget->clearMask();
         if (avail.isValid() && !avail.isEmpty())
@@ -1306,11 +1233,8 @@ void WindowHelper::applyState(bool maximize)
          * —— 实测只有走 Qt 自己的绘制 + backing store 上屏才放得出来（GDI 直接写窗口 DC
          * 那一版实测一帧都上不去，见文件顶部走过的弯路）。不带 RDW_ERASE：带了就先被
          * 底色整窗填一遍，白挨一次 4K 填充。
-         *
-         * 对照开关：SMARTCLIP_NO_ZOOM_FRAME=1 —— 整条不做，用来量"有没有这一帧"的差别。
          */
-        static const bool noZoomFrame = qEnvironmentVariableIsSet("SMARTCLIP_NO_ZOOM_FRAME");
-        if (!noZoomFrame && !m_zoomSnapshot.isNull()) {
+        if (!m_zoomSnapshot.isNull()) {
             m_zoomFrame = true;
 #if defined(Q_OS_WIN)
             if (HWND hwnd = reinterpret_cast<HWND>(m_widget->internalWinId()))
@@ -1319,9 +1243,10 @@ void WindowHelper::applyState(bool maximize)
 #endif
                 m_widget->repaint();
             /*
-             * **不清掉 m_zoomFrame**：下面那次 4K 渲染要 150ms 量级，期间 Qt 还可能
-             * 自发来重绘（布局激活、子控件失效…），挂着它 = 那一屏一直是"放大版的旧
-             * 画面"，不会漏回黑。收尾在 ②c 之后、flushContent 之前。
+             * **不清掉 m_zoomFrame**：从换几何到真内容上屏中间还有一截（预热没命中时
+             * 那一帧 4K 渲染要 165ms），期间 Qt 还可能自发来重绘（布局激活、子控件
+             * 失效…），挂着它 = 那一屏一直是"放大版的旧画面"，不会漏回黑。
+             * 收尾在 ②c 之后、flushContent 之前。
              */
         }
 

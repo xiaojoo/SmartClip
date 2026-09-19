@@ -305,16 +305,3 @@ endif()
 
 include(GNUInstallDirs)
 install(TARGETS SmartClip RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
-
-# ---------------------------------------------------------------------------
-# M1 spike：GPU 内容层（QQuickView + createWindowContainer）能不能挂进 QWidget 宿主
-#
-# 不参与产品，也不装包 —— 想拆掉就把这一段和 spike/ 目录一起删了。
-# 背景与要验的四件事写在 spike/gpu-host.cpp 顶部。
-#   构建： cmake --build . --target gpu-spike
-#   运行： build\run-gpu-spike.bat
-# QML 用绝对路径加载（spike/gpu-layer.qml），所以不需要 qt_add_qml_module。
-# ---------------------------------------------------------------------------
-qt_add_executable(gpu-spike MANUAL_FINALIZATION spike/gpu-host.cpp)
-target_link_libraries(gpu-spike PRIVATE Qt6::Widgets Qt6::Quick Qt6::Qml Qt6::Gui)
-qt_finalize_executable(gpu-spike)
