@@ -314,6 +314,31 @@ EditorViewItem::~EditorViewItem() {
     detach();
 }
 
+namespace {
+
+/*
+ * 过渡期把编辑区那些原生子窗摘出屏幕（见 EditorViewItem.h 的 setAllNativeVisible）。
+ *
+ * 为什么是个文件级开关而不是逐个控件的状态：摘出去之后，QML 那一拍还会连着好几次
+ * geometryChange → applyGeometry()，每次都"顺手把控件 show 回来"，那样这个开关
+ * 一放下去下一帧就失效了。所以摆坐标照做、show 那一步统一看这个标志。
+ */
+bool nativeSuppressed = false;
+
+/*
+ * 摆坐标冻住了没有（见 EditorViewItem.h 的 setGeometryFrozen）。
+ *
+ * 和上面那个开关各管一样：nativeSuppressed 管"显不显示"，这个管"动不动位置"。
+ */
+bool geometryFrozen = false;
+
+}  // namespace
+
+void EditorViewItem::setGeometryFrozen(bool frozen)
+{
+    geometryFrozen = frozen;
+}
+
 /*
  * 让所有编辑器实例按当前 QML 布局重新摆一次原生控件。
  *
@@ -326,6 +351,26 @@ void EditorViewItem::syncAllGeometry() {
     for (int i = 0; i < s_all.size(); ++i) {
         if (EditorViewItem *item = s_all.at(i).data())
             item->applyGeometry();
+    }
+}
+
+void EditorViewItem::setAllNativeVisible(bool on)
+{
+    if (nativeSuppressed == !on)
+        return;   /* 已经是目标状态：别再来一遍（hide/show 各是一次整窗重画） */
+
+    nativeSuppressed = !on;
+
+    if (on) {
+        /* 放回去：按当前 QML 布局重摆，该显示的由 applyGeometry 自己 show */
+        syncAllGeometry();
+        return;
+    }
+
+    for (int i = 0; i < s_all.size(); ++i) {
+        EditorViewItem *item = s_all.at(i).data();
+        if (item && item->m_sciWidget)
+            item->m_sciWidget->hide();
     }
 }
 
@@ -1910,6 +1955,10 @@ void EditorViewItem::applyGeometry() {
     if (width() < 2 || height() < 2)
         return;
 
+    /* 预热那一段里别跟着 QML 撑大（见 EditorViewItem.h 的 setGeometryFrozen） */
+    if (geometryFrozen)
+        return;
+
     /*
      * 把本 Item 的坐标换算到宿主 QWidget 的控件坐标系。
      *
@@ -1946,7 +1995,8 @@ void EditorViewItem::applyGeometry() {
     m_sci->setGeometry(0, 0, w, h);
     m_sciWidget->raise();
 
-    if (!m_sciWidget->isVisible())
+    /* 过渡期里坐标照摆，但先别放回屏幕（见文件上面那个开关的说明） */
+    if (!nativeSuppressed && !m_sciWidget->isVisible())
         m_sciWidget->show();
 
     /*
@@ -2152,7 +2202,8 @@ void EditorViewItem::itemChange(ItemChange change, const ItemChangeData &value) 
         if (m_sciWidget) {
             if (value.boolValue) {
                 applyGeometry();
-                m_sciWidget->show();
+                if (!nativeSuppressed)
+                    m_sciWidget->show();
             } else {
                 m_sciWidget->hide();
             }

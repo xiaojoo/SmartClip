@@ -94,6 +94,26 @@ HBRUSH backdropBrush() {
 }
 
 /*
+ * 诊断探针：把窗口整个交回**系统原生那一套**（`SMARTCLIP_SYSTEM_TITLE=1`）。
+ *
+ * 为什么要它：现在最大化是我们自己办的（无边框 + 自己摆几何 + 吃掉 SC_MAXIMIZE），
+ * 出问题分不清是"这套做法"的还是"这台机器/这块 4K"的。开了这个开关，下面这些
+ * 一起让开，窗口就是一个普通 Qt 窗口，最大化走系统那条路（含系统自己的转场）：
+ *   * 无边框标志（`Qt::FramelessWindowHint`，见 main.cpp 里同一句判断）；
+ *   * 圆角遮罩（applyRoundedMask）；
+ *   * WM_NCCALCSIZE 把非客户区压成 0 那一条（不压的话标题栏会被吃掉，探针就没意义了）；
+ *   * WM_SYSCOMMAND 里对 SC_MAXIMIZE / SC_RESTORE 的拦截；
+ *   * applyState 那一整套"先摆几何再置状态"。
+ *
+ * 只用于对照观察，别当功能用：开着它界面顶部会同时出现系统标题栏和自绘顶栏。
+ */
+bool systemTitleProbe()
+{
+    static const bool on = qEnvironmentVariableIsSet("SMARTCLIP_SYSTEM_TITLE");
+    return on;
+}
+
+/*
  * 系统那边这个窗口的**真实矩形**。
  *
  * 为什么不用 QWidget::geometry()：窗口状态刚变的那一拍（showMaximized / showNormal
@@ -130,6 +150,9 @@ QRect nativeFrameRect(QWidget *widget) {
 WindowHelper::WindowHelper(QObject *parent)
     : QObject(parent)
 {
+    /* 按住不放超过 4 秒就自己退回卡片（见 prewarmMaximize） */
+    m_prewarmLife.setSingleShot(true);
+    connect(&m_prewarmLife, &QTimer::timeout, this, &WindowHelper::cancelPrewarm);
 }
 
 /*
@@ -363,6 +386,26 @@ void WindowHelper::applyRoundedMask()
         trace(QStringLiteral("applyRoundedMask：没窗口"));
         return;
     }
+    /* 对照探针：普通窗口不裁圆角（见 systemTitleProbe） */
+    if (systemTitleProbe())
+        return;
+    /*
+     * 验证开关：SMARTCLIP_NO_MASK=1 —— **完全不设窗口区域**（圆角会没有，四角是直角）。
+     *
+     * 要验的是 MSDN 那句"系统不显示窗口区域之外的任何部分"背后的机制：SetWindowRgn
+     * 会把窗口留在 GDI / 重定向表面那条路上，而那条路上换尺寸时合成器只会把上一张
+     * 表面 1:1 贴到新表面左上角、新露出来的那片是未初始化的黑。如果关掉遮罩之后
+     * 那段黑明显变短，那"圆角"和"最大化那一下的黑"就是同一件事的两头 —— 正解是
+     * Win11 的 DWMWA_WINDOW_CORNER_PREFERENCE（不用遮罩也有圆角）。
+     */
+    static const bool noMask = qEnvironmentVariableIsSet("SMARTCLIP_NO_MASK");
+    if (noMask) {
+        m_widget->clearMask();
+        m_appliedMask = QRegion();
+        m_maskApplied = true;
+        trace(QStringLiteral("applyRoundedMask：SMARTCLIP_NO_MASK=1 → 不设窗口区域（验证用）"));
+        return;
+    }
     trace(QStringLiteral("applyRoundedMask：进（%1x%2 最大=%3 半径=%4）")
               .arg(m_widget->width()).arg(m_widget->height())
               .arg(m_maximized ? 1 : 0)
@@ -566,6 +609,9 @@ public:
         case WM_NCCALCSIZE: {
             if (!(::GetWindowLongPtr(ours, GWL_STYLE) & WS_CAPTION))
                 break;   /* 没有标题栏样式：不关我们的事，交回系统 / Qt */
+            /* 对照探针：这一路要的就是"系统那条普通窗口"，别把标题栏压掉 */
+            if (systemTitleProbe())
+                break;
             if (msg->wParam) {
                 auto *params = reinterpret_cast<NCCALCSIZE_PARAMS *>(msg->lParam);
                 if (!params)
@@ -632,9 +678,11 @@ public:
             /*
              * 调试开关：SMARTCLIP_LET_SYSTEM_MAXIMIZE=1 —— 不接这两条，交给系统自己办
              * （用来验"系统那套最大化转场到底能不能放起来"：我们一吃掉 SC_MAXIMIZE，
-             * 系统就没机会放那段动画了，见下面的说明）。
+             * 系统就没机会放那段动画了，见下面的说明）。对照探针 SMARTCLIP_SYSTEM_TITLE
+             * 也走这里：那条要量的就是"普通窗口 + 系统那一下"长什么样。
              */
-            static const bool letSystem = qEnvironmentVariableIsSet("SMARTCLIP_LET_SYSTEM_MAXIMIZE");
+            static const bool letSystem = qEnvironmentVariableIsSet("SMARTCLIP_LET_SYSTEM_MAXIMIZE")
+                                          || systemTitleProbe();
             if (!letSystem) {
                 const bool restoring = (cmd == SC_RESTORE)
                                        && (self->m_maximized || self->updateMaximizedFromWindow());
@@ -837,6 +885,119 @@ void WindowHelper::toggleMaximize()
         maximize();
 }
 
+/* --------------------------------------------------------------------------
+ * 预热最大化（见 WindowHelper.h 上 prewarmMaximize 的说明）
+ *
+ * 一句话：把"内容按 4K 渲染一帧"那 165ms 从"松手之后"挪到"按下和松手之间"。
+ * 挪不动它（每帧都要交的面积税，见 applyState ①b 那段拆开的数），只能挪时机。
+ * ------------------------------------------------------------------------ */
+
+void WindowHelper::prewarmMaximize()
+{
+    /* 验证开关：SMARTCLIP_NO_PREWARM=1 —— 整条不预热，和它对照点几次最大化 */
+    static const bool off = qEnvironmentVariableIsSet("SMARTCLIP_NO_PREWARM");
+    if (off)
+        return;
+
+    /* 按下这一发的落点：prewarmRelease() 拿它判"松手时还在这颗按钮上吗" */
+    m_prewarmPressPos = QCursor::pos();
+    doPrewarm();
+}
+
+bool WindowHelper::prewarmRelease()
+{
+    if (!m_prewarmed)
+        return false;    // 没预热成（探针关掉了 / 条件不符）：让 QML 走原来那条 clicked
+
+    m_prewarmLife.stop();
+
+    /*
+     * 全局光标还在按下那一点附近 → 这一发就是"点放大"，当场办掉。
+     *
+     * 判据只能拿全局位置对着按：按下之后布局已经是 4K 那一版了，本 Item 在场景里的
+     * 位置都变了，QML 自己那套"松手还在这个 Item 里"的判据在这儿必然不成立。
+     */
+    if ((QCursor::pos() - m_prewarmPressPos).manhattanLength() <= 8) {
+        trace(QStringLiteral("预热：松手命中 → 直接最大化（那 165ms 已经交过）"));
+        maximize();
+    } else {
+        trace(QStringLiteral("预热：松手前指针挪走了 → 这一发当取消"));
+        cancelPrewarm();
+    }
+    return true;
+}
+
+void WindowHelper::doPrewarm()
+{
+    /* 先看条件（"已经最大化了"和"窗口收进托盘了"都从这条路进来） */
+    if (m_prewarmed || m_maximized || m_zoomFrame || m_blankBackdrop
+        || !m_widget || !m_quickWidget)
+        return;
+    if (!m_widget->isVisible() || m_widget->isMinimized())
+        return;
+
+    QScreen *screen = screenOf();
+    const QRect avail = screen ? screen->availableGeometry() : QRect();
+    if (!avail.isValid() || avail.isEmpty())
+        return;
+
+    /*
+     * 先把屏幕上现在这一张贴住。
+     *
+     * 为什么必须贴：内容控件一摆到 4K，它自己会重画一帧，而那一帧画的是"最大化那一版
+     * 布局"—— 卡片那么大一块窗口裁出来的就是它的左上角那一条。真点下去的时候有 ②d
+     * 拉伸帧接管，预热这几十到几百 ms 里得自己盖住，走的是同一条通道。
+     */
+    m_prewarmCover = screen->grabWindow(m_widget->winId());
+    if (m_prewarmCover.isNull()) {
+        trace(QStringLiteral("预热：抓不到当前画面，放弃"));
+        return;
+    }
+
+    /*
+     * 预热期间把编辑区原生子窗**钉在原坐标**。
+     *
+     * 不钉的话：QML 那一摆到 4K，编辑区那条 geometryChange 就把原生 QScintilla 窗
+     * 跟着撑大，开了换行的文档会当场重排 —— 那是一块 Qt 的 cover 盖不住的窗口（它
+     * 自己一块合成表面），屏幕上就是"正文重排了、别的全冻着"。applyState 走 ①c 时
+     * 没这个问题，因为它摆完立刻摘窗（②a），只有几 ms。
+     */
+    EditorViewItem::setGeometryFrozen(true);
+
+    QElapsedTimer clock;
+    clock.start();
+    placeContent(QRect(QPoint(0, 0), avail.size()));   // ← 那笔 165ms 就在这一行里面
+    m_prewarmed = true;
+    m_widget->repaint();                               // cover 还挂着：屏幕上没变化
+    m_prewarmLife.start(4000);
+
+    /* 这一条是"按下有没有落到这颗按钮上"的探针：没有它，测试脚本分不清
+     *  是点击没送到、还是预热条件没过去。 */
+    trace(QStringLiteral("预热：按下（光标 %1,%2）→ 4K 渲染提前交掉 %3ms（这一笔原本在点击之后）")
+              .arg(m_prewarmPressPos.x()).arg(m_prewarmPressPos.y())
+              .arg(clock.elapsed()));
+}
+
+void WindowHelper::cancelPrewarm()
+{
+    m_prewarmLife.stop();
+
+    if (!m_prewarmed)
+        return;                         /* 没预热成：只是撤了个看门狗 */
+    m_prewarmed = false;
+
+    EditorViewItem::setGeometryFrozen(false);
+
+    QElapsedTimer clock;
+    clock.start();
+    placeContent(QRect(QPoint(0, 0), m_widget->size()));   // 缩回卡片：实测 8ms
+    EditorViewItem::syncAllGeometry();                      // 原生子窗回到卡片那一版坐标
+    m_widget->repaint();                                    // cover 还在，这一拍仍是旧画面
+    m_prewarmCover = QPixmap();
+
+    trace(QStringLiteral("预热退回（没点到最大化）：%1ms").arg(clock.elapsed()));
+}
+
 void WindowHelper::maximize()
 {
     if (!m_widget)
@@ -918,6 +1079,30 @@ void WindowHelper::applyState(bool maximize)
     if (!m_widget)
         return;
 
+    /*
+     * 对照探针：整套让开，最大化 / 还原就一句 showMaximized() / showNormal()
+     * —— 几何、状态、转场全交给系统（见 systemTitleProbe）。
+     *
+     * 这一条存在的意义：把"我们这套做法"和"这台机器 + 这块 4K"分开。开着它如果
+     * 还是闪，那就不是 applyState 的顺序问题；如果不闪了，问题就在我们这套里。
+     */
+    if (systemTitleProbe()) {
+        trace(QStringLiteral("---- applyState(%1)：对照探针开着 → 只调 %2，其余全交给系统 ----")
+                  .arg(maximize ? QStringLiteral("最大化") : QStringLiteral("还原"),
+                       maximize ? QStringLiteral("showMaximized()")
+                                : QStringLiteral("showNormal()")));
+        if (m_maximized != maximize) {
+            m_maximized = maximize;
+            emit maximizedChanged();
+        }
+        if (maximize)
+            m_widget->showMaximized();
+        else
+            m_widget->showNormal();
+        traceSnapshot(QStringLiteral("  └ 对照探针这一拍之后"));
+        return;
+    }
+
     /* 这一小段里每一帧都记进日志（见 traceFrames） */
     traceFrames(true);
 
@@ -943,11 +1128,68 @@ void WindowHelper::applyState(bool maximize)
         const QRect avail = screen ? screen->availableGeometry() : QRect();
 
         /*
+         * ①a 先把"屏幕上现在这一张"抓下来 —— ②d 那一帧要把它拉伸铺满整块客户区。
+         *
+         * **必须在这儿抓**，也就是摘原生子窗（②a）、铺底（②b）、摆内容（①b）之前：
+         * 抓的是屏幕上现在这一张，晚一步正文那两块就是黑的（实测踩过：拉伸帧里两块黑洞）。
+         *
+         * 为什么用 QScreen::grabWindow 而不是 QWidget::grab() / render()：后者是让 Qt
+         * **重画**一遍，而那时内容控件已经被摆到目标尺寸，抓回来的会是"最大化那一版"
+         * 而不是屏幕上现在这一版；而且 Qt 那两条都画不到编辑区那几块原生子窗（它们不在
+         * backing store 里）。grabWindow 是"从屏幕上把这块矩形读回来"，一次拷贝、
+         * 子窗口齐全（1460x900 实测 11ms）。
+         */
+        {
+            QElapsedTimer snapClock;
+            snapClock.start();
+            if (screen)
+                m_zoomSnapshot = screen->grabWindow(m_widget->winId());
+            trace(QStringLiteral("  ①a 抓旧画面：%1x%2，%3ms")
+                      .arg(m_zoomSnapshot.width()).arg(m_zoomSnapshot.height())
+                      .arg(snapClock.elapsed()));
+        }
+
+        /*
+         * 预热过（鼠标刚才停在放大按钮上）：从这一拍起"屏幕上贴住旧画面"这件事
+         * 交回给 ②d 的拉伸帧，预热那张 cover 没用了；原生子窗也放开，让 ①c 摆到
+         * 最大化那一版坐标上去。
+         *
+         * 下面 ①b 会命中 placeContent 的"尺寸没变"那一支 —— 那 165ms 已经在
+         * doPrewarm 里交过了，这一枪是 0ms。
+         */
+        m_prewarmLife.stop();
+        m_prewarmCover = QPixmap();
+        if (m_prewarmed) {
+            m_prewarmed = false;
+            EditorViewItem::setGeometryFrozen(false);
+            trace(QStringLiteral("  ①b 之前：预热命中，这一次不用按 4K 重渲染"));
+        }
+
+        /*
          * ① 内容先按最大化之后的尺寸渲染一帧（窗口还是小的，多出来的那圈被窗口
          *    裁掉，屏幕上看不出来）。
          *
          * 先 clearMask()：最大化 = 直角，而且**顺手让内容控件那次 4K 渲染走快路径**
          * （带遮罩渲染那一帧要 ~140ms，见 applyRoundedMask 里的说明）。
+         *
+         * **这一笔不能挪到换几何之后**（试过，实测更糟）：窗口一变大，Qt 的布局就会
+         * 把内容控件撑到 4K，那次渲染改在换几何的消息处理里跑完 —— 冷启动量到
+         * "换几何 → 拉伸帧上屏"中间空了 **574ms**（原来这一段黑 55ms），而 ①b 自己
+         * 反而报 0ms。也就是说渲染的时间一点没省，只是从"屏幕上还看得见卡片"
+         * 变成了"屏幕上黑着等它"。
+         *
+         * 这一笔到底在忙什么（2026-09-19 拆开量过，同一篇文档 / 同一台 4K 屏）：
+         *   1460x900 → 3840x2112：**163 / 167 / 171 / 175ms**，来回五次一模一样；
+         *   3840x2112 → 1460x900：**8ms**；
+         *   **什么文档都不开、场景空着**放大到 4K：还是 **164~175ms**。
+         * 也就是说它跟内容无关 —— 不是 Markdown 重排、不是图片解码上传、不是 QML
+         * 布局（开着文档的还原方向要重排的行数更多，却只要 8ms）。它只跟**这一帧
+         * 有多少像素**走：QQuickWidget 是把场景图渲染到一块离屏 FBO，再把整张
+         * 8.1 百万像素读回成 QImage 交给 raster 背衬 —— 这笔读回就是税。场景图自己
+         * 报的 render 时间只有 1~9ms（QSG_RENDER_TIMING，RHI 走的是 RTX 4080）。
+         * 所以：异步解码图片、懒加载、预热布局**都治不了它**（每帧都要交这份税），
+         * 能治的只有两条 —— 要么别在点击这一串里交（提前在别处渲染），要么换掉
+         * "离屏 FBO + 读回"这条呈现路径（GPU 直接呈现的顶层窗口，见 spike\）。
          */
         m_widget->clearMask();
         if (avail.isValid() && !avail.isEmpty())
@@ -962,6 +1204,20 @@ void WindowHelper::applyState(bool maximize)
          * 超出旧窗口那部分被宿主裁掉、屏幕上看不见；等窗口一变，它正好在那个位置上。
          */
         EditorViewItem::syncAllGeometry();
+
+        /*
+         * ②a 编辑区那几个原生子窗**先摘出屏幕**。
+         *
+         * 为什么底色盖不住它们：QScintilla 是 createWindowContainer() 出来的独立
+         * 原生子窗，自己一块合成表面，不参与宿主的 backing store。144fps 逐帧抓到了
+         * 证据（build\uc2\b84.png）：中间帧里整屏已经被 ②b 铺成黑的了，**左上角还亮着
+         * 一块旧编辑区**（行号、正文看得清清楚楚）—— 那才是"原始窗口闪到左上角"里
+         * 唯一有内容的一块。
+         *
+         * 摘掉之后那块地方露的是 ②b 铺的黑；放回来的时机在换完几何、整窗合成之前
+         * （下面 ②c）。
+         */
+        EditorViewItem::setAllNativeVisible(false);
 
         /*
          * ②b 先把界面那一层擦掉（和换几何在同一个回合里）。
@@ -1036,6 +1292,38 @@ void WindowHelper::applyState(bool maximize)
         else
             m_widget->setGeometry(avail);
 
+        /*
+         * ②d 拉伸帧：换完几何之后的**第一次**整窗绘制，只把 ①a 抓的那一张旧画面
+         * 拉伸铺满整块客户区（真内容留给下面 ③ 那一帧）。
+         *
+         * 为什么能治"原始窗口闪到左上角"：GDI 窗口换尺寸时，合成器手上只有上一张
+         * 重定向表面，而它是按**窗口内坐标 1:1** 贴到新表面左上角的，新露出来的那一大片
+         * 是没画过的黑 —— 屏幕上就是"老界面缩在左上角一小块 + 其余全黑"。这一帧把
+         * 那"其余全黑"换成"老界面被放大"，观感就和系统自己那段最大化转场一样了
+         * （GPU 呈现的窗口之所以没这个毛病，就是因为合成器对它们是拉伸而不是 1:1 贴）。
+         *
+         * 为什么这里用 RedrawWindow 而不是 repaint()：要走的是**铺底那一帧同一条通道**
+         * —— 实测只有走 Qt 自己的绘制 + backing store 上屏才放得出来（GDI 直接写窗口 DC
+         * 那一版实测一帧都上不去，见文件顶部走过的弯路）。不带 RDW_ERASE：带了就先被
+         * 底色整窗填一遍，白挨一次 4K 填充。
+         *
+         * 对照开关：SMARTCLIP_NO_ZOOM_FRAME=1 —— 整条不做，用来量"有没有这一帧"的差别。
+         */
+        static const bool noZoomFrame = qEnvironmentVariableIsSet("SMARTCLIP_NO_ZOOM_FRAME");
+        if (!noZoomFrame && !m_zoomSnapshot.isNull()) {
+            m_zoomFrame = true;
+#if defined(Q_OS_WIN)
+            if (HWND hwnd = reinterpret_cast<HWND>(m_widget->internalWinId()))
+                ::RedrawWindow(hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
+            else
+#endif
+                m_widget->repaint();
+            /*
+             * **不清掉 m_zoomFrame**：下面那次 4K 渲染要 150ms 量级，期间 Qt 还可能
+             * 自发来重绘（布局激活、子控件失效…），挂着它 = 那一屏一直是"放大版的旧
+             * 画面"，不会漏回黑。收尾在 ②c 之后、flushContent 之前。
+             */
+        }
 
         /*
          * ③ 内容那一版：布局归位 + 当场合成一帧（这一步 4K 上要 ~20ms，省不掉）。
@@ -1078,6 +1366,19 @@ void WindowHelper::applyState(bool maximize)
          *    新露出来的那大半屏就留下一帧黑。
          *    setGeometry() 是 Qt 自己的调用，几何当场就更新，合成覆盖整块窗口。
          */
+        /*
+         * ②c 编辑区原生子窗放回屏幕（②a 摘掉的那一批）。
+         *
+         * 为什么放在整窗合成**之前**：放回来的那一下它们自己会重画一帧，紧接着
+         * flushContent 把整窗合成一次 —— 两件事落在同一拍里，屏幕上就不会多出一帧
+         * "4K 黑底上缺了正文那两块"。
+         */
+        EditorViewItem::setAllNativeVisible(true);
+        trace(QStringLiteral("  ②c 编辑区原生子窗放回屏幕（已在目标坐标）"));
+
+        /* 拉伸帧收尾：从这一拍起允许画真内容（下面 flushContent 就是那一帧） */
+        m_zoomFrame = false;
+        m_zoomSnapshot = QPixmap();
         flushContent();
         m_widget->showMaximized();
 
@@ -1433,12 +1734,49 @@ bool WindowHelper::eventFilter(QObject *watched, QEvent *event)
 
     case QEvent::Paint: {
         /*
-         * "先把界面擦成底色"这一帧（见 applyState 里 ②b）：只铺界面底色，不合成内容控件。
+         * 预热期间（鼠标停在放大按钮上那一小段）：只贴"预热之前那一张"，不合成内容
+         * 控件 —— 那时内容控件已经按 4K 摆好，让它自己画就是"最大化那一版的左上角
+         * 那一条"缩在卡片里（见 prewarmMaximize）。
          *
-         * 为什么要它：窗口变大的时候，系统会把"变大前那一张画面"拷到新表面的左上角。
-         * 拷过去的是整块界面的话，用户看到的就是"界面跑到左上角、再放大"（用户报的原话）；
-         * 先把它擦成一片底色再换几何，拷过去的就只是底色 —— 屏幕上成了一次"整块铺满底色"，
-         * 没有"界面跑过去"这件事。
+         * 目标矩形按逻辑尺寸给：dpr>1 时抓回来的那张是设备像素，直接按像素贴会贴小。
+         */
+        if (!m_prewarmCover.isNull()) {
+            trace(QStringLiteral("  帧：预热贴画（%1x%2）")
+                      .arg(m_widget->width()).arg(m_widget->height()));
+            QPainter cover(m_widget);
+            cover.drawPixmap(QRect(QPoint(0, 0), m_widget->size()), m_prewarmCover);
+            return true;
+        }
+        /*
+         * ②d 那一帧：只把旧画面**拉伸铺满**整块客户区，不合成真内容
+         * （为什么是这一帧、为什么走这条通道，见 applyState 里 ②d 那段）。
+         *
+         * 不开 QPainter::SmoothPixmapTransform：4K 目标尺寸下双线性要慢一个量级，
+         * 而这一帧本来就只存在几十毫秒，糊一点正好像系统那段转场。
+         */
+        if (m_zoomFrame && !m_zoomSnapshot.isNull()) {
+            trace(QStringLiteral("  帧：拉伸旧画面 → 铺满 %1x%2（源 %3x%4）")
+                      .arg(m_widget->width()).arg(m_widget->height())
+                      .arg(m_zoomSnapshot.width()).arg(m_zoomSnapshot.height()));
+            QPainter zoom(m_widget);
+            zoom.drawPixmap(QRect(QPoint(0, 0), m_widget->size()), m_zoomSnapshot);
+            return true;
+        }
+        /*
+         * "先把界面擦成底色"这一帧（见 applyState 里 ②b）：只铺一片纯色，不合成内容控件。
+         *
+         * 为什么要它：窗口变大的时候，合成器会把"上一次呈现的那一张"按窗口内坐标
+         * 贴到新表面的左上角。贴过去的是整块界面的话，用户看到的就是"界面跑到左上角、
+         * 再放大"（用户报的原话）；先把它铺成一片纯色，贴过去的就只是那片纯色。
+         *
+         * **为什么这一帧是纯黑、不是界面底色 #313335**（144fps 录屏逐帧取色量的，
+         * 素材 build\probe-base2 / probe-fix）：换完几何之后**新露出来的那一大片**，
+         * 合成器手里是 (0,0,0) —— 不是底色（WM_ERASEBKGND 里 GDI 擦的那一遍根本到不了
+         * 屏幕，Qt 随后按整块脏区上屏，把它盖掉了）。所以：
+         *   * 铺黑 → 整段空档是一片均匀的黑，看不出"左上角有一张卡片"；
+         *   * 铺 #313335 → 左上角那块变成 (48,50,52)、其余 (0,0,0)，屏幕上显出
+         *     一张 1460x900 的**卡片形状** —— 恰好就是用户报的那个形状，更扎眼。
+         * 实测两种铺法中间帧数一样（各 4 帧 ≈ 28ms），差的只是"看不看得出形状"。
          */
         if (m_blankBackdrop) {
             trace(QStringLiteral("  帧：铺底色（%1x%2）")

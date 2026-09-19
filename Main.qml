@@ -3066,6 +3066,7 @@ Rectangle {
                               + " tree=" + folderTree.width
                               + " gap=" + splitterGap.width
                               + " editor=" + editor.width
+                              + " 正文项=" + (editor.mainView ? editor.mainView.width + "x" + editor.mainView.height : "-")
                               + " 窗=" + window.width + "x" + window.height)
             }
             onTriggered: {

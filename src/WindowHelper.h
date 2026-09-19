@@ -2,9 +2,11 @@
 
 #include <QElapsedTimer>
 #include <QObject>
+#include <QPixmap>
 #include <QRect>
 #include <QRegion>
 #include <QString>
+#include <QTimer>
 
 class QQuickWindow;
 
@@ -103,6 +105,43 @@ public:
     Q_INVOKABLE void refreshMask();
 
     /*
+     * **预热最大化**：按下"放大"那颗按钮的那一刻，先把"按 4K 渲染一帧"这笔税交掉。
+     *
+     * 为什么需要它：applyState ①b 那笔 4K 渲染量到 **163~194ms**，而且和屏幕上
+     * 有没有内容无关（什么文档都不开、场景空着放大，一样 164~175ms；反方向缩回卡片
+     * 只要 8ms）—— 它是 QQuickWidget 把 8.1 百万像素的离屏表面读回成光栅背衬的**面积税**，
+     * 每帧都得交，改顺序、异步解码图片都治不了（见 .cpp 里 ①b 那段拆开的数）。
+     * 一次最大化从点击到内容上屏 222ms，其中 165ms 就是它，而这段时间窗口还停在
+     * 卡片原来的位置上没动 —— 用户看到的是"点了没反应"。
+     *
+     * 这里做的事：按下那一瞬间（松手之前窗口还是卡片大小）把内容控件摆到最大化那一版
+     * 并渲染好，期间屏幕上贴住按下之前那一张（见 eventFilter 的 cover 分支）。松手时
+     * 事件循环才把"松开"这一发交出来，跟着走的 ①b 命中"尺寸没变"那一支，165ms 归零。
+     *
+     * 代价：按下到松手那一段里界面是**冻住**的（正在点这颗按钮，本来也没别的事要做）。
+     * 按住不放超过 1.5 秒会自己退回卡片，不至于让人以为程序卡死了。
+     *
+     * SMARTCLIP_NO_PREWARM=1 整条关掉（A/B 量它到底省了多少）。
+     */
+    Q_INVOKABLE void prewarmMaximize();
+
+    /*
+     * 松手这一发：预热过就直接把最大化办掉，返回 true 让 QML 别再走 clicked。
+     *
+     * 为什么非要在**松开**这一步办，而不是让 MouseArea 的 clicked 自己发：
+     * 按下之后内容控件已经摆成 4K 那一版布局，那颗按钮在场景里的位置跟着跑到右上角
+     * 别处去了，而鼠标还停在原地 —— QQuickMouseArea 发 clicked 的条件之一是"松手的位置
+     * 还在本 Item 里"，这一条现在成立不了（实测：松开后日志里连 maximize() 都没进来，
+     * 1.5 秒看门狗把预热退回了，见 build\ab-on.txt）。MouseArea 按下即抓走鼠标，
+     * 松开的事件一定回到它自己身上，所以改在这儿办。
+     *
+     * 判据用**全局光标**：按下时记下位置，松手时还在 8 像素以内，就认为这一发是
+     * 点了这颗按钮（按住往别处拖走松开 = 取消，不动窗口，看门狗负责退回）。
+     */
+    Q_INVOKABLE bool prewarmRelease();
+    Q_INVOKABLE void cancelPrewarm();
+
+    /*
      * 让 QML 也能往窗口变化日志里写一行（见下面"窗口变化日志"那段）。
      *
      * 现在用它记"切换那一小段里各块布局的宽度"（Main.qml 里的 layoutProbe）——
@@ -199,6 +238,9 @@ private:
 
     /* 内容控件摆到窗口里的某块位置，并让它**当场**按新尺寸渲染一帧（见 .cpp） */
     void placeContent(const QRect &contentInWindow);
+
+    /* dwell 到点：真的把内容按 4K 渲染一遍（见 prewarmMaximize） */
+    void doPrewarm();
 
     /*
      * 窗口在**系统那边**现在是什么形状（"空" = 整块矩形）。
@@ -313,6 +355,33 @@ private:
      * 界面底色、不合成内容控件，所以被拷过去的就是一片底色。
      */
     bool m_blankBackdrop = false;
+
+    /*
+     * "拉伸帧"：换完几何之后的**第一次**整窗绘制里，只把②b 之前抓下的那一张旧画面
+     * 拉伸铺满整块客户区（不画真内容），紧接着才让真内容上屏（见 .cpp 里 applyState ①）。
+     *
+     * 治的是这个形状：GDI 窗口换尺寸时，合成器手上只有上一张重定向表面，它是按
+     * **窗口内坐标 1:1** 贴到新表面左上角的，新露出来的那一大片是未初始化的黑 ——
+     * 屏幕上就是"原始窗口闪到左上角、再放大"。拉伸帧把那一整片黑换成"旧界面被放大"，
+     * 观感等同系统自己那段最大化转场（GPU 呈现的窗口之所以没这个问题，就是因为合成器
+     * 对它们是拉伸而不是 1:1 贴）。
+     */
+    QPixmap m_zoomSnapshot;
+    bool m_zoomFrame = false;
+
+    /*
+     * 预热留在这一层的三样东西。
+     *
+     * m_prewarmCover 是**按下之前**屏幕上那一张：内容控件已经按 4K 摆好之后，卡片
+     * 这一侧要是让它自己重画，画出来就是"最大化那一版左上角那一条"缩在卡片里（实测过
+     * 这个形状，就是用户报的"跑到左上角"）。所以这一小段里主窗口重画只贴这一张，
+     * 跟 ②d 拉伸帧同一条通道，区别只是不拉伸。
+     */
+    QTimer m_prewarmLife;    // 按住不放超过 4 秒：自己退回卡片，别让人以为程序卡死
+    QPixmap m_prewarmCover;
+    bool m_prewarmed = false;
+    /* 按下那一刻的全局光标：松手时还在这 8 像素以内才算"点了这颗按钮" */
+    QPoint m_prewarmPressPos;
 
     int m_cornerRadius = 10;
 

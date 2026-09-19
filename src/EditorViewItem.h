@@ -208,6 +208,33 @@ public:
     static void syncAllGeometry();
 
     /*
+     * 把"按 QML 布局摆原生控件"这一步**冻住**（on=false 才放行）。
+     *
+     * 现在只有一个调用方：WindowHelper 预热最大化的那几十到几百毫秒。那边趁窗口还是
+     * 卡片大小时就把内容控件摆到了 4K，QML 一 resize，编辑区这条 geometryChange 就会
+     * 把原生 QScintilla 子窗一起撑到 4K —— 而那是块独立合成表面，宿主贴的"预热前那一
+     * 张"盖不住它，开了换行的文档会当场重排，看着就是"正文动了、别的全冻住"。
+     *
+     * 冻住的是**摆坐标**这一步，不是显示状态（显示状态归 setAllNativeVisible 管）。
+     */
+    static void setGeometryFrozen(bool frozen);
+
+    /*
+     * 过渡期把编辑区那块**原生子窗口**摘出屏幕 / 放回去。
+     *
+     * 实测依据（144fps 逐帧，素材 build\uc2\b84.png）：最大化中间那些帧里，整屏已经
+     * 被宿主铺成黑的了，**左上角却还亮着一块旧编辑区**（行号 1..11 + 正文看得清清楚楚）。
+     * 因为 QScintilla 是 createWindowContainer() 出来的独立原生子窗，自己一块合成表面，
+     * 不参与宿主的 backing store —— 宿主那一层铺什么底色都盖不到它。而它的坐标在换几何
+     * 之前就已经按新布局摆好了（超出旧窗口那圈被旧窗口裁掉），窗口一变大就整块露出来。
+     * 这就是用户报的"原始窗口先闪到左上角"里，唯一**有内容**的那一块。
+     *
+     * 传 false 摘出去，传 true 放回来（放回来时按当前 QML 布局重摆一遍，
+     * 该不该显示仍由各实例自己的 isVisible() 说了算 —— 预览页里编辑区本来就该是隐藏的）。
+     */
+    static void setAllNativeVisible(bool on);
+
+    /*
      * 代码折叠（第 1 列那个折叠边距）与当前行行号高亮，都在 applyMargins /
      * applyMarginTheme 里落地，见 .cpp 里的说明。
      */

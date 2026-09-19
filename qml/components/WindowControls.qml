@@ -66,6 +66,43 @@ RowLayout {
         property string kind: "win-min"
         property int iconSize: 14
 
+        /*
+         * 这颗按钮要不要在**按下**时预热"最大化"（只有中间那颗要）。
+         *
+         * 为什么在这儿报：从按下到松开有一百来毫秒，那段时间窗口还是卡片大小，
+         * 而 C++ 那边一次最大化要花的 222ms 里有 165ms 是"按 4K 渲染一帧"
+         * （每帧都要交的面积税，改不掉，只能挪时机，见 src/WindowHelper.h 的
+         * prewarmMaximize）。把这段利用起来，松手就几乎立刻到位。
+         * 已经最大化时这颗是"还原"，预热函数自己会直接返回。
+         *
+         * **为什么不是悬停（onEntered）**：试过，实测点不动。预热会把内容控件摆成
+         * "最大化那一版"布局，而 QML 的命中测试跟着**布局**走、不跟着屏幕上的像素走：
+         * 指针停在放大按钮上，那颗按钮在 4K 布局里已经跑到右边别处去了，点下去落在顶栏
+         * 中间那块能拖窗口的区域上 —— 日志里连 maximize() 都没进来（build\ab-on.txt）。
+         *
+         * 按下之后再摆没有"点不到"的问题（MouseArea 按下即把鼠标抓走，松开一定回到它
+         * 自己身上），但**布局变了之后 clicked 不再发**（Qt 那条"松手位置还在本 Item
+         * 里"的条件成立不了）。所以这一颗的动作改挂在 onReleased 上，由 C++ 那边
+         * prewarmRelease() 认这一发（见 src/WindowHelper.h）。
+         */
+        property bool prewarmOnPress: false
+
+        /* 这一发是不是已经在松开那一步办过了（办过就别再走 clicked，否则会翻回去） */
+        property bool handledOnRelease: false
+
+        function activate() {
+            if (btn.kind === "win-min")
+                Win.minimizeWindow()
+            else if (btn.kind === "win-max" || btn.kind === "win-restore")
+                Win.toggleMaximize()
+            else
+                /*
+                 * 关闭键先问一句：完全退出，还是收进托盘（见 WindowHelper::askQuit）。
+                 * 那个框是**非模态**的 —— 程序照常响应，不会像上一版那样看着卡住。
+                 */
+                Win.askQuit()
+        }
+
         AppIcon {
             anchors.centerIn: parent
             provider: icons
@@ -88,23 +125,36 @@ RowLayout {
             /*
              * 主窗口已经不由 QML 承担（根元素是 Rectangle，见 Main.qml），
              * 所以三个按钮统一交给 WinHelper 去操作真正的窗口。
+             *
+             * 预热那颗按钮的三步（见上面 btn.prewarmOnPress 那段）：
+             *   按下 → 先花 165ms 把 4K 那一帧渲染好（这一段窗口还是卡片大小）；
+             *   松开 → C++ 认这一发并当场最大化；
+             *   clicked → 只有"没预热成"的那几次（探针关掉、条件不符）才会走到这儿。
              */
+            onPressed: {
+                btn.handledOnRelease = false
+                if (btn.prewarmOnPress)
+                    Win.prewarmMaximize()
+            }
+            onReleased: {
+                if (btn.prewarmOnPress && Win.prewarmRelease())
+                    btn.handledOnRelease = true
+            }
             onClicked: {
-                if (btn.kind === "win-min")
-                    Win.minimizeWindow()
-                else if (btn.kind === "win-max" || btn.kind === "win-restore")
-                    Win.toggleMaximize()
-                else
-                    /*
-                     * 关闭键先问一句：完全退出，还是收进托盘（见 WindowHelper::askQuit）。
-                     * 那个框是**非模态**的 —— 程序照常响应，不会像上一版那样看着卡住。
-                     */
-                    Win.askQuit()
+                if (btn.handledOnRelease) {
+                    btn.handledOnRelease = false
+                    return
+                }
+                btn.activate()
             }
         }
     }
 
     WinButton { kind: "win-min" }
-    WinButton { kind: root.maximized ? "win-restore" : "win-max" }
+    /*
+     * 中间这颗带预热。它**只**在按下时预热一下，动作还是"松开才办"（onReleased），
+     * 所以在这儿不需要再 cancelPrewarm —— 收尾统一在 C++ 的 prewarmRelease 里。
+     */
+    WinButton { kind: root.maximized ? "win-restore" : "win-max"; prewarmOnPress: true }
     WinButton { kind: "close"; iconSize: 16 }
 }
