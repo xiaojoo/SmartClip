@@ -2458,6 +2458,13 @@ Rectangle {
              */
             splitterCenterX: splitterMouse.x + splitterMouse.width / 2,
             treeRightLive: folderTree.mapToItem(window.contentItem, folderTree.width, 0).x,
+            /*
+             * 抓手的左边缘和那条缝的宽度：自检据此卡"抓手不许往左压到树面板的
+             * 滚动条上"（左边缘必须 ≥ 面板右边缘）、以及"抓手别宽过那条缝太多"。
+             */
+            splitterLeftX: splitterMouse.x,
+            splitterWidth: splitterMouse.width,
+            gapWidth: splitterGap.width,
             midRowTop: window.mapFromItem(midRow, 0, 0).y,
             midRowBottom: window.mapFromItem(midRow, 0, 0).y + midRow.height,
             topBarHeight: topBar.height,
@@ -3449,7 +3456,10 @@ Rectangle {
              * 拖动的热区不在这里：它挪到窗口级了（见文件末尾的
              * splitterMouse）——放在布局里会被四边 resize 热区压住，
              * 收不到 hover，光标也就一直是箭头。
-             * 这里只负责占住那 5px 的间隙。
+             * 这里只负责占住那条缝。
+             *
+             * 5 → 3：用户要"间隙再小一点"。抓手（5px）比这条缝宽 2px，
+             * 多出去的那 2px 让到编辑区一侧，不往左压滚动条。
              */
             Item {
                 id: splitterGap
@@ -3457,12 +3467,12 @@ Rectangle {
                 /*
                  * 面板收起来时这条缝也一起收掉。
                  *
-                 * 留着的话收起之后编辑区左边会多出 5px 和图标条同色的暗带：
-                 * 展开时这一列到面板卡片左边缘为止（34px），收起后却到 39px ——
+                 * 留着的话收起之后编辑区左边会多出这一条和图标条同色的暗带：
+                 * 展开时这一列到面板卡片左边缘为止（34px），收起后却到 37px ——
                  * 看着就是"折叠和展开左边这一列宽度不一样"。收掉之后
                  * 编辑区卡片正好顶到图标条右边，和展开时面板卡片的起点对齐。
                  */
-                Layout.preferredWidth: window.folderTreeHidden ? 0 : 5
+                Layout.preferredWidth: window.folderTreeHidden ? 0 : 3
                 Layout.fillHeight: true
             }
 
@@ -3733,11 +3743,21 @@ Rectangle {
         enabled: !window.maximized
 
         /*
-         * 位置直接取树面板的右边缘（= 间隙左边界），
-         * 往左外扩 4px、往右盖住 5px 的间隙，落点就是那条缝。
+         * 位置：从树面板的右边缘**往右**吃 5px（= 那条缝 + 编辑区卡片左边 2px）。
+         *
+         * 原来写的是 `panelRight - 4` 起、宽 9 —— 往左多出来的那 4px 正好压在左树
+         * 的滚动条上（滚动条是贴着面板右边缘画的，见 FolderTree 的
+         * `ScrollBar.vertical: ThinScrollBar { anchors.right: parent.right }`），
+         * 结果就是"鼠标一移到滚动条上就变 <->，想拖滚动条反而在改面板宽度"。
+         * 现在左边缘不许越过 panelRight，抓手整个落在缝里。
+         *
+         * 宽度 9 → 5：间隙本身也从 5px 收到 3px（见上面 splitterGap），抓手比缝
+         * 宽 2px，多出来的那点让到编辑区那一侧 —— 那边没有可点的控件贴边，
+         * 而滚动条有。面板收起时间隙是 0，这 5px 就是"从缝里往右拖把面板叫回来"
+         * 的把手（见下面 onPressed）。
          */
-        x: Math.max(0, folderTree.panelRight - 4)
-        width: 9
+        x: Math.max(0, folderTree.panelRight)
+        width: 5
 
         // 纵向跟着中间那一行走（顶栏 / 底栏各占多少高度由布局决定）
         /*
@@ -3768,7 +3788,7 @@ Rectangle {
             pressSceneX = mapToItem(null, mouse.x, 0).x
             /*
              * 面板收起来时先把它叫回来：收起来之后标题栏那排按钮也跟着没了，
-             * 这条 5px 的缝就是最自然的抓手（往右拖 = 把树拉出来）。
+             * 这条缝（抓手这 5px）就是最自然的把手（往右拖 = 把树拉出来）。
              */
             if (window.folderTreeHidden)
                 window.toggleFolderTree()

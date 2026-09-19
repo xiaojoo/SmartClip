@@ -1498,11 +1498,24 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
          */
         const double centerX = ui.value(QStringLiteral("splitterCenterX")).toDouble();
         const double treeRight = ui.value(QStringLiteral("treeRightLive")).toDouble();
-        const QString horiz = QStringLiteral("热区中心 x=%1，树面板右边缘=%2")
-                                  .arg(centerX)
-                                  .arg(treeRight);
+        const double leftX = ui.value(QStringLiteral("splitterLeftX")).toDouble();
+        const double zoneWidth = ui.value(QStringLiteral("splitterWidth")).toDouble();
+        const double gap = ui.value(QStringLiteral("gapWidth")).toDouble();
+        const QString horiz = QStringLiteral("热区 %1..%2（宽 %3），树面板右边缘 %4，间隙 %5 px")
+                                  .arg(leftX).arg(leftX + zoneWidth).arg(zoneWidth)
+                                  .arg(treeRight).arg(gap);
         check(qAbs(centerX - treeRight) < 6.0,
               QStringLiteral("分隔线热区压在树面板右边缘上（没漂到编辑区里）"), horiz);
+        /*
+         * 左边缘不许越过面板右边缘：滚动条就贴着那条边画
+         * （FolderTree 的 ScrollBar.vertical: ThinScrollBar { anchors.right:
+         * parent.right }），越过一点就是"鼠标移到滚动条上变 <->、想拖滚动条
+         * 反而在改面板宽度"（用户圈着滚动条提的那一条）。
+         */
+        check(leftX >= treeRight - 0.5,
+              QStringLiteral("分隔线热区不压左树的滚动条（左边缘不过面板右边缘）"), horiz);
+        check(zoneWidth <= gap + 3.0,
+              QStringLiteral("分隔线热区宽度跟着那条缝走（不是一条宽板子）"), horiz);
     }
 
     dispatch(QStringLiteral("find"));
