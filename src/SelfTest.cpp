@@ -2884,6 +2884,36 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
         check(barBottom <= h - 0.5 && right <= w - 0.5,
               QStringLiteral("横条整个在标签栏里面"), geom);
 
+        /*
+         * 选中那一格必须看得见。
+         *
+         * 上面已经撑满、横条也出来了，而选中的是最后新建那一个 —— 排在最右边。
+         * 不主动滚的话它整个停在视口外面，顶上那条滚动条还留在最左边，用户报的
+         * 就是这两条："滚动条应该随内容滚动"、"保持选中的 tab 在视口里"。
+         * 切回第一个标签同样要滚回来（左边那一档）。
+         */
+        auto activeInViewport = [&uiState](const char *tag) {
+            for (int i = 0; i < 3; ++i)
+                QCoreApplication::processEvents();
+            const QVariantMap s = uiState().value(QStringLiteral("tabBar")).toMap();
+            const double aLeft = s.value(QStringLiteral("activeLeft")).toDouble();
+            const double aRight = aLeft + s.value(QStringLiteral("activeWidth")).toDouble();
+            const double vLeft = s.value(QStringLiteral("viewLeft")).toDouble();
+            const double vRight = vLeft + s.value(QStringLiteral("viewWidth")).toDouble();
+            const QString detail = QStringLiteral("%1：选中格 %2..%3 / 视口 %4..%5")
+                                       .arg(QString::fromUtf8(tag))
+                                       .arg(aLeft).arg(aRight).arg(vLeft).arg(vRight);
+            check(aLeft >= 0 && aLeft >= vLeft - 0.5 && aRight <= vRight + 0.5,
+                  QStringLiteral("选中的标签滚进了视口（%1）").arg(QString::fromUtf8(tag)),
+                  detail);
+        };
+        activeInViewport("最后新建那个（最右）");
+        QMetaObject::invokeMethod(view, "activateDocument", Q_ARG(int, 0));
+        activeInViewport("切回第一个（最左）");
+        const int lastTab = big.value(QStringLiteral("tabs")).toInt() - 1;
+        QMetaObject::invokeMethod(view, "activateDocument", Q_ARG(int, lastTab));
+        activeInViewport("再跳回最后一个（最右）");
+
         /* 关掉多余的，回到一个：横条应该收回去（同样要等这一轮布局） */
         dispatch(QStringLiteral("closeAllTabs"));
         dispatch(QStringLiteral("new"));

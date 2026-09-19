@@ -66,6 +66,7 @@ Rectangle {
      * 报上来 —— 自检那边的判据（横条别压到圆角、别盖住标签）一个字没改。
      */
     function barState() {
+        const t = root.activeTab()
         return {
             height: root.height,
             width: root.width,
@@ -82,9 +83,69 @@ Rectangle {
             scrollRight: tabScrollBar.x + tabScrollBar.width,
             scrollTop: tabScrollBar.y,
             scrollBottom: tabScrollBar.y + tabScrollBar.height,
-            tabs: root.pane ? root.pane.documents.length : 0
+            tabs: root.pane ? root.pane.documents.length : 0,
+            /* 选中那一格在内容坐标里的位置 + 当前视口（自检据此卡"选中格没滚出屏"） */
+            activeLeft: t ? t.x : -1,
+            activeWidth: t ? t.width : 0,
+            viewLeft: tabScroll.contentX,
+            viewWidth: tabScroll.width
         }
     }
+
+    /*
+     * 选中的那一格（找不到就是 null）。
+     *
+     * 标签格是 Repeater 挂进 tabRow 的子项，`active` 是每一格自己按
+     * modelData.active 算出来的 —— 所以按这个标记找，不按下标猜（哪一栏开着
+     * 哪几份、两条标签栏各自的下标都不是一回事）。
+     */
+    function activeTab() {
+        for (let i = 0; i < tabRow.children.length; ++i) {
+            const t = tabRow.children[i]
+            if (t && t.active === true)
+                return t
+        }
+        return null
+    }
+
+    /*
+     * 把选中的那一格滚进视口。
+     *
+     * 标签一多这条栏就是横向滚的（Flickable + 顶上那根 3px 滚动条）。不滚的话
+     * 选中格可以整个停在视口外面：点右边那个标签、或者新开一份排在右边时，
+     * 看着就是"点了没反应"，顶上那条滚动条的位置也和选中的标签对不上。
+     *
+     * 只在"选中换了 / 标签增删 / 这条栏变宽变窄"之后滚一次，**不做成绑定** ——
+     * 绑上去的话用户自己拖滚动条会被立刻弹回选中格，那是另一种难用。
+     * 左右各留 6px，别让选中格正好贴着视口边（贴边看着像被裁了一半）。
+     */
+    function scrollActiveIntoView() {
+        const t = activeTab()
+        if (!t || tabScroll.width <= 0)
+            return
+        const left = t.x
+        const right = t.x + t.width
+        if (left < tabScroll.contentX)
+            tabScroll.contentX = Math.max(0, left - 6)
+        else if (right > tabScroll.contentX + tabScroll.width)
+            tabScroll.contentX = right - tabScroll.width + 6
+    }
+
+    /*
+     * 三种情况要重新对一次：换了选中的、标签增删（宽度跟着变）、这条栏本身
+     * 变宽变窄（窗口改大小 / 分栏）。都排到下一帧 —— 标签格的宽度是按文字
+     * implicitWidth 算的，同一帧里读到的还是旧值。
+     */
+    Connections {
+        target: root.pane
+
+        function onCurrentChanged() { Qt.callLater(root.scrollActiveIntoView) }
+        function onTabsChanged() { Qt.callLater(root.scrollActiveIntoView) }
+        function onDocumentsChanged() { Qt.callLater(root.scrollActiveIntoView) }
+    }
+
+    /* 开机恢复出来一长条标签、选中的那份排在右边时，第一次摆好也要对一次 */
+    Component.onCompleted: Qt.callLater(root.scrollActiveIntoView)
 
     RowLayout {
         anchors.fill: parent
@@ -114,6 +175,8 @@ Rectangle {
             clip: true
             boundsBehavior: Flickable.StopAtBounds
             interactive: contentWidth > width
+            /* 这条栏变宽变窄（窗口改大小 / 分栏）→ 选中格可能掉出视口，再对一次 */
+            onWidthChanged: Qt.callLater(root.scrollActiveIntoView)
 
             /*
              * 横向滚动条：浮在标签栏最顶上、**不占高度**（落在标签原来那 3px
@@ -138,6 +201,15 @@ Rectangle {
                 id: tabRow
                 height: parent.height
                 spacing: 3
+                /*
+                 * 内容宽度变了 → **同一帧里**就把选中格对回视口，不要 callLater。
+                 *
+                 * callLater 是下一帧才滚，于是这一帧先"多出一个标签（在视口外面）"、
+                 * 下一帧整条再横移一格 —— 两拍就是用户看到的标签栏闪烁。Row 的宽度
+                 * 是在布局这一轮里变的，这时候新那格的宽度已经算好了，同步设
+                 * contentX 赶得上同一帧的合成。
+                 */
+                onWidthChanged: root.scrollActiveIntoView()
 
                 Repeater {
                     model: root.pane.documents
