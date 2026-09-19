@@ -807,6 +807,18 @@ void WindowHelper::attachWidget(QWidget *widget)
         updateMaximizedFromWindow();
         applyRoundedMask();
 
+        /*
+         * 宿主几何的兜底轮询（见 publishHostGeometry）。
+         *
+         * 只比四个数、变了才发信号，开着不心疼；换来的是"窗口挪了、界面没收到"
+         * 那条不会因为漏一个 Move 事件而复发（漏一次菜单就留在原地错位）。
+         */
+        m_hostGeometryPoll.setInterval(120);
+        connect(&m_hostGeometryPoll, &QTimer::timeout,
+                this, &WindowHelper::publishHostGeometry);
+        m_hostGeometryPoll.start();
+        publishHostGeometry();
+
 
         /* 开头几行：这台机器上窗口和屏幕是怎么摆的（后面所有几何都对着它看） */
         trace(QStringLiteral("==== attach ===="));
@@ -1570,6 +1582,53 @@ void WindowHelper::cacheNormalGeometry(const QRect &geometry)
 }
 
 /*
+ * 宿主窗口的几何报给界面（只在真变了的时候发一枪）。
+ *
+ * 为什么要报：下拉菜单是**独立原生窗口**（popupType: Popup.Window），它的屏幕
+ * 位置在开出来那一刻就算死了；主窗口后来一挪，这块同级窗口还钉在原来的屏幕位置上
+ * （实测：窗口 (400,200) -> (100,116)，244x455 那块菜单还留在 (657,231)）——
+ * 屏幕上就是用户报的"整个菜单没挂在「视图」那一栏下面"，偏多少正好等于窗口挪了多少。
+ * 界面收到这个信号就把菜单收起来（见 DropdownMenu.qml 里那个 Connections）。
+ *
+ * 而 QML 那侧的 mapToGlobal / Window.x 和宿主 QWidget 的几何不是同一套坐标系
+ * （见 main.cpp 里识别卡片那段说明），所以"窗口现在在哪"只能由这一层给。
+ *
+ * 取的是 geometry() 而不是 frameGeometry()：弹窗的 x/y 是相对**客户区**算的
+ * （QML 内容根就铺在客户区里），两者要同一个基准。无边框窗口下这两个值本来就一样。
+ */
+void WindowHelper::publishHostGeometry()
+{
+    if (!m_widget)
+        return;
+
+    const QRect g = m_widget->geometry();
+    if (g == m_hostGeometry)
+        return;
+
+    m_hostGeometry = g;
+    trace(QStringLiteral("宿主几何报到界面（菜单据此收起来）：%1x%2@%3,%4")
+              .arg(g.width()).arg(g.height()).arg(g.x()).arg(g.y()));
+    emit hostGeometryChanged();
+}
+
+/*
+ * 自检用：把宿主窗口挪一段（见 WindowHelper.h）。
+ *
+ * 不用 setGeometry() 整个矩形：这里要的就是一次"和用户拖窗口同款"的移动
+ * —— 只动位置、尺寸不动，走的是 QWidget::move()，Move 事件和轮询两条路都会响。
+ */
+bool WindowHelper::moveHostForTest(int dx, int dy)
+{
+    if (!m_widget)
+        return false;
+
+    m_widget->move(m_widget->x() + dx, m_widget->y() + dy);
+    /* 自检不等事件循环：当场把新几何报出去，和 Move 事件那条路汇到同一个函数里 */
+    publishHostGeometry();
+    return true;
+}
+
+/*
  * 还原矩形落到已经不存在的显示器上时，先拉回主屏，
  * 否则窗口会还原到看不见的地方。
  */
@@ -1643,6 +1702,8 @@ bool WindowHelper::eventFilter(QObject *watched, QEvent *event)
             cacheNormalGeometry(m_widget->geometry());
         /* 尺寸变了要按新尺寸重算圆角遮罩 */
         applyRoundedMask();
+        /* 界面那边（下拉菜单）要收起来 —— 见 hostGeometryChanged */
+        publishHostGeometry();
         break;
 
     case QEvent::Move:
@@ -1655,6 +1716,11 @@ bool WindowHelper::eventFilter(QObject *watched, QEvent *event)
          */
         if (!m_maximized)
             cacheNormalGeometry(m_widget->geometry());
+        /*
+         * 菜单是独立原生窗口，不会自己跟着窗口走：这一枪让界面把它收起来
+         * （用户报的"整个菜单没挂在「视图」栏下面"就是漏了这一步）。
+         */
+        publishHostGeometry();
         break;
 
     case QEvent::Paint: {

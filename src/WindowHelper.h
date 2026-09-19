@@ -167,6 +167,15 @@ public:
     Q_INVOKABLE bool startSystemResize(int edges);
     Q_INVOKABLE bool startSystemMove();
 
+    /*
+     * 自检用：把宿主窗口挪一段（屏幕坐标）。
+     *
+     * 量的是"菜单会不会自己收起来（而不是留在原地错位）"（见 SelfTest.cpp 里
+     * "宿主窗口一移动，菜单就收起来"那一条）。走的是一次真的 move()，所以
+     * hostGeometryChanged 那条路（Move 事件 / 120ms 轮询）和用户拖窗口时一样。
+     */
+    Q_INVOKABLE bool moveHostForTest(int dx, int dy);
+
 public slots:
     // 最大化 / 还原之间切换（窗口按钮和顶栏双击都走这里）
     void toggleMaximize();
@@ -220,6 +229,25 @@ signals:
     void transitionedChanged();
     void cornerRadiusChanged();
 
+    /*
+     * 宿主窗口的几何变了（挪了 / 改了尺寸 / 最大化还原）。
+     *
+     * 界面据此把下拉菜单**收起来**。为什么要报：菜单是**独立原生窗口**
+     * （popupType: Popup.Window，见 qml/components/DropdownMenu.qml 开头），
+     * 屏幕位置在开出来那一刻就算死了 —— 主窗口后来一挪 / 一改尺寸，这块同级
+     * 窗口**不会**跟着走，还钉在原来的屏幕位置上。实测（build\probe-submenu*.ps1
+     * 那几套探针）：窗口从 (400,200) 走到 (100,116)，那块菜单还留在 (657,231)；
+     * 最大化那一下同理（窗口整块换到可用区，菜单原地不动）。
+     *
+     * 屏幕上看到的就是用户报的那句"整个菜单没挂在「视图」那一栏下面" ——
+     * 偏多少 = 窗口挪了多少（实测那一次偏了 700 多像素）。
+     *
+     * 为什么不"跟着挪"：Qt 自己会把弹窗按屏幕位置钉住（父窗口一动它就把弹窗的
+     * x/y 改掉），硬掰既会闪、也不稳；收起来是系统原生菜单的做法。
+     * 详见 DropdownMenu.qml 里那个 Connections。
+     */
+    void hostGeometryChanged();
+
 protected:
     // 盯着窗口自己的移动 / 缩放 / 状态变化：缓存还原矩形、同步最大化状态
     bool eventFilter(QObject *watched, QEvent *event) override;
@@ -236,6 +264,16 @@ private:
 
     /* 内容控件摆到窗口里的某块位置，并让它**当场**按新尺寸渲染一帧（见 .cpp） */
     void placeContent(const QRect &contentInWindow);
+
+    /*
+     * 把宿主窗口当前的几何报出去（变了才发 hostGeometryChanged）。
+     *
+     * 两条路都会调它：窗口自己的 Move / Resize 事件（实时），
+     * 以及 120ms 的兜底轮询 —— 理由和 main.cpp 里给识别卡片量位置时一样：
+     * 这台机器上窗口移动并不总是产生 Move 事件，只靠事件会漏
+     * （漏一次就是"菜单还挂在原来的屏幕位置上"）。
+     */
+    void publishHostGeometry();
 
     /* dwell 到点：真的把内容按 4K 渲染一遍（见 prewarmMaximize） */
     void doPrewarm();
@@ -385,6 +423,18 @@ private:
 
     // 用户最后摆出来的常规窗口矩形，点还原时回到这里
     QRect m_normalRect;
+
+    /*
+     * 上一次报出去的宿主几何（见 publishHostGeometry）。
+     *
+     * 存在的意义就是"比一下变了没有"：一样就不发信号，界面上就不会白收一次菜单。
+     * 这个数只能由这一层给 —— QML 那侧的 Window.x / mapToGlobal 和宿主 QWidget
+     * 的几何不是同一套坐标系（见 main.cpp 里识别卡片那段）。
+     */
+    QRect m_hostGeometry;
+
+    /* 兜底轮询（见 publishHostGeometry）：120ms，只比四个数，代价可以忽略 */
+    QTimer m_hostGeometryPoll;
 
     // 展开时记下还原矩形，避免中途被 resize 事件污染
     QRect m_restoreAnchor;

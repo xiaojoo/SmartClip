@@ -3314,7 +3314,49 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
                   QStringLiteral("菜单挂在被点的那一栏下方（不是窗口最左边）"),
                   QStringLiteral("菜单 x=%1，「设置」那一栏 %2..%3")
                       .arg(menuLeft).arg(barLeft).arg(barLeft + barWidth));
-            dispatch(QStringLiteral("menu:设置"));   /* 再点一下同一条 = 收起来 */
+
+            /*
+             * 主窗口挪了，菜单要**收起来**（不能留在原地错位）。
+             *
+             * 这是用户报的那条"整个菜单没挂在「视图」那一栏下面"：菜单是**独立原生
+             * 窗口**（popupType: Popup.Window），屏幕位置在开出来那一刻就算死了 ——
+             * 主窗口后来一挪（拖窗口 / 最大化还原 / 系统贴边吸附 / 换显示器），
+             * 弹窗还钉在原来的屏幕位置上。实测偏过 700 多像素
+             * （见 build\probe-submenu*.ps1 那几套探针）。
+             *
+             * 判据：宿主窗口一移动，菜单必须已经收起来 —— 只要还开着，它就在
+             * 原来的屏幕位置上（离被点的那一栏越来越远），那正是用户看到的那一幕。
+             * 挪完再挪回去，后面的检查都按窗口原来的几何算。
+             */
+            {
+                QVariant moved;
+                const int dx = 137, dy = 61;
+                QMetaObject::invokeMethod(qmlRoot, "moveHostForTest",
+                                          Q_RETURN_ARG(QVariant, moved),
+                                          Q_ARG(QVariant, QVariant(dx)),
+                                          Q_ARG(QVariant, QVariant(dy)));
+                settle();
+
+                check(moved.toBool(), QStringLiteral("自检：宿主窗口挪了一段"));
+                check(!uiState().value(QStringLiteral("menuOpened")).toBool(),
+                      QStringLiteral("宿主窗口一移动，菜单就收起来（不会留在原地错位）"),
+                      QStringLiteral("菜单还开着（x=%1）")
+                          .arg(uiState().value(QStringLiteral("menuX")).toDouble()));
+
+                /* 挪回去 */
+                QMetaObject::invokeMethod(qmlRoot, "moveHostForTest",
+                                          Q_RETURN_ARG(QVariant, moved),
+                                          Q_ARG(QVariant, QVariant(-dx)),
+                                          Q_ARG(QVariant, QVariant(-dy)));
+                settle();
+            }
+
+            /*
+             * 菜单在上一步（挪窗口）里已经自己收起来了 —— 原来这里是"再点一下
+             * 同一条 = 收起来"，菜单已经关着的话那一发反而会把它重新打开，
+             * 所以改成明确收尾：这一段结束时菜单必须是关着的。
+             */
+            QMetaObject::invokeMethod(qmlRoot, "closeMenu");
             settle();
         }
 

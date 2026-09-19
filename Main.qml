@@ -2238,6 +2238,15 @@ Rectangle {
     function handleCommand(act) { dispatch(act) }
 
     /*
+     * 自检用：把宿主窗口挪一段（见 WindowHelper::moveHostForTest）。
+     *
+     * 走的是 QML 这一侧，不直接从 C++ 拿 WindowHelper 那个对象：
+     * engine->singletonInstance 拿到的实例和 QML 里用的不是同一个
+     * （见 src/SelfTest.cpp 里的记录）。量的是"宿主窗口一移动，菜单会不会收起来"。
+     */
+    function moveHostForTest(dx, dy) { return Win.moveHostForTest(dx, dy) }
+
+    /*
      * 界面侧绑定状态，给 `--self-test` 用（见 src/SelfTest.h）。
      *
      * 工具栏按钮能不能点、状态栏有没有拿到编辑器，这些都是 QML 绑定，
