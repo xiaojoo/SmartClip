@@ -1486,6 +1486,23 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
               QStringLiteral("分隔线热区整个落在顶栏和底栏之间"), geom);
         check(bottom > top,
               QStringLiteral("分隔线热区有实际高度（能拖得动）"), geom);
+
+        /*
+         * 水平方向：抓手必须正好压在树面板的右边缘上。
+         *
+         * splitterCenterX 是 splitterMouse.x 那条绑定的**当前值**，
+         * treeRightLive 是当场 mapToItem 重算的现值。绑定只读 width（没读位置
+         * 属性）时，"面板被布局挪走、宽度没变"这一类变化唤不醒它，两个值就
+         * 分叉 —— 抓手留在旧坐标上，用户看到的是"编辑区中间一动鼠标就变 <->，
+         * 按住还能拖左树宽度"（实测差出 380 px：树右边缘 290，热区 670）。
+         */
+        const double centerX = ui.value(QStringLiteral("splitterCenterX")).toDouble();
+        const double treeRight = ui.value(QStringLiteral("treeRightLive")).toDouble();
+        const QString horiz = QStringLiteral("热区中心 x=%1，树面板右边缘=%2")
+                                  .arg(centerX)
+                                  .arg(treeRight);
+        check(qAbs(centerX - treeRight) < 6.0,
+              QStringLiteral("分隔线热区压在树面板右边缘上（没漂到编辑区里）"), horiz);
     }
 
     dispatch(QStringLiteral("find"));

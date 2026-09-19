@@ -2448,6 +2448,16 @@ Rectangle {
              */
             splitterTop: splitterMouse.y,
             splitterBottom: splitterMouse.y + splitterMouse.height,
+            /*
+             * 抓手的水平位置 vs 树面板**实时**的右边缘。
+             *
+             * splitterCenterX 读的是 splitterMouse.x 那条绑定的当前值，
+             * treeRightLive 是当场算一遍 mapToItem 的现值。两者必须重合 ——
+             * 绑定停在旧坐标（mapToItem 不给绑定建依赖）时这两个会差出去，
+             * 用户看到的就是"编辑区中间一移动鼠标就变 <->"。
+             */
+            splitterCenterX: splitterMouse.x + splitterMouse.width / 2,
+            treeRightLive: folderTree.mapToItem(window.contentItem, folderTree.width, 0).x,
             midRowTop: window.mapFromItem(midRow, 0, 0).y,
             midRowBottom: window.mapFromItem(midRow, 0, 0).y + midRow.height,
             topBarHeight: topBar.height,
@@ -3385,8 +3395,20 @@ Rectangle {
                  * 间隙在 334..338），所以直接取它。
                  * FolderTree 自己的 anchors 边距不算进槽位里，
                  * 之前写 folderTreeWidth + 12 就是差了这一段。
+                 *
+                 * 前面那两行 `void (...)` 不是废话，是**给绑定建依赖**：
+                 * mapToItem() 是个函数调用，QML 不会替它记依赖，绑定里只读
+                 * width 的话，"面板被布局挪了位置但宽度没变"这一类变化就唤不醒
+                 * 它 —— 值会停在旧坐标上。下面文件末尾的 splitterMouse 就是吃
+                 * 这个亏：抓手（9px 宽、z:2000、光标 Qt.SplitHCursor）留在旧 x 上，
+                 * 用户看到的就是"编辑区中间一移动鼠标就变 <->，按住还能拖左树"
+                 * （实测：树右边缘在 290，热区在 670）。
+                 * x / y 和父级的位置属性都读一遍，位置一变绑定就重算。
                  */
-                readonly property real panelRight: mapToItem(window.contentItem, width, 0).x
+                readonly property real panelRight: {
+                    void (folderTree.x, folderTree.y, midRow.x, midRow.y)
+                    return mapToItem(window.contentItem, width, 0).x
+                }
 
                 rows: window.treeRows
                 selectedPath: window.selectedPath
