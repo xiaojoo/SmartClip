@@ -8,55 +8,14 @@
 #endif
 
 /*
- * QtWidgets 那些输入框的灰黑皮肤。
+ * 只剩一件事：关掉某个窗口自己的系统转场动画。
  *
- * 现在还留在 QtWidgets 这边的只剩"要用户敲字"的 QInputDialog（重命名 / 转到行 /
- * 参考线列，见 EditorController 的 askText 等）。提示 / 确认 / 未保存改动三处
- * 早先是 QMessageBox，现在都换成 QML 那侧的卡片了（qml/components/AskCard.qml），
- * 所以下面不再有 QMessageBox 的规则。
- *
- * 为什么在 C++ 里挂样式表，而不是等系统的深色主题：
- * 这些框是 QtWidgets 画的，取色走的是应用调色板；主界面之所以是深色，是因为
- * QML 自己刷的色，跟调色板没关系。所以裸的输入框永远是浅灰底，在深色窗口里
- * 像个贴错的补丁。
- *
- * 颜色取主界面同一套（见 Main.qml 的卡片/边框色），前景色显式写出来 ——
- * 只改背景的话，Fusion 仍会拿浅色的 WindowText 去画正文，深底黑字看不见。
- *
- * 注意只挂在具体的框上（setStyleSheet），别挂 qApp：QFileDialog 是原生对话框，
- * 全局样式表会影响它的布局。
+ * 这里以前还放着 QtWidgets 输入框（QInputDialog）的灰黑皮肤和深色标题栏 ——
+ * 那三个"要用户敲字"的框（重命名 / 转到行 / 参考线列）已经换成 QML 那侧的
+ * 自绘卡片（qml/components/AskCard.qml 的 askInput，颜色由组件自己写死），
+ * C++ 侧不再有输入框，皮肤和 applyDarkTitleBar 一起删了。
+ * 还留着的只有下面这个：主窗口最大化 / 还原那段要用（见 src/WindowHelper.cpp）。
  */
-inline const char *dialogStyle() {
-    return R"qss(
-QInputDialog {
-    background-color: #2b2d30;
-}
-QInputDialog QLabel {
-    color: #e6e8ea;
-    background: transparent;
-}
-QInputDialog QSpinBox {
-    color: #e6e8ea;
-    background-color: #1e2023;
-    border: 1px solid #4b4d4f;
-    padding: 3px 6px;
-}
-QInputDialog QPushButton {
-    color: #e6e8ea;
-    background-color: #3a3e42;
-    border: 1px solid #4b4d4f;
-    border-radius: 3px;
-    padding: 4px 14px;
-    min-width: 64px;
-}
-QInputDialog QPushButton:hover {
-    background-color: #45494e;
-}
-QInputDialog QPushButton:pressed {
-    background-color: #313438;
-}
-)qss";
-}
 
 /*
  * 关掉这个窗口的**系统转场动画**（最大化 / 还原那一段）。
@@ -91,41 +50,5 @@ inline HRESULT disableDwmTransitions(QWidget *w) {
 #else
     Q_UNUSED(w);
     return E_NOTIMPL;
-#endif
-}
-
-/*
- * 原生标题栏也刷成深色。
- *
- * 对话框的"身子"由 dialogStyle() 刷深色，可**标题栏是系统画的** —— 系统在
- * 浅色模式下它就是白的，跟深色身子拼在一起很突兀（用户就是这么报的）。
- * DwmSetWindowAttribute(DWMWA_USE_IMMERSIVE_DARK_MODE) 是系统给的正经口子，
- * 比自己画无边框标题栏省事，还能保留系统的 ✕ 和拖动。
- *
- * 调用时机：窗口句柄得先存在 —— 这里用 winId() 主动建一下，所以在 show() /
- * exec() 之前调也没问题。
- */
-inline void applyDarkTitleBar(QWidget *w) {
-#if defined(Q_OS_WIN)
-    if (!w)
-        return;
-#  ifndef DWMWA_USE_IMMERSIVE_DARK_MODE
-#    define DWMWA_USE_IMMERSIVE_DARK_MODE 20
-#  endif
-    const HWND hwnd = reinterpret_cast<HWND>(w->winId());
-    if (!hwnd)
-        return;
-    const BOOL dark = TRUE;
-    /* 20 是 Win10 20H1+ 的值，19 是更早版本的；哪个认就用哪个 */
-    if (FAILED(DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof(dark))))
-        DwmSetWindowAttribute(hwnd, 19, &dark, sizeof(dark));
-
-    /*
-     * 顺带把这个窗口的转场动画关掉（见 disableDwmTransitions 里的实测说明：
-     * 系统给新窗口默认带一段淡入，用户看到的就是"弹框闪动、像重新出现了一次"）。
-     */
-    disableDwmTransitions(w);
-#else
-    Q_UNUSED(w);
 #endif
 }

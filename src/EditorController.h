@@ -22,9 +22,8 @@ class QWidget;
  *     所以快捷键在这里注册，触发后统一发 commandRequested(name)，由 QML
  *     的分发器执行（QML 那边才知道查找栏这类界面要不要跟着动）。
  *
- *  2) 文件对话框 / 输入框。QFileDialog、QInputDialog 都是 QtWidgets 的东西，
- *     而主窗口本来就是 QWidget，用它们比在 QML 里搭一套可靠得多
- *     （原生对话框、中文按钮都是现成的）。
+ *  2) 文件对话框。QFileDialog 是 QtWidgets 的东西，而主窗口本来就是 QWidget，
+ *     用它比在 QML 里搭一套可靠得多（原生对话框、系统侧的目录树都是现成的）。
  *
  *     提示 / 确认框反过来：它们已经换成 QML 那套卡片（qml/components/AskCard.qml），
  *     这里只把话转成信号（见 alert）。原因是 QtWidgets 那个 QMessageBox 是
@@ -100,13 +99,6 @@ public:
     Q_INVOKABLE QString chooseFileDialog(const QString &title, const QString &filter = QString());
 
     /*
-     * 让用户填一行文本（重命名文件用）。
-     * 取消或原样返回时 QML 那边自己判断要不要动手。
-     */
-    Q_INVOKABLE QString askText(const QString &title, const QString &label,
-                                const QString &text);
-
-    /*
      * Markdown -> 一份**受控的小 HTML**（正文区那个"预览"用的，见
      * qml/components/MarkdownView.qml）。
      *
@@ -163,15 +155,12 @@ public:
      */
     Q_INVOKABLE void alert(const QString &title, const QString &text);
 
-    /* 转到行：让用户填一个行号；取消返回 -1 */
-    Q_INVOKABLE int askLineNumber(int maxLine, int currentLine);
-
     /*
-     * 字数参考线列号：让用户填"在第几个字后面画那条竖线"；取消返回 -1。
-     * 范围在 .cpp 里（1 ~ 500），比 EditorViewItem 的硬夹取范围窄一档 ——
-     * 输入框是给人用的，2000 列那种值只有设置文件里才会出现。
+     * "要用户敲字"的那三类（重命名 / 转到行 / 字数参考线列）也不再从这里走：
+     * 以前是 QInputDialog（系统标题栏 + 英文按钮），现在是 QML 那张带输入框的
+     * 卡片（qml/components/AskCard.qml 的 askInput）。卡片是异步的，值走回调，
+     * 所以这边连"返回一个值"的接口都不必存在。
      */
-    Q_INVOKABLE int askRulerColumn(int current);
 
     /* 轻量设置持久化（字号 / 自动换行 / 行号 / 上次打开的目录…） */
     Q_INVOKABLE QString recall(const QString &key, const QString &fallback = QString()) const;

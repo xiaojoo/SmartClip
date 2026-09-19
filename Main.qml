@@ -653,30 +653,36 @@ Rectangle {
      * 文件与文件夹操作（左树右键菜单 / "更多"菜单）
      * ---------------------------------------------------------------- */
 
-    /* 重命名一份 md：改的是真实文件，编辑器里开着的那个标签跟着换路径 */
+    /*
+     * 重命名一份 md：改的是真实文件，编辑器里开着的那个标签跟着换路径。
+     *
+     * 输入走自绘卡片（以前是原生 QInputDialog），所以是回调不是返回值 ——
+     * 和 deleteTreeFile 那一路 askConfirm 的写法一致。
+     */
     function renameTreeFile(path) {
         var oldName = Cmd.fileNameOf(path)
-        var name = Cmd.askText("重命名", "新文件名（.md 可以省略）", oldName)
-        if (name === "" || name === oldName)
-            return
+        askInput("重命名", "新文件名（.md 可以省略）", oldName, {}, function (name) {
+            if (name === "" || name === oldName)
+                return
 
-        var dir = path.substring(0, path.lastIndexOf("/"))
-        var newName = /\.md$/i.test(name) ? name : name + ".md"
-        var newPath = dir + "/" + newName
+            var dir = path.substring(0, path.lastIndexOf("/"))
+            var newName = /\.md$/i.test(name) ? name : name + ".md"
+            var newPath = dir + "/" + newName
 
-        if (!Store.renameFile(path, name)) {
-            Cmd.alert("重命名失败", "同名文件可能已经存在：" + newName)
-            return
-        }
+            if (!Store.renameFile(path, name)) {
+                Cmd.alert("重命名失败", "同名文件可能已经存在：" + newName)
+                return
+            }
 
-        /*
-         * 打开着的那个标签也要跟着换，否则下一次 Ctrl+S 会写回旧名字。
-         * 文档池是两栏共用的，所以哪一栏开着它、开在哪个标签上都不用管 ——
-         * 两边都会看到新名字。
-         */
-        applyToPanes(function (v) { v.updateDocumentPath(path, newPath) })
-        if (selectedPath === path)
-            selectedPath = newPath
+            /*
+             * 打开着的那个标签也要跟着换，否则下一次 Ctrl+S 会写回旧名字。
+             * 文档池是两栏共用的，所以哪一栏开着它、开在哪个标签上都不用管 ——
+             * 两边都会看到新名字。
+             */
+            applyToPanes(function (v) { v.updateDocumentPath(path, newPath) })
+            if (selectedPath === path)
+                selectedPath = newPath
+        })
     }
 
     /*
@@ -1735,11 +1741,15 @@ Rectangle {
         var v = activeView()
         if (!v || !v.hasDocument)
             return
-        var line = Cmd.askLineNumber(v.lineCount, v.cursorLine)
-        if (line > 0) {
-            v.gotoLine(line)
-            v.requestEditorFocus()
-        }
+        askInput("转到行", "行号（1 - " + v.lineCount + "）", v.cursorLine,
+                 { intMode: true, min: 1, max: v.lineCount },
+                 function (text) {
+                     var line = parseInt(text)
+                     if (!(line >= 1 && line <= v.lineCount))
+                         return
+                     v.gotoLine(line)
+                     v.requestEditorFocus()
+                 })
     }
 
     /* 换行 / 行号 / 空白字符是**视图级**设置，两栏一起改（见 applyToPanes） */
@@ -2177,11 +2187,15 @@ Rectangle {
                 applyToPanes(function (v) { v.rulerColumn = rc })
             return
         }
-        /* 自定义列号：弹一个整数输入框（原生 QInputDialog，见 Cmd.askRulerColumn） */
+        /* 自定义列号：弹一张带输入框的自绘卡片（见 window.askInput） */
         if (act === "rulerColumnAsk") {
-            var picked = Cmd.askRulerColumn(view.rulerColumn)
-            if (picked > 0)
-                applyToPanes(function (v) { v.rulerColumn = picked })
+            askInput("字数参考线", "在第几个字后面画竖线（1 - 500）", view.rulerColumn,
+                     { intMode: true, min: 1, max: 500 },
+                     function (text) {
+                         var picked = parseInt(text)
+                         if (picked >= 1 && picked <= 500)
+                             applyToPanes(function (v) { v.rulerColumn = picked })
+                     })
             return
         }
         if (act === "toggleFolding") {
@@ -2438,6 +2452,15 @@ Rectangle {
             saveAskOpened: saveAsk.opened,
             confirmAskOpened: confirmAsk.opened,
             noticeAskOpened: noticeAsk.opened,
+            /*
+             * 带输入框那张卡片（重命名 / 转到行 / 参考线列）。
+             *
+             * 自检要拿它确认：叫出来的是这张卡片，不是原生 QInputDialog；
+             * 再按一次「确定」看值有没有真的回到逻辑里（回调没接上就是点了没反应）。
+             */
+            inputAskOpened: inputAsk.opened,
+            inputAskTitle: inputAsk.title,
+            inputAskHasField: inputAsk.inputSpec !== null,
 
             /*
              * 分隔线热区的纵向范围（自检里量它有没有越界）。
@@ -2969,6 +2992,61 @@ Rectangle {
     AskCard {
         id: noticeAsk
         parent: window
+    }
+
+    /*
+     * 要用户敲字的那三类（重命名 / 转到行 / 字数参考线列）。
+     *
+     * 以前是原生 QInputDialog：系统标题栏 + 英文 OK/Cancel，和界面两套观感
+     * （用户拿三张截图对过：「这两个弹框，换成退出这样的自绘框」）。现在和
+     * 退出那张共用 AskCard，只是多一个输入框。三处都用这同一个实例 ——
+     * 同一时刻只可能开着一个是自然的（它们都由菜单/快捷键触发）。
+     */
+    AskCard {
+        id: inputAsk
+        /* 自检按名字找它那块原生窗（见 src/SelfTest.cpp 里"问句是一块小卡片"） */
+        objectName: "inputAskCard"
+        parent: window
+        /* 答完（含 Esc / 点外面）把键盘焦点还给编辑区 —— 只在此前它确实在编辑区时 */
+        onAnswered: {
+            if (!window.inputAskBackToEditor)
+                return
+            window.inputAskBackToEditor = false
+            var v = window.activeView()
+            if (v)
+                v.requestEditorFocus()
+        }
+    }
+
+    /* 弹输入卡片之前，编辑区有没有拿着键盘焦点（决定答完要不要还回去） */
+    property bool inputAskBackToEditor: false
+
+    /*
+     * 弹一张带输入框的卡片。
+     *
+     * then 是 function(文字)：点「确定」回内容（已 trim），取消 / Esc 回空串。
+     * 卡片是异步的，所以调用方原来那句 `var x = Cmd.askText(...)` 之后的逻辑
+     * 全得搬进这个函数里。
+     */
+    function askInput(title, hint, value, opts, then) {
+        /*
+         * 先把编辑区那个原生子窗口的键盘焦点摘掉，不然卡片里打不进字。
+         *
+         * 编辑区是真的 QScintilla 子窗口（不是 QML 画的），它拿着焦点时按键
+         * 根本进不了 QML —— 这条在查找栏上踩过一次（见 FindBar.focusField 的
+         * 记录：打开查找栏后打字全进了正文），换成自绘输入卡片又踩一次：
+         * 用户报的是"退格删不掉、数字也打不进"。
+         * 以前那个原生 QInputDialog 是 QtWidgets 的窗口，焦点切换是 QDialog
+         * 自己做的，换成卡片就得自己做。
+         */
+        var v = activeView()
+        window.inputAskBackToEditor = !!(v && v.hasEditorFocus())
+        if (v)
+            v.releaseEditorFocus()
+        inputAsk.askInput(title, hint, value, opts,
+                          [ { label: "确定", primary: true },
+                            { label: "取消" } ],
+                          then)
     }
 
     /* 关闭键那个问句：完全退出，还是收进托盘 */

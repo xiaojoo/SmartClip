@@ -1,19 +1,16 @@
 #include "EditorController.h"
 
-#include "DialogStyle.h"
 
 #include <QAbstractNativeEventFilter>
 #include <QAction>
 #include <QClipboard>
 #include <QCoreApplication>
 #include <QDesktopServices>
-#include <QDialog>
 #include <QDir>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QGuiApplication>
 #include <QImage>
-#include <QInputDialog>
 #include <QKeySequence>
 #include <QRegularExpression>
 #include <QSettings>
@@ -553,22 +550,6 @@ QString EditorController::chooseFileDialog(const QString &title, const QString &
     return path;
 }
 
-QString EditorController::askText(const QString &title, const QString &label,
-                                  const QString &text) {
-    QInputDialog dialog(m_widget);
-    dialog.setStyleSheet(QString::fromLatin1(dialogStyle()));  /* 灰黑底，见文件头的说明 */
-    dialog.ensurePolished();
-    dialog.adjustSize();
-    applyDarkTitleBar(&dialog);
-    dialog.setWindowTitle(title.isEmpty() ? tr("SmartClip") : title);
-    dialog.setLabelText(label);
-    dialog.setInputMode(QInputDialog::TextInput);
-    dialog.setTextValue(text);
-    if (dialog.exec() != QDialog::Accepted)
-        return QString();
-    return dialog.textValue().trimmed();
-}
-
 void EditorController::revealInExplorer(const QString &path) {
     if (path.isEmpty())
         return;
@@ -830,39 +811,13 @@ void EditorController::alert(const QString &title, const QString &text) {
     emit alertRequested(title, text);
 }
 
-int EditorController::askLineNumber(int maxLine, int currentLine) {
-    QInputDialog dialog(m_widget);
-    dialog.setStyleSheet(QString::fromLatin1(dialogStyle()));  /* 灰黑底，见文件头的说明 */
-    dialog.ensurePolished();
-    dialog.adjustSize();
-    applyDarkTitleBar(&dialog);
-    dialog.setWindowTitle(tr("转到行"));
-    dialog.setLabelText(tr("行号（1 - %1）：").arg(qMax(1, maxLine)));
-    dialog.setInputMode(QInputDialog::IntInput);
-    dialog.setIntRange(1, qMax(1, maxLine));
-    dialog.setIntStep(1);
-    dialog.setIntValue(qBound(1, currentLine, qMax(1, maxLine)));
-    if (dialog.exec() != QDialog::Accepted)
-        return -1;
-    return dialog.intValue();
-}
-
-int EditorController::askRulerColumn(int current) {
-    QInputDialog dialog(m_widget);
-    dialog.setStyleSheet(QString::fromLatin1(dialogStyle()));  /* 灰黑底，见文件头的说明 */
-    dialog.ensurePolished();
-    dialog.adjustSize();
-    applyDarkTitleBar(&dialog);
-    dialog.setWindowTitle(tr("字数参考线"));
-    dialog.setLabelText(tr("在第几个字后面画竖线（1 - 500）："));
-    dialog.setInputMode(QInputDialog::IntInput);
-    dialog.setIntRange(1, 500);
-    dialog.setIntStep(1);
-    dialog.setIntValue(qBound(1, current, 500));
-    if (dialog.exec() != QDialog::Accepted)
-        return -1;
-    return dialog.intValue();
-}
+/*
+ * "要用户敲字"的那三类（重命名 / 转到行 / 字数参考线列）以前在这里用
+ * QInputDialog 同步 exec()，系统标题栏 + 英文 OK/Cancel，和界面两套观感。
+ * 现在它们是 QML 那张带输入框的卡片（qml/components/AskCard.qml 的
+ * askInput，调用方在 Main.qml 的 window.askInput）—— 卡片是异步的，
+ * 值走回调，所以这里连"拿返回值"的接口都不需要了。
+ */
 
 QString EditorController::recall(const QString &key, const QString &fallback) const {    const QVariant value = QSettings().value(settingsKey(key));
     if (!value.isValid())

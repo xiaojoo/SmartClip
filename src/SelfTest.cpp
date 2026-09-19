@@ -220,7 +220,9 @@ void clickSceneNoHover(QQuickWindow *window, const QPoint &pos) {
  *   * 便签菜单为它拆成了两块窗口 —— qml/notes/NoteMenu.qml 那段"一步挪到位 /
  *     分帧挪都躲不掉"的记录；
  *   * 双击标题栏最大化改成"几何一次到位 + 界面淡入" —— src/WindowHelper.h 开头；
- *   * QtWidgets 那些输入框关掉 DWM 淡入 —— src/DialogStyle.h 的 applyDarkTitleBar。）
+ *   * 主窗口和那几块小卡片关掉 DWM 转场淡入 —— src/DialogStyle.h 的
+ *     disableDwmTransitions（以前 QtWidgets 的输入框也走这套，现在那些框
+ *     换成 qml/components/AskCard.qml 的自绘卡片了）。）
  *
  * 所以规矩只有一条：
  *
@@ -1125,6 +1127,63 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
                   .arg(unpacked(view->rulerEdgeColor()), 6, 16, QLatin1Char('0'))
                   .arg(unpacked(view->marginBack(2)), 6, 16, QLatin1Char('0'))
                   .arg(unpacked(view->styleFore(37)), 6, 16, QLatin1Char('0')));
+
+        /*
+         * 「自定义参考线列」那张输入卡片：从叫出来到值真的生效，整条异步链走一遍。
+         *
+         * 这一类以前是原生 QInputDialog，同步 return 一个值，接错不了；换成自绘
+         * 卡片之后"值怎么回到逻辑里"全靠回调 —— 回调没接上，界面上看着一切正常，
+         * 只是点确定没反应（用户那句"点了没反应"就是这么来的）。所以这里真的
+         * 按一次确定，然后去 Scintilla 那边量列号有没有变。
+         */
+        {
+            QObject *card = qmlRoot->findChild<QObject *>(QStringLiteral("inputAskCard"));
+            check(card != nullptr,
+                  QStringLiteral("带输入框的自绘卡片在界面上（inputAskCard）"));
+            if (card) {
+                dispatch(QStringLiteral("rulerColumnAsk"));
+                settle();
+                const QVariantMap askUi = uiState();
+                check(askUi.value(QStringLiteral("inputAskOpened")).toBool()
+                          && askUi.value(QStringLiteral("inputAskHasField")).toBool()
+                          && askUi.value(QStringLiteral("inputAskTitle")).toString()
+                             == QStringLiteral("字数参考线"),
+                      QStringLiteral("「自定义参考线列」叫的是自绘卡片，不是原生输入框"),
+                      QStringLiteral("开着=%1 有输入框=%2 标题=%3")
+                          .arg(askUi.value(QStringLiteral("inputAskOpened")).toBool())
+                          .arg(askUi.value(QStringLiteral("inputAskHasField")).toBool())
+                          .arg(askUi.value(QStringLiteral("inputAskTitle")).toString()));
+
+                card->setProperty("inputValue", QStringLiteral("137"));
+                /*
+                 * QML 里 `function answer(index)` 的参数没标类型，元对象登记的是
+                 * QVariant —— 用 Q_ARG(int, ...) 会匹配不到方法（调了等于没调，
+                 * 界面上看着一切正常，值却没回去），所以这里必须喂 QVariant。
+                 */
+                const bool clickedOk = QMetaObject::invokeMethod(card, "answer",
+                                                                 Q_ARG(QVariant, 0));  // 0 = 确定
+                settle();
+                check(clickedOk && view->rulerEdgeColumn() == 137,
+                      QStringLiteral("卡片里填 137 按确定，Scintilla 那边就是第 137 列"),
+                      QStringLiteral("按得到=%1 实际列号 %2")
+                          .arg(clickedOk)
+                          .arg(view->rulerEdgeColumn()));
+
+                /* 取消那一档：值不许偷偷改进去 */
+                dispatch(QStringLiteral("rulerColumnAsk"));
+                settle();
+                card->setProperty("inputValue", QStringLiteral("250"));
+                QMetaObject::invokeMethod(card, "answer", Q_ARG(QVariant, 1));   // 1 = 取消
+                settle();
+                check(view->rulerEdgeColumn() == 137,
+                      QStringLiteral("输入卡片点「取消」不改列号"),
+                      QStringLiteral("实际 %1").arg(view->rulerEdgeColumn()));
+
+                /* 后面几条量的都是 80 这一档，还回去 */
+                dispatch(QStringLiteral("rulerColumn:80"));
+                settle();
+            }
+        }
 
         QVariantList rulerPixels = view->rulerPixelStats();
         out() << "        （参考线：扫到 x=" << rulerPixels.value(0).toInt()
