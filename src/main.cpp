@@ -770,6 +770,23 @@ int main(int argc, char *argv[]) {
      */
     if (docDemo || (!noteTest && !translateTest && !docTest && !docE2e && !docQueue)) {
         host.resize(1460, 900);
+        /*
+         * 撑大之后要补一刀居中。
+         *
+         * Qt 给这个窗口最初的 640x480 摆的位置**是**屏幕居中的，而 `resize()` 只保住
+         * 左上角 —— 于是撑到 1460x900 之后中心往右下偏了 ((1460-640)/2, (900-480)/2)
+         * = (410, 210)，看着就是"启动不居中"（实测：可用区 3840x2112 上落在
+         * 1600,816，居中应当是 1190,606）。
+         *
+         * 按**可用区**（availableGeometry，扣掉任务栏）算，不是整屏：按整屏算会让
+         * 窗口往下压到任务栏那一条，底部那行状态栏就贴边了。
+         */
+        QScreen *centerOn = QGuiApplication::screenAt(host.geometry().center());
+        if (!centerOn)
+            centerOn = QGuiApplication::primaryScreen();
+        if (centerOn)
+            host.move(centerOn->availableGeometry().center()
+                      - QPoint(host.width() / 2, host.height() / 2));
         host.show();
     }
 
