@@ -613,6 +613,24 @@ public:
     Q_INVOKABLE int textLineHeight() const;
 
     /*
+     * 自检用：这个文档里最高的一行比最矮的一行高多少像素（0 = 每行一样高）。
+     *
+     * 卡的是"同一份文档内部"行高不齐（某一行用了一个偏大的样式）。文档**之间**
+     * 不齐是另一个根，见下面 offFamilyStyleSlots()。
+     */
+    Q_INVOKABLE int lineHeightSpread() const;
+
+    /*
+     * 自检用：样式表里有多少格的字体族**不是**正文字体。
+     *
+     * 必须恒为 0。不为 0 的那些格会按**应用字体**量高度（本机 YaHei UI 9pt = 16px，
+     * Consolas 12px = 15px），而 Scintilla 的行高取整张表里最大的 ascent+descent ——
+     * 一格用不到的空样式就能把全篇每行撑高 1px，行号栏和正文跟着错开。
+     * 见 EditorViewItem.cpp 的 unifyStyleFonts()。
+     */
+    Q_INVOKABLE int offFamilyStyleSlots() const;
+
+    /*
      * 自检用：正文区（不含行号栏/折叠栏）里"纯白"像素的个数。
      *
      * 专门查"底色被刷成白色"这类问题：正文色是 #d6d7da、底色是 #1e1f22，两者
@@ -1037,6 +1055,12 @@ private:
     void applyStyle();
     /* 字体/前景/底色写进 STYLE_DEFAULT 并刷满样式表（见 .cpp 里的说明） */
     void applyDefaultStyle();
+    /*
+     * 把整张样式表（0..255）的字体统一成正文字体（见 .cpp 里的说明：没设过字体的格会
+     * 被按应用字体量高度，而 Scintilla 的行高取整张表最大的 ascent+descent，一格偏高
+     * 就全篇每行被撑高 1px、序号和正文错开）。
+     */
+    void unifyStyleFonts();
     /* 文档位置 pos 落在第几条校验问题里（-1 = 没有；同一行上有问题也认） */
     int checkIssueAt(long pos) const;
     /* 一条校验问题的悬浮说明（HTML，QToolTip 用，见 .cpp） */

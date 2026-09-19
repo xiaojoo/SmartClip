@@ -649,6 +649,91 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
           QStringLiteral("实际 %1（应为 %2）").arg(view->styleSize(33)).arg(view->stylePointSize()));
 
     /*
+     * 行号栏两条（用户报的）：
+     *   ① 「1-10、10-100、1000 以上，栏宽会被撑开」→ 宽度按**固定 4 位**算，
+     *      不随行数变（见 EditorViewItem::applyMargins）；
+     *   ② 「有些文件序号的行高和正文不一致，点进去还会变」「打开后就明显和上一文档
+     *      不一样」→ 根因是样式表里"没设过字体"的格子被按**应用字体**量高度，而行高
+     *      取整张表最大的 ascent+descent（见 EditorViewItem::unifyStyleFonts）。下面
+     *      三条：栏宽度量、同一文档内各行等高、换两轮语言回来行高不变。
+     *
+     * 这段自己存/还原正文，别把后面几条要用的 sample 换掉。
+     */
+    {
+        const QString savedText = view->currentText();
+
+        const int widthAt12 = [&] {
+            view->setText(QStringLiteral("int a = 1;\r\n").repeated(12));
+            return view->marginWidth(0);
+        }();
+        view->setText(QStringLiteral("int a = 1;\r\n").repeated(1200));
+        const int widthAt1200 = view->marginWidth(0);
+        check(widthAt12 == widthAt1200 && widthAt12 > 0,
+              QStringLiteral("行号栏宽度不随行数撑开（12 行 / 1200 行一样宽）"),
+              QStringLiteral("%1 px → %2 px").arg(widthAt12).arg(widthAt1200));
+
+        /* 掺进注释、预处理、字符串：让文档里真的出现好几种样式号 */
+        QString mixed;
+        for (int i = 1; i <= 60; ++i) {
+            if (i % 7 == 0)      mixed += QStringLiteral("// 注释一行 %1\r\n").arg(i);
+            else if (i % 5 == 0) mixed += QStringLiteral("#include <memory>\r\n");
+            else if (i % 3 == 0) mixed += QStringLiteral("const char *s = \"abc%1\";\r\n").arg(i);
+            else                 mixed += QStringLiteral("int value%1 = 0;\r\n").arg(i);
+        }
+        view->setText(mixed);
+        check(view->lineHeightSpread() == 0,
+              QStringLiteral("混着注释/预处理/字符串的文件里各行行高一致"),
+              QStringLiteral("最高与最矮差 %1 px").arg(view->lineHeightSpread()));
+
+        /*
+         * 换两轮语言再换回来，行高必须一点没变（真界面实测到的那条）。
+         *
+         * QScintilla 每次装卸 lexer 都会 SCI_STYLERESETDEFAULT + SCI_STYLECLEARALL
+         * 把整张样式表打回内置默认（**字体族为空**），然后只给"有描述的"样式补回字体
+         * （qsciscintilla.cpp 的 setLexer）。markdown 用不到 22 号往后 —— 那些格空着
+         * 不是"跟随正文"，Qt 平台会拿**应用字体**画（本机 Microsoft YaHei UI 9pt，
+         * ascent+descent+1 = 16px，Consolas 12px 是 15px）。而 Scintilla 的行高 =
+         * 整张表里最大的 ascent+descent + 额外行距（ViewStyle::FindMaxAscentDescent，
+         * 用没用到都算）→ 那一份文档每一行 17px 变 18px，行号栏按 maxAscent 画数字、
+         * 正文按自己样式的 ascent 画字，序号和正文错开 1px。
+         *
+         * 用户报的两条症状都在这上面：「有些文件序号的行高和正文不一致」+「打开后就
+         * 明显和上一文档不一样」（表是不是空的取决于上一步走过哪条路）。
+         */
+        {
+            const int baseHeight = view->textLineHeight();
+            const QString mdPath = dir.filePath(QStringLiteral("lineheight.md"));
+            const QString pyPath = dir.filePath(QStringLiteral("lineheight.py"));
+            writeFile(mdPath, QByteArrayLiteral("# 标题\r\n\r\n正文一行\r\n"));
+            writeFile(pyPath, QByteArrayLiteral("def f():\r\n    return 1\r\n"));
+
+            const int mdTab = view->openFile(mdPath);
+            const int pyTab = view->openFile(pyPath);
+            view->activateDocument(mdTab);   // python → markdown：这一换就把表清成空字体
+
+            check(mdTab >= 0 && pyTab >= 0 && view->language() == QLatin1String("markdown"),
+                  QStringLiteral("换回 markdown 标签（用于行高一致性检查）"),
+                  QStringLiteral("md 标签 %1 / py 标签 %2，当前语言 %3")
+                      .arg(mdTab)
+                      .arg(pyTab)
+                      .arg(view->language()));
+            check(view->offFamilyStyleSlots() == 0,
+                  QStringLiteral("换过两轮语言后样式表里没有非正文字体的格"),
+                  QStringLiteral("还有 %1 格不是正文字体").arg(view->offFamilyStyleSlots()));
+            check(view->textLineHeight() == baseHeight,
+                  QStringLiteral("换过两轮语言回来，行高和被换走之前一致"),
+                  QStringLiteral("%1 px → %2 px").arg(baseHeight).arg(view->textLineHeight()));
+
+            /* 临时标签按从大到小的下标关掉，别把后面几条要用的 sample 挤位 */
+            view->closeDocument(pyTab);
+            view->closeDocument(mdTab);
+            view->activateDocument(view->indexOfPath(srcPath));
+        }
+
+        view->setText(savedText);
+    }
+
+    /*
      * "设置里写 12"必须就是"12 像素"，不是 12 点。
      *
      * 踩过：直接用 setPointSize(12) 给 QFont，96 DPI 下渲染出来是 16 像素 ——

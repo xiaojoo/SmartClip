@@ -721,6 +721,41 @@ void EditorViewItem::applyDefaultStyle() {
     m_sci->setColor(m_textColor);
 }
 
+int EditorViewItem::offFamilyStyleSlots() const {
+    if (!m_sci)
+        return 0;
+
+    const QString base = uiFont().family();
+    int n = 0;
+    for (int s = 0; s <= 255; ++s)
+        if (styleFontName(s) != base)
+            ++n;
+    return n;
+}
+
+void EditorViewItem::unifyStyleFonts() {
+    if (!m_sci)
+        return;
+
+    const QFont mono = uiFont();
+    const QByteArray family = mono.family().toUtf8();
+    const long baseSize = stylePointSize();
+    const long commentSize = qRound(commentFont().pointSizeF() * 100.0);
+
+    for (int s = 0; s <= 255; ++s) {
+        /* 斜体那一档是注释（commentFont 一直斜体），字号跟着注释的设置走 */
+        const bool commentSlot = m_sci->SendScintilla(QsciScintillaBase::SCI_STYLEGETITALIC, s)
+                                 && m_commentFontPixelSize > 0;
+        const long want = commentSlot ? commentSize : baseSize;
+
+        if (styleFontName(s) == mono.family() && styleSize(s) == want)
+            continue;
+
+        m_sci->SendScintilla(QsciScintillaBase::SCI_STYLESETFONT, s, family.constData());
+        m_sci->SendScintilla(QsciScintillaBase::SCI_STYLESETSIZEFRACTIONAL, s, want);
+    }
+}
+
 void EditorViewItem::applyStyle() {
     if (!m_sci)
         return;
@@ -730,9 +765,10 @@ void EditorViewItem::applyStyle() {
     /*
      * 语法高亮必须在 STYLECLEARALL 之后重新装一次。
      *
-     * 样式表是**按文档**存的，STYLECLEARALL 会把 lexer 刷进去的颜色一起抹掉；
-     * 换文档时也一样（新文档没有样式）。所以这里无条件重装，别做"已经装过"
-     * 的短路。
+     * 一张样式表管这一栏里**所有**标签（Scintilla 的 ViewStyle 挂在编辑器上，不是
+     * 挂在文档上，见 Editor.h 的 `ViewStyle vs`），字符身上的样式号才是按文档存的。
+     * STYLECLEARALL 会把 lexer 刷进去的颜色一起抹掉，换文档时也一样（新文档没有
+     * 样式）。所以这里无条件重装，别做"已经装过"的短路。
      *
      * 注意顺序：它内部的 detachLexer()/setLexer() 还会再来一次 STYLECLEARALL，
      * 所以行号栏 / 折叠栏的颜色必须放在它**后面**重刷（见 applyMarginTheme）。
@@ -759,12 +795,37 @@ void EditorViewItem::applyStyle() {
         applyDefaultStyle();
     }
 
+    /*
+     * 把整张样式表的字体统一成正文字体（行高的根，实测出来的）。
+     *
+     * Scintilla 的行高 = maxAscent + maxDescent + 额外行距，而 maxAscent/maxDescent
+     * 是遍历**整张表 256 个样式**取最大（ViewStyle.cpp 的 FindMaxAscentDescent）——
+     * 跟这一格在文档里用没用到无关。所以只要有一格不是正文字体，全篇每一行都被它撑高。
+     *
+     * 踩到的就是这种格子：QScintilla 装/卸 lexer 时会 SCI_STYLERESETDEFAULT +
+     * SCI_STYLECLEARALL，把**没有描述的**那些样式号（markdown 只到 21 号，22 号往后全空）
+     * 留在"没设过字体"的状态，而没设过字体不等于跟随正文 —— Qt 平台会按**应用字体**量它。
+     * 本机应用字体是 Microsoft YaHei UI 9pt，ascent+descent+1 = 16px；正文 Consolas
+     * 12px 只有 15px。于是那一份文档每行 17px 变 18px，而且行号栏的数字按 maxAscent
+     * 画、正文按自己样式的 ascent 画，序号和正文错开 1px。
+     *
+     * 真界面实测（换标签 335 次）：同一栏里 17 px 和 18 px 并存，18 px 的那几份就是
+     * 表里 22 号往后还挂着 YaHei UI 的；自检里稳定复现路径是 markdown → cpp → 换回
+     * markdown（换回来那一发 17 → 18）。哪份文档中招取决于这张表上一步走过哪条路，
+     * 这正是用户报的「有些文件序号的行高和正文不一致」「打开后就明显和上一文档不一样」
+     * 「点进去又变」。
+     *
+     * 统一成"字体族一律正文、字号正文/注释两档"之后，行高只由正文字体决定，不再
+     * 有历史路径依赖。粗体、斜体是 weight/italic 两个独立字段，这里不碰。
+     */
+    unifyStyleFonts();
+
     applyMargins();
 
     /*
-     * 行高放在最后：自然行高是"按当前所有样式里最大的 ascent+descent"算的，
-     * 换字号 / 换字体 / 装 lexer（关键字变粗体、注释变斜体）都会改这个数，
-     * 所以每次刷完样式都要按倍数重算一遍额外上下空白。
+     * 行高放在最后：Scintilla 的行高 = 整张样式表里最大的 ascent+descent + 额外行距，
+     * 换字号 / 换字体 / 装 lexer 都会改那个最大值（上面 unifyStyleFonts 刚把表统一
+     * 回正文字体），所以每次刷完样式都要按倍数重算一遍额外上下空白。
      */
     applyLineSpacing();
 
@@ -1479,22 +1540,21 @@ void EditorViewItem::applyMargins() {
         return;
 
     const int lines = qMax(1, lineCount());
-    const int digits = QString::number(lines).size() + 1;
     const QFontMetrics fm(uiFont());
 
     /*
-     * 行号栏宽度 = 一点左边空档 + 位数 × 字符宽。
+     * 行号栏宽度 = 一点左边空档 + **固定 4 位** × 字符宽。
      *
-     * 位数写「实际位数 + 1」：多预留一位，行数从 9 涨到 10、99 涨到 100 时
-     * 栏宽不跳，正文不会跟着挪一下（跳变只发生在跨过预留的那一位时）。
+     * 以前是「实际位数 + 1」：于是栏宽跟着行数一档一档撑开 —— 10 行、100 行、
+     * 1000 行的文件各是一种宽度，编辑时行数跨过那一位正文还会整体横移一下。
+     * 现在按 4 位定死（9999 行以内**恒定**，不管文件长短、不管当前滚到第几行），
+     * 只有真超过 9999 行才进一位（5 位、6 位…）—— 数字一律右对齐画，进位是为了
+     * 不裁掉最高位，主流编辑器也是"宁可加宽也不截数字"。
      *
-     * 前面那个常数原来是 10，现在收到 4：行号要贴着卡片左边缘（见
-     * EditorArea 的 cardLeftInset），这一段空档直接决定行号离左边有多远。
-     * 数字在栏里是**右对齐**画的（MarginView.cpp：xpos = 栏右边 -
-     * 数字宽 - marginNumberPadding），所以实际看到的左边空档 =
-     * 这个常数 + marginNumberPadding 里那 3px + 没用到的那几位（每位约 7px）。
-     * 实测（48 行的文件）：两位数行号的墨点左边缘离编辑器左边缘约 10px。
+     * 4 位这个档 = 每位约 7px × 4 + 左边空档 4 ≈ 32px：比原来 12 行的小文件（25px）
+     * 宽 7px，换来的是"开任何文件、编辑到任何行数，这一栏都不动"。
      */
+    const int digits = qMax(4, QString::number(lines).size());
     const int width = 4 + digits * fm.horizontalAdvance(QLatin1Char('9'));
 
     m_sci->SendScintilla(QsciScintillaBase::SCI_SETMARGINWIDTHN, 0,
@@ -1650,18 +1710,24 @@ void EditorViewItem::themeLexer(QsciLexer *lexer) {
 
     for (int style = 0; style <= 127; ++style) {
         const QString description = lexer->description(style);
+
+        /*
+         * 字体**每个样式号都要给**，不能只给"有描述的"那一部分。
+         *
+         * 只给有描述的那些，剩下的样式号留着 lexer 自带的默认字体，字号和正文不是一套。
+         * （真正会决定整篇行高的是 applyStyle() 末尾的 unifyStyleFonts() —— 见那里：
+         * 没设过字体的格子会退化成**应用字体**，而行高取整张表里最大的 ascent+descent。）
+         */
+        lexer->setFont(isCommentDescription(description)   ? italic
+                       : isKeywordDescription(description) ? bold
+                                                           : mono,
+                       style);
+
         if (description.isEmpty())
             continue;
 
         lexer->setColor(themeColorFor(description), style);
         lexer->setPaper(m_paperColor, style);
-
-        if (isCommentDescription(description))
-            lexer->setFont(italic, style);
-        else if (isKeywordDescription(description))
-            lexer->setFont(bold, style);
-        else
-            lexer->setFont(mono, style);
     }
 }
 
@@ -2302,14 +2368,20 @@ int EditorViewItem::lineHeight() const {
 }
 
 int EditorViewItem::naturalLineHeight() const {
-    if (m_sci && hasDocument())
-        return qMax(0, m_sci->textHeight(0) - m_sci->extraAscent() - m_sci->extraDescent());
     /*
-     * 没文档：按字体度量估一份。
+     * 一律按**正文字体**度量算，不要读 `textHeight(0)`。
+     *
+     * 这里原来在"有文档"时取第 0 行的高度减掉额外行距。问题是那量的是**第 0 行**：
+     * 第 0 行是个大字号样式（markdown 的标题、单独设过字号的注释、或某个没被配色
+     * 覆盖到的样式号）时，估出来的"自然行高"就带着那一行的特殊高度 —— 而
+     * extraAscent/extraDescent 是**全局**的，于是整个文档每一行的额外行距都被它带偏；
+     * 点进去触发重新着色、第 0 行的样式换了，数值又跟着变（用户报的"序号行高不一致、
+     * 点击进去会变动"）。
      *
      * descent 要 +1 才和 Scintilla 一致 —— PlatQt.cpp 的 SurfaceImpl::Descent()
-     * 就是这么给的（"Qt doesn't include the baseline in the descent, so add it"），
-     * 少这 1px 的话设置面板上算出来的 px 会比编辑器里真实的行高少 1。
+     * 就是这么给的（"Qt doesn't include the baseline in the descent, so add it"）。
+     * 字体度量和 Scintilla 用的是同一份上升/下降值，普通行的自然行高估出来和实际
+     * 一样（Consolas 12px = 15px）。
      */
     const QFontMetrics fm(uiFont());
     return fm.ascent() + fm.descent() + 1;
@@ -4555,6 +4627,32 @@ int EditorViewItem::textLineHeight() const {
     if (!m_sci || !hasDocument())
         return 0;
     return m_sci->textHeight(0);
+}
+
+/*
+ * 自检用：整个文档里"最高的行"比"最矮的行"高多少像素（0 = 每行一样高）。
+ *
+ * 不为 0 就说明有的行用了一个字号更大的样式：行号栏按行号样式的高度画，正文那一行
+ * 却高出一截，看上去就是"序号和正文对不齐 / 行高不一致"（用户报的那条）。
+ *
+ * 只看前 2000 行 —— 这条要在自检里跑，全量遍历大文件会拖慢自检。
+ */
+int EditorViewItem::lineHeightSpread() const {
+    if (!m_sci || !hasDocument())
+        return 0;
+
+    const int lines = qMin(lineCount(), 2000);
+    int low = 0, high = 0;
+    for (int i = 0; i < lines; ++i) {
+        const int h = m_sci->textHeight(i);
+        if (h <= 0)
+            continue;
+        if (low == 0 || h < low)
+            low = h;
+        if (h > high)
+            high = h;
+    }
+    return high - low;
 }
 
 /* 自检用：正文区里的纯白像素数（见头文件里的说明） */
