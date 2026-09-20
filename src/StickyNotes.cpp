@@ -2010,7 +2010,7 @@ bool StickyNotes::groupWith(StickyNote *note, const QList<StickyNote *> &others)
  * groupWith 和 dropNoteOn 都走这里 —— 归堆的逻辑只有这一份。
  */
 bool StickyNotes::applyGroupInto(const QList<StickyNote *> &ordered, StickyNoteWindow *front,
-                                 const QPoint *anchorAt, bool deferHide) {
+                                 const QPoint *anchorAt) {
     if (ordered.size() < 2 || !front || !front->note())
         return false;
 
@@ -2059,7 +2059,7 @@ bool StickyNotes::applyGroupInto(const QList<StickyNote *> &ordered, StickyNoteW
      * 最上面那张正好是空白的。点标签也只是把另一张抬到最上面，底下那几层
      * 照旧糊着。
      */
-    showOnlyInGroup(groupId, front, deferHide);
+    showOnlyInGroup(groupId, front);
 
     {
         QStringList members;
@@ -2329,8 +2329,7 @@ bool StickyNotes::dropNoteOn(StickyNote *note, StickyNote *target) {
      * 用**卡片**的左上角（窗口左边那条标签条不算便签的地方）。
      */
     const QPoint anchor = landing->cardRect().topLeft();
-    /* deferHide = true：这是"刚松手那一下"，12~37ms 的 hide 推到下一回合（见那里） */
-    return applyGroupInto(ordered, landing, &anchor, true);
+    return applyGroupInto(ordered, landing, &anchor);
 }
 
 bool StickyNotes::isDragging(StickyNote *note) const {
@@ -2458,6 +2457,17 @@ bool StickyNotes::switchGroupTab(const QString &noteId) {
     target->rememberGeometry();
 
     /* 三、其余几块现在才收（见 showOnlyInGroup） */
+    /*
+     * 收之前先把新露头那块的**这一帧真交出去**。
+     *
+     * 上面那两下 grabFramebuffer + repaint 只是让 Qt 画进它自己的缓冲，原生
+     * 窗口的那一帧还要过一遍事件回合才交到 DWM。不补这一下就是：旧的那张已经
+     * 藏了、新的还没上屏，屏幕上约 3 帧整块卡片都不在（露的是深色桌面）——
+     * 用户报的"点标签有一帧黑影"。过回合的代价是点击 handler 里多十几毫秒，
+     * 点标签没有连续动作要跟，花得起。
+     */
+    for (int i = 0; i < 3; ++i)
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
     showOnlyInGroup(groupId, target);
 
     /*
@@ -2495,8 +2505,7 @@ bool StickyNotes::switchGroupTab(const QString &noteId) {
  * keep 是"要留下的那一块"，给空就是按 activeInGroup 现挑一块。它自己不在这一摞
  * 里（或者这一摞只剩它一块）时什么都不做。
  */
-void StickyNotes::showOnlyInGroup(const QString &groupId, StickyNoteWindow *keep,
-                                  bool deferHide) {
+void StickyNotes::showOnlyInGroup(const QString &groupId, StickyNoteWindow *keep) {
     if (groupId.isEmpty())
         return;
     const QList<StickyNoteWindow *> members = groupMembers(groupId);
@@ -2514,39 +2523,23 @@ void StickyNotes::showOnlyInGroup(const QString &groupId, StickyNoteWindow *keep
         if (!member || member == shown)
             continue;
         /*
-         * **只有"刚松手那一下"才把藏 + 摆推到下一个事件回合**（deferHide）。
+         * **当场藏**，不推到下一回合。两笔账都量过，是这一句两头都碰不得：
          *
-         * 推的理由（量出来的账，9 次拖放）：`QWidget::hide()` 一块正露着的便签
-         * 窗口要 **12~37ms**（144Hz 下 2~5 帧），松手那一拍当然看得出顿；先把
-         * 露头那张抬起来、把这一帧推出去，下一回合再去藏旧的。
+         *  * 推到下一回合（旧窗口多露约 46ms）：它压在新露头那块**下面**，而新
+         *    那块左边那 42 宽是透明的 —— 旧纸会从那条缝里透出来，实测整段过渡
+         *    拖到 6 帧，中间还有一帧是**旧纸的颜色**（`粉 -> 黄 -> 粉`）；
+         *  * 当场藏：屏幕上会露出约 3 帧**整块卡片都不在**（新那块还没真上屏，
+         *    露的是深色桌面，亮度 176 -> 28 -> 185）—— 就是用户报的"一帧黑影"。
          *
-         * 不推的理由（同一套尺子量的，见 build/tg/tab）：**点标签**那一趟要是
-         * 也推迟，旧那块窗口就多露约 46ms —— 它和新那块坐在**同一个矩形**上，
-         * 而标签条那 42 宽是**透明**的，旧窗口"还探着的那一格"就从新窗口没画
-         * 东西的缝里透出来。逐帧表：纸已经换对了，色块却连着 7 帧乱跳
-         * `[0,1] -> [1] -> [] -> [0]`。点标签没有连续动作要跟，20ms 的 CPU 花
-         * 在这里看不见，所以这一趟**当场藏**。
+         * 黑影那一头改在 switchGroupTab 里治：藏之前先让新那块的这一帧真的呈现
+         * 出去（见那里的 processEvents）。这里保持当场藏。
          */
-        if (deferHide) {
-            /* 以 member 当 context：这一块在下一回合之前被销毁的话，这一发自动作废 */
-            QTimer::singleShot(0, member, [member, card] {
-                member->hide();
-                notesLog(QStringLiteral("    探针 hide 完"));      /* 临时，查完删 */
-                member->placeAt(card);
-                notesLog(QStringLiteral("    探针 placeAt 完"));  /* 临时，查完删 */
-            });
-            notesLog(QStringLiteral("  收起 %1（%2）排到下一回合")
-                         .arg(member->note() ? member->note()->id().left(4)
-                                             : QStringLiteral("?"),
-                              noteBrief(member)));
-        } else {
-            member->hide();
-            member->placeAt(card);
-            notesLog(QStringLiteral("  收起 %1（%2）当场藏掉")
-                         .arg(member->note() ? member->note()->id().left(4)
-                                             : QStringLiteral("?"),
-                              noteBrief(member)));
-        }
+        member->hide();
+        member->placeAt(card);
+        notesLog(QStringLiteral("  收起 %1（%2）当场藏掉")
+                     .arg(member->note() ? member->note()->id().left(4)
+                                         : QStringLiteral("?"),
+                          noteBrief(member)));
         /*
          * 藏完那一块**立刻把露头那张抬回来**。同组几块窗口的位置和尺寸是一模
          * 一样的（都摆在同一格、窗宽也一样），谁在最上面完全由窗口顺序决定 ——

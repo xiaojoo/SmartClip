@@ -681,13 +681,12 @@ public:
      * 就按 activeInGroup 现挑）。桌面上"一摞 = 一张纸 + 左边那排标签"就靠它：
      * 点标签换纸（switchGroupTab）和从文件恢复（start）都走这里。
      *
-     * deferHide 只给"刚松手那一下"用（dropNoteOn）：藏一块正露着的窗口要
-     * 12~37ms，别卡在拖动那条路上，所以推到下一个事件回合。别的入口**不许**
-     * 传 true —— 旧窗口多露一回合，它的色块就会从新窗口那条透明的标签列里
-     * 透出来（实测连着 7 帧乱跳）。理由全在 .cpp 那段注释里。
+     * 藏是**当场**的，不推到下一回合 —— 两头都量过：推迟会让旧那块窗口多露约
+     * 46ms，而它压在新块下面、新块左边那 42 宽是透明的，旧纸会从那条缝里透出
+     * 来（过渡拖到 6 帧，中间夹一帧旧纸的颜色）。黑影那一头改由 switchGroupTab
+     * 在收之前先把新块这一帧真呈现出去解决。两笔账都写在 .cpp 那段里。
      */
-    void showOnlyInGroup(const QString &groupId, StickyNoteWindow *keep = nullptr,
-                         bool deferHide = false);
+    void showOnlyInGroup(const QString &groupId, StickyNoteWindow *keep = nullptr);
     /*
      * 点左边标签条上的一个色块：那一块换上来（其余几块收成色块）。
      *
@@ -834,11 +833,9 @@ private:
      * 把 ordered 这一串便签归成一摞（front 是露头那块，anchorAt 是整摞左上角
      * 落在哪），并摆成层叠的样子。groupWith / dropNoteOn / stackAll 都走这里
      * —— 归堆的逻辑只有这一份。
-     *
-     * deferHide 只有"刚松手那一下"（dropNoteOn）传 true：见 showOnlyInGroup。
      */
     bool applyGroupInto(const QList<StickyNote *> &ordered, StickyNoteWindow *front,
-                        const QPoint *anchorAt = nullptr, bool deferHide = false);
+                        const QPoint *anchorAt = nullptr);
     /* "把 dragged 放下去会落到谁身上"（同一摞 / 不在头部那条上都不算） */
     StickyNoteWindow *dropTargetFor(StickyNoteWindow *dragged, const QPoint &at) const;
     /* 把"落点候选中"的标记从所有便签上抹掉 */
