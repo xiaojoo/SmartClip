@@ -170,6 +170,13 @@ Rectangle {
      */
     property bool hasTabStrip: false
     property real tabStripWidth: 0
+    /*
+     * 色块多大、选中的那块往外伸多少 —— 从 C++ 现读（chipMetrics），
+     * **别在这里抄死数字**：早先这里写的是 `var w = on ? 34 : 0`，C++ 那边
+     * 把标签条改宽之后界面不跟，选中那块伸出去的一截就被窗口左边裁掉。
+     */
+    property real chipSizePx: 28
+    property real chipProtrudePx: 8
     /* 自检用：标签条上有几个色块（自己那块也在里面） */
     readonly property int tabCount: groupTabs.length
     /*
@@ -192,9 +199,16 @@ Rectangle {
         var on = tabs ? tabs.length > 1 : false
         if (hasTabStrip !== on)
             hasTabStrip = on
-        var w = on ? 34 : 0
+        var m = noteWindow ? noteWindow.chipMetrics() : null
+        var w = (on && m) ? m.strip : 0
         if (tabStripWidth !== w)
             tabStripWidth = w
+        if (m) {
+            if (chipSizePx !== m.chip)
+                chipSizePx = m.chip
+            if (chipProtrudePx !== m.protrude)
+                chipProtrudePx = m.protrude
+        }
     }
 
     Connections {
@@ -380,17 +394,8 @@ Rectangle {
             noteWindow.setOpacityPercent(parseInt(act.substring(8)))
             return true
         }
-        /*
-         * 组合：菜单里"与…组合"那一条点下去就是它（act 形如
-         * "group:<便签 id>"）。走的是和 C++ 直调同一条路 —— 菜单只负责把
-         * "和哪一块"告诉这边，怎么摆那一摞是 StickyNotes 的事。
-         */
-        if (act.indexOf("group:") === 0) {
-            var mate = findNoteById(act.substring(6))
-            if (!mate)
-                return false
-            return Notes.groupWith(noteData, [mate])
-        }
+        /* 「与…组合」那一条连同 "group:<id>" 这条分支一起删了（用户：不要这个
+         * 选项）：归到一摞走菜单里「全部叠成一摞」，或者拖一块到另一块身上。 */
         if (act === "ungroup") { return Notes.ungroup(noteData) }
         if (act === "pin") { noteWindow.toggleStaysOnTop(); return true }
         if (act === "lock") { noteWindow.setLocked(!noteWindow.locked); return true }
@@ -400,19 +405,8 @@ Rectangle {
         return false
     }
 
-    /* 按便签 id 找到那条数据（菜单里"与…组合"点了一条，拿到的就是这个 id） */
-    function findNoteById(id) {
-        if (!Notes || !id)
-            return null
-        var all = Notes.noteList()
-        for (var i = 0; i < all.length; ++i) {
-            if (all[i] && all[i].id === id)
-                return all[i]
-        }
-        return null
-    }
-
-    /* 在正文里定位第 index 条链接：把光标挪到那一行（卡片右下角那个小箭头） */    function revealLink(index) {
+    /* 在正文里定位第 index 条链接：把光标挪到那一行（卡片右下角那个小箭头） */
+    function revealLink(index) {
         if (!root.noteData || !root.noteData.links || index < 0 || index >= root.noteData.links.count)
             return
         /* role 号从 C++ 那边读（NoteLinkModel::lineRole），别在这里写魔数 */
@@ -475,8 +469,8 @@ Rectangle {
      * "这个左边的 tab 不是每个卡片都有，只有组合的才有"。
      *
      * 几件必须说清楚的事：
-     *   * 色块的样子按用户给的参考图：矩形**右下角切掉一个斜角**（像一张文件夹
-     *     标签），选中的那个描一圈重边；
+     *   * 色块的样子：矩形**左下角切掉一个斜角**，选中的那个往外伸一截、再描一圈
+     *     重边（斜角这一处用户改过口，原来切的是右下角）；
      *   * 色块**露在卡片外面**、贴着桌面（纸从它右边开始，见上面 paper），和纸
      *     之间留着一条缝（那条缝在窗口里是透明的，桌面直接透上来）；
      *   * 颜色 / 编号是**每一块便签自己的**（groupTabs 里带来的）——这一块窗口
@@ -495,15 +489,14 @@ Rectangle {
         visible: root.chipStripDrawn
         /* 锁定之后标签条上的色块也点不着（见 setLocked） */
         enabled: !root.locked
-        /* 抬一层：悬停提示往右压在正文那一带上，别被后声明的 content 盖住（见下面 tabTip） */
-        z: 5
         x: 0
         y: root.noteMargin
         width: root.tabStripWidth
         height: Math.max(0, root.height - 2 * root.noteMargin)
 
-        /* 色块：宽 = 标签条那条宽，高 = 宽（参考图里就是这个比例） */
-        readonly property real chipSize: root.tabStripWidth - 6
+        /* 色块：正方形的一格；选中的那块在它基础上往纸外多伸 chipProtrude */
+        readonly property real chipSize: root.chipSizePx
+        readonly property real chipProtrude: root.chipProtrudePx
         /* 右下角那个斜角多大（参考图里约 45°、四分之一条边） */
         readonly property real chipBevel: 6
 
@@ -512,11 +505,15 @@ Rectangle {
          *
          * 用 ListView 而不是 Flickable + Column：色块数量就是"这一摞里有几块
          * 便签"，多的时候列表滚动比手算便宜，也顺手带上滚轮。
+         *
+         * 这一列的宽度 = 色块 + 伸出去的那一截：所有色块**右沿对齐**（都朝着
+         * 纸那一侧），选中的那块把左边多占的一截吃掉 —— 于是它看着就是从这一
+         * 列里"探出来"，而整列不会因此挪动一像素。
          */
         ListView {
             id: tabColumn
             x: 3
-            width: tabStrip.chipSize
+            width: tabStrip.chipSize + tabStrip.chipProtrude
             height: tabStrip.height
             spacing: 4
             clip: true
@@ -531,15 +528,19 @@ Rectangle {
                 /* 选中的那个亮一圈（它就是右边露着的那张纸） */
                 readonly property bool selected: modelData.selected === true
                 width: tabColumn.width
-                height: tabColumn.width
+                height: tabStrip.chipSize
 
                 Canvas {
                     id: chipShape
-                    anchors.fill: parent
+                    /* 右沿对齐：没选中的往右缩进一截，选中的整列占满（往外伸） */
+                    x: chip.selected ? 0 : tabStrip.chipProtrude
+                    width: chip.selected ? tabColumn.width : tabStrip.chipSize
+                    height: parent.height
                     antialiasing: true
 
                     /*
-                     * 形状：整块减掉右下角那个三角（参考图里"文件夹标签"的样子）。
+                     * 形状：整块减掉**左下角**那个三角（用户看了新摆法改的口：原来
+                     * 切的是右下角、参考图里"文件夹标签"的样子，现在缺的那一角朝下）。
                      * 用 Canvas 画而不是 Rectangle + radius：带圆角的矩形切一个
                      * 斜角，QML 里没有现成的图元（Rectangle 只有一个 radius）。
                      */
@@ -560,9 +561,9 @@ Rectangle {
                         ctx.beginPath()
                         ctx.moveTo(0, 0)
                         ctx.lineTo(w, 0)
-                        ctx.lineTo(w, h - b)
-                        ctx.lineTo(w - b, h)
-                        ctx.lineTo(0, h)
+                        ctx.lineTo(w, h)
+                        ctx.lineTo(b, h)
+                        ctx.lineTo(0, h - b)
                         ctx.closePath()
                         ctx.fillStyle = chip.modelData.color
                         ctx.fill()
@@ -595,79 +596,7 @@ Rectangle {
                         if (!chip.selected)
                             noteWindow.selectGroupTab(chip.modelData.id)
                     }
-
-                    /*
-                     * 悬停：把"哪一块、它在哪一格"报给标签条那一层的提示（见下面
-                     * tabTip）。**提示不能挂在色块身上** —— 色块在 clip: true 的
-                     * ListView 里，委托是它的子树，画在色块外面的提示整块被裁掉
-                     * （用户看到的就是"气泡只剩左边两个字"）。
-                     */
-                    onContainsMouseChanged: {
-                        if (containsMouse) {
-                            tabStrip.hoveredChipId = chip.modelData.id
-                            tabStrip.hoveredChipNumber = chip.modelData.number
-                            /* 上下沿都按标签条那一层算（色块滚动时跟着一起变） */
-                            tabStrip.hoveredChipTop = chip.mapToItem(tabStrip, 0, 0).y
-                            tabStrip.hoveredChipBottom = tabStrip.hoveredChipTop + chip.height
-                        } else if (tabStrip.hoveredChipId === chip.modelData.id) {
-                            /*
-                             * 委托会被复用到别的色块上，鼠标从这一块挪到那一块时
-                             * 两条（离开 / 进入）的先后不定：只在"离开的正是现在
-                             * 报着的那一块"时才清，别把刚报上来的那次清掉。
-                             */
-                            tabStrip.hoveredChipId = ""
-                        }
-                    }
                 }
-            }
-        }
-
-        /*
-         * 悬停提示：贴着被悬停那块色块的下沿（用户要的"气泡"）。
-         *
-         * **提示不能挂在色块那个委托里**：色块在 clip: true 的 ListView 里
-         * （滚出可视区的色块不许画到便签外面去），委托是它的子树 —— 提示挂在
-         * 色块身上，整块就被裁在那一条 28px 宽的色块列里；用户看到的是"气泡
-         * 只剩左边两个字"（他们截了图："这个标签的气泡有些被截断了"）。
-         *
-         * 所以提示挂在标签条这一层（ListView 的**兄弟**），由色块委托把"哪一块
-         * 被悬停、它在哪一格"报上来（见上面 chipHit.onContainsMouseChanged）。
-         * 同一时刻只有一条提示，也就只有一个实例。
-         *
-         * 那个空 Item 只是个挂点：悬停时它挪到色块下沿，NoteTip 照它自己那条
-         * 规矩（贴着锚点父项的下沿、横着不许探出便签）画出来 —— 这一带已经出了
-         * ListView，裁不着了。x 跟着色块那一列，横着的位置和以前一样。
-         *
-         * 整条标签条抬一层（z）：提示往右会压在正文 / 链接卡片那一带上，不抬
-         * 的话它会被**后声明的** content 盖住（色块自己不越过便签纸，抬了不影响
-         * 别的）。
-         */
-        property string hoveredChipId: ""
-        property int hoveredChipNumber: 0
-        property real hoveredChipTop: 0
-        property real hoveredChipBottom: 0
-
-        Item {
-            id: tabTipAnchor
-            x: tabColumn.x
-            /*
-             * 挂点默认落在色块下沿（提示就画在它下面 4px）；下面真摆不下
-             * （便签矮、色块又多）就翻到色块上面去 —— 提示画在窗口里，探出
-             * 窗口的那部分和挂在色块身上时一样会被裁掉。
-             *
-             * 摆法写成绑定（不写在那条悬停报告里）：提示的高度跟着文字走，
-             * 换一块色块 / 便签被拉高拉矮，这里都会自己重算一次。
-             */
-            y: tabStrip.hoveredChipBottom + 4 + tabTip.height > tabStrip.height
-               ? Math.max(0, tabStrip.hoveredChipTop - 8 - tabTip.height)
-               : tabStrip.hoveredChipBottom
-            width: tabColumn.width
-
-            NoteTip {
-                id: tabTip
-                hovered: tabStrip.hoveredChipId !== ""
-                /* 只报编号：这一摞里有哪几张纸，用户点一下就知道了（不要多余的说明） */
-                text: "便签 " + tabStrip.hoveredChipNumber
             }
         }
     }

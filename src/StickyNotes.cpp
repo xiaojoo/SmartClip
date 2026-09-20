@@ -648,13 +648,28 @@ bool StickyNoteWindow::tabbed() const {
 }
 
 /*
- * 标签条占多宽：一个色块 + 它和便签纸之间那条缝。
+ * 标签条占多宽：一个色块 + 选中那块往外伸的一截 + 它和便签纸之间那条缝。
  *
  * 界面（qml/notes/StickyNoteWindow.qml）用同一个数画色块和留白 —— 只有一个
  * 来源，两边不会各说各话。
  */
+int StickyNoteWindow::chipSize() {
+    return 28;
+}
+
+/* 选中的那块往外多伸一截（参考图 partThreeGif.gif 第 22 帧：黄色那块比其余宽） */
+int StickyNoteWindow::chipProtrude() {
+    return 8;
+}
+
 int StickyNoteWindow::tabStripWidth() {
-    return 34;
+    return chipSize() + chipProtrude() + 6;
+}
+
+QVariantMap StickyNoteWindow::chipMetrics() const {
+    return QVariantMap{{QStringLiteral("strip"), tabStripWidth()},
+                       {QStringLiteral("chip"), chipSize()},
+                       {QStringLiteral("protrude"), chipProtrude()}};
 }
 
 /*
@@ -807,6 +822,18 @@ void StickyNoteWindow::resizeGroupTo(const QSize &size) {
     if (!m_owner)
         return;
     m_owner->syncGroupGeometry(this, cardRect().topLeft(), size, false, true);
+}
+
+void StickyNoteWindow::renderOneFrameNow() {
+    /*
+     * grabFramebuffer() + repaint() 是这个工程里"强制同步渲染、把这一帧真推到
+     * 窗口上"的老配方（见 Screenshot.cpp 预渲染那两处、switchGroupTab 那一处）。
+     * 调用方得在窗口**还露着**的时候调（两种用法见头文件）。
+     */
+    if (auto *view = findChild<QQuickWidget *>()) {
+        view->grabFramebuffer();
+        view->repaint();
+    }
 }
 
 void StickyNoteWindow::rememberGeometry() {
@@ -1145,6 +1172,18 @@ void StickyNotes::start() {
         if (!applyGroupLayout(groupId, front))
             continue;
         StickyNoteWindow *shown = front ? front : activeInGroup(groupId);
+        /*
+         * 先把这一摞里**不是露头**的那几块各补一帧，再收起来。
+         *
+         * 恢复的时候几块窗口是"show 出来 -> 同一趟里 hide 掉"，一帧都没画上；
+         * 之后第一次点它的标签，屏幕上就是约 2 帧整块卡片不在（露桌面）——
+         * 用户报的"第一次点开有黑影 / 位置闪"。趁它们还露着补一次，这笔钱就
+         * 落在没人看的时候。
+         */
+        for (StickyNoteWindow *member : groupMembers(groupId)) {
+            if (member && member != shown && member->isVisible())
+                member->renderOneFrameNow();
+        }
         showOnlyInGroup(groupId, shown);
     }
 
@@ -1588,52 +1627,8 @@ QString StickyNotes::groupIdOf(StickyNoteWindow *window) const {
     return window && window->note() ? window->note()->groupId() : QString();
 }
 
-int StickyNotes::noteNumberFor(const QString &noteId) const {
-    if (noteId.isEmpty())
-        return 0;
-    int number = 0;
-    for (StickyNote *note : m_store->notes()) {
-        ++number;
-        if (note && note->id() == noteId)
-            return number;
-    }
-    return 0;
-}
-
 QList<StickyNote *> StickyNotes::noteList() const {
     return m_store->notes();
-}
-
-QVariantList StickyNotes::groupMatesFor(const QString &noteId) const {
-    QVariantList out;
-    if (noteId.isEmpty())
-        return out;
-
-    StickyNoteWindow *self = qobject_cast<StickyNoteWindow *>(windowForId(noteId));
-    const QString selfGroup = self && self->note() ? self->note()->groupId() : QString();
-
-    int number = 0;
-    for (StickyNote *note : m_store->notes()) {
-        ++number;
-        if (!note || note->id() == noteId)
-            continue;
-        StickyNoteWindow *window = windowFor(note);
-        if (!window || !window->isVisible())
-            continue;
-        /*
-         * 已经在这一摞里的不列（选了什么也不会发生）；**别的摞里的要列** ——
-         * 选它就是"两摞并一摞"（见 groupWith）。
-         */
-        if (!selfGroup.isEmpty() && note->groupId() == selfGroup)
-            continue;
-
-        QVariantMap entry;
-        entry.insert(QStringLiteral("id"), note->id());
-        entry.insert(QStringLiteral("label"),
-                     QStringLiteral("与「便签 %1」组合").arg(number));
-        out.append(entry);
-    }
-    return out;
 }
 
 QList<StickyNoteWindow *> StickyNotes::windowsForIds(const QStringList &ids) const {
@@ -2015,7 +2010,7 @@ bool StickyNotes::groupWith(StickyNote *note, const QList<StickyNote *> &others)
  * groupWith 和 dropNoteOn 都走这里 —— 归堆的逻辑只有这一份。
  */
 bool StickyNotes::applyGroupInto(const QList<StickyNote *> &ordered, StickyNoteWindow *front,
-                                 const QPoint *anchorAt) {
+                                 const QPoint *anchorAt, bool deferHide) {
     if (ordered.size() < 2 || !front || !front->note())
         return false;
 
@@ -2064,7 +2059,7 @@ bool StickyNotes::applyGroupInto(const QList<StickyNote *> &ordered, StickyNoteW
      * 最上面那张正好是空白的。点标签也只是把另一张抬到最上面，底下那几层
      * 照旧糊着。
      */
-    showOnlyInGroup(groupId, front);
+    showOnlyInGroup(groupId, front, deferHide);
 
     {
         QStringList members;
@@ -2334,7 +2329,8 @@ bool StickyNotes::dropNoteOn(StickyNote *note, StickyNote *target) {
      * 用**卡片**的左上角（窗口左边那条标签条不算便签的地方）。
      */
     const QPoint anchor = landing->cardRect().topLeft();
-    return applyGroupInto(ordered, landing, &anchor);
+    /* deferHide = true：这是"刚松手那一下"，12~37ms 的 hide 推到下一回合（见那里） */
+    return applyGroupInto(ordered, landing, &anchor, true);
 }
 
 bool StickyNotes::isDragging(StickyNote *note) const {
@@ -2442,6 +2438,19 @@ bool StickyNotes::switchGroupTab(const QString &noteId) {
                  .arg(target->note() ? target->note()->id().left(4) : QStringLiteral("?"),
                       noteBrief(target)));
     target->notifyGroupChanged();
+    /*
+     * refreshTabs() 必须在**强制渲染之前**：这一句把"谁被选中"定下来，紧接着
+     * 那两下 grabFramebuffer/repaint 推出去的才是同帧的画面。
+     *
+     * 146fps 逐帧量的（同一台子：三块一摞，看"纸是什么色 / 哪一格色块探出来"）：
+     *   * 挪到后面（原来的写法）：纸换对之后还有 **2 帧环仍指着旧那一格**，
+     *     然后 1 帧空，才落到新格 —— 那 2 帧"纸是新的、圈指着旧的"最刺眼；
+     *   * 挪到前面（现在）：旧格立刻松开，**没有一帧指错**，只剩约 2 帧（≈14ms）
+     *     整列没有探出来的块，然后落到新格。
+     * 早先试过这条杠杆说更差，是在"hide 也推迟"那一版上量的（旧窗口多露 46ms，
+     * 色块连着 7 帧乱跳），两件事混在一起把结论带偏了。
+     */
+    refreshTabs();
     if (auto *view = target->findChild<QQuickWidget *>()) {
         view->grabFramebuffer();
         view->repaint();
@@ -2458,60 +2467,16 @@ bool StickyNotes::switchGroupTab(const QString &noteId) {
      * 只会重画"在不在摞里 / 是不是露头"；那排色块谁被选中要 notifyTabsChanged
      * 才刷得动（踩过：切换之后色块的选中圈还留在上一张纸上，用户看着像"点了
      * 没反应"）。
+     *
+     * refreshTabs() 本身已经挪到强制渲染**之前**了（见上面那一句），这里只剩
+     * 收完旧窗口之后再通知一遍窗口刷新。
      */
-    refreshTabs();
-
     notifyGroupWindows(groupId);
     {
         QStringList after;
         for (StickyNoteWindow *member : groupMembers(groupId))
             after << noteBrief(member);
         notesLog(QStringLiteral("换纸完 组=%1 现在=%2").arg(groupId, after.join(QStringLiteral(" | "))));
-
-        /*
-         * 这一摞这会儿到底是谁在画：把**每一块成员**的窗口都抓一张缩略图，
-         * 记下"有没有内容"（画出来的像素分布）。
-         *
-         * 为什么不用 widgetAt / topLevelAt：那两只要窗口真显示在桌面上才准，
-         * 而且拿到的常常是别的进程的窗口。抓自己的窗口最直接 —— 用户看到
-         * "只剩两个色块"时，这里会显示露头那块抓出来是空的（或者藏着的那块
-         * 反而有内容），一眼能看出是哪一块在画。
-         */
-        for (StickyNoteWindow *member : groupMembers(groupId)) {
-            if (!member || !member->note())
-                continue;
-            const bool isShown = activeInGroup(groupId) == member;
-            /*
-             * 抓这一块窗口现在画出来的样子。抓之前先强制同步画一帧
-             * （grabFramebuffer + repaint 是这个工程里"把这一帧推出去"的老配方，
-             * 见 Screenshot.cpp）：不然抓到的可能是上一帧，误判成"没画出来"。
-             */
-            if (auto *view = member->findChild<QQuickWidget *>()) {
-                view->grabFramebuffer();
-                view->repaint();
-            }
-            const QImage shot = member->grab().toImage();
-            /*
-             * 标签条那一格画出来什么：在第 17 列上从上往下取几个点，直接记
-             * 颜色+透明度。比"数色带"糙，但一眼能看出是"色块没画"还是
-             * "画了但我没认出来"（这一列是色块的正中间）。
-             */
-            QStringList stripSamples;
-            for (int y = 0; y < 200; y += 20) {
-                const QColor c = shot.pixelColor(17, y);
-                stripSamples.append(QStringLiteral("%1@%2:a%3").arg(c.name()).arg(y).arg(c.alpha()));
-            }
-            const QString titlePatch = shot.pixelColor(60, 18).name();
-            /* 临时：把这一格的标签条区域存成图（查完删） */
-            shot.copy(0, 0, qMin(36, shot.width()), qMin(140, shot.height()))
-                .save(QStringLiteral("H:/steward/build/chip-%1.png")
-                          .arg(member->note()->id().left(4)));
-            notesLog(QStringLiteral("  这一块画出来什么 %1 露头=%2 抓图=%3x%4 第17列=%5 标题处=%6")
-                         .arg(member->note()->id().left(4))
-                         .arg(isShown ? 1 : 0)
-                         .arg(shot.width()).arg(shot.height())
-                         .arg(stripSamples.join(QStringLiteral(" ")), titlePatch));
-        }
     }
     emit changed();
     emit arrangementChanged();
@@ -2530,7 +2495,8 @@ bool StickyNotes::switchGroupTab(const QString &noteId) {
  * keep 是"要留下的那一块"，给空就是按 activeInGroup 现挑一块。它自己不在这一摞
  * 里（或者这一摞只剩它一块）时什么都不做。
  */
-void StickyNotes::showOnlyInGroup(const QString &groupId, StickyNoteWindow *keep) {
+void StickyNotes::showOnlyInGroup(const QString &groupId, StickyNoteWindow *keep,
+                                  bool deferHide) {
     if (groupId.isEmpty())
         return;
     const QList<StickyNoteWindow *> members = groupMembers(groupId);
@@ -2547,11 +2513,40 @@ void StickyNotes::showOnlyInGroup(const QString &groupId, StickyNoteWindow *keep
     for (StickyNoteWindow *member : std::as_const(members)) {
         if (!member || member == shown)
             continue;
-        member->placeAt(card);
-        member->hide();
-        notesLog(QStringLiteral("  收起 %1（%2）")
-                     .arg(member->note() ? member->note()->id().left(4) : QStringLiteral("?"),
-                          noteBrief(member)));
+        /*
+         * **只有"刚松手那一下"才把藏 + 摆推到下一个事件回合**（deferHide）。
+         *
+         * 推的理由（量出来的账，9 次拖放）：`QWidget::hide()` 一块正露着的便签
+         * 窗口要 **12~37ms**（144Hz 下 2~5 帧），松手那一拍当然看得出顿；先把
+         * 露头那张抬起来、把这一帧推出去，下一回合再去藏旧的。
+         *
+         * 不推的理由（同一套尺子量的，见 build/tg/tab）：**点标签**那一趟要是
+         * 也推迟，旧那块窗口就多露约 46ms —— 它和新那块坐在**同一个矩形**上，
+         * 而标签条那 42 宽是**透明**的，旧窗口"还探着的那一格"就从新窗口没画
+         * 东西的缝里透出来。逐帧表：纸已经换对了，色块却连着 7 帧乱跳
+         * `[0,1] -> [1] -> [] -> [0]`。点标签没有连续动作要跟，20ms 的 CPU 花
+         * 在这里看不见，所以这一趟**当场藏**。
+         */
+        if (deferHide) {
+            /* 以 member 当 context：这一块在下一回合之前被销毁的话，这一发自动作废 */
+            QTimer::singleShot(0, member, [member, card] {
+                member->hide();
+                notesLog(QStringLiteral("    探针 hide 完"));      /* 临时，查完删 */
+                member->placeAt(card);
+                notesLog(QStringLiteral("    探针 placeAt 完"));  /* 临时，查完删 */
+            });
+            notesLog(QStringLiteral("  收起 %1（%2）排到下一回合")
+                         .arg(member->note() ? member->note()->id().left(4)
+                                             : QStringLiteral("?"),
+                              noteBrief(member)));
+        } else {
+            member->hide();
+            member->placeAt(card);
+            notesLog(QStringLiteral("  收起 %1（%2）当场藏掉")
+                         .arg(member->note() ? member->note()->id().left(4)
+                                             : QStringLiteral("?"),
+                              noteBrief(member)));
+        }
         /*
          * 藏完那一块**立刻把露头那张抬回来**。同组几块窗口的位置和尺寸是一模
          * 一样的（都摆在同一格、窗宽也一样），谁在最上面完全由窗口顺序决定 ——
@@ -2603,8 +2598,21 @@ void StickyNotes::refreshTabs() {
          * 都得跟着对，见 setTabStrip 的说明）。
          */
         const QRect card = window->cardRect();
+        const int marginBefore = window->tabMargin();
         window->setTabStrip(window->groupTabs().size() > 1, card);
         window->notifyTabsChanged();
+        /*
+         * **只有这一趟真的改了宽度**才补那一帧：上面两下让露着的窗口宽度差了
+         * 一整个标签条（左沿挪 tabStripWidth() 那么多），而纸的左边界要等 QML
+         * 下一次布局才跟上，中间那一帧屏幕上就是整张纸偏 42px —— 用户报的
+         * "位移正好是左边 tab 的位置"。补一次同步渲染，那一帧就合成不出去。
+         *
+         * 判据必须是"改没改"：refreshTabs 在点标签、拖放、启动恢复各路都会跑，
+         * 不加这道闸就是每次都给**每一块露着的**便签各强制渲染一次（踩过同类
+         * 的坑：一段诊断代码在每次点击上这么干，直接拖累了手感）。
+         */
+        if (window->tabMargin() != marginBefore && window->isVisible())
+            window->renderOneFrameNow();
     }
 }
 bool StickyNotes::dropPreviewAt(StickyNote *note, const QPoint &at) const {
@@ -2927,6 +2935,82 @@ bool StickyNotes::arrangeAll() {
     emit arrangementChanged();
     emit changed();
     return true;
+}
+
+/*
+ * 一键把桌面上摆着的每一块便签叠成一摞，整摞吸附到工作区右上角。
+ *
+ * 归堆本身走 applyGroupInto —— 和拖放（dropNoteOn）、菜单里一块一块挑
+ * （groupWith）同一份算法，这里只多两件事：名单是"全部露着的"，起点是右上角。
+ */
+bool StickyNotes::stackAll(StickyNote *keepFront) {
+    QList<StickyNoteWindow *> shown;
+    for (const QPointer<StickyNoteWindow> &entry : std::as_const(m_windows)) {
+        StickyNoteWindow *window = entry.data();
+        if (window && window->isVisible() && window->note())
+            shown.append(window);
+    }
+    /* 谁露着：菜单是从哪一块上点下来的就用它，否则按编号取最前面那块 */
+    std::sort(shown.begin(), shown.end(), [](StickyNoteWindow *a, StickyNoteWindow *b) {
+        return a->noteNumber() < b->noteNumber();
+    });
+    StickyNoteWindow *front = keepFront ? windowFor(keepFront) : nullptr;
+    if (!front || !front->isVisible() || !front->note())
+        front = shown.isEmpty() ? nullptr : shown.first();
+    if (!front || shown.size() < 2) {
+        notesLog(QStringLiteral("叠成一摞：露着的只有 %1 块，没什么可叠")
+                     .arg(shown.size()));
+        return false;
+    }
+
+    /*
+     * 名单 = 露着的每一块 **连着它们各自那一摞里藏着的成员**。
+     *
+     * 藏着的那几张也得一起并进来：只拿露着那块的话，原来那一摞里藏着的纸会
+     * 顶着一个已经作废的组 id 留在原地（applyGroupInto 每次发新号），下次被
+     * 叫出来就是一张既不在摞里也没有标签的孤儿纸。
+     */
+    QStringList ids;
+    auto appendWithGroup = [this, &ids](StickyNoteWindow *window) {
+        if (!window || !window->note())
+            return;
+        if (!ids.contains(window->note()->id()))
+            ids.append(window->note()->id());
+        for (StickyNoteWindow *member : groupMembers(groupIdOf(window))) {
+            if (member && member->note() && !ids.contains(member->note()->id()))
+                ids.append(member->note()->id());
+        }
+    };
+    appendWithGroup(front);
+    for (StickyNoteWindow *window : std::as_const(shown))
+        appendWithGroup(window);
+
+    QList<StickyNote *> ordered;
+    for (const QString &id : std::as_const(ids)) {
+        auto *window = qobject_cast<StickyNoteWindow *>(windowForId(id));
+        if (window && window->note())
+            ordered.append(window->note());
+    }
+
+    /*
+     * 整摞落在工作区**右上角**：卡片右沿贴工作区右沿、上沿贴工作区上沿，和
+     * nextFreeRect 的第 0 格同一个算法（area.right() + 1 - 宽）。
+     *
+     * 不留边距是有意的：便签窗口自己往里缩了 noteMargin（纸不是贴着窗口边画的），
+     * 再叠一层边距就成了"叠完往屏幕中间挪了一截"。
+     */
+    const QRect area = workAreaFor(front->cardRect());
+    const QSize size = front->cardRect().size();
+    const QPoint dock(qMax(area.left(), area.right() + 1 - size.width()), area.y());
+    notesLog(QStringLiteral("叠成一摞：露头=%1 名单=%2 块，落到 %3,%4（工作区 %5x%6）")
+                 .arg(front->note()->id().left(4))
+                 .arg(ordered.size())
+                 .arg(dock.x())
+                 .arg(dock.y())
+                 .arg(area.width())
+                 .arg(area.height()));
+
+    return applyGroupInto(ordered, front, &dock);
 }
 
 void StickyNotes::uiTrace(const QString &text) const {

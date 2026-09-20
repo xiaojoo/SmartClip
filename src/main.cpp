@@ -495,6 +495,21 @@ int main(int argc, char *argv[]) {
      * （排列便签那个按钮调的是 Notes.arrangeAll），模块还没装就建窗口会报
      * "module not installed"（和上面选区窗口预热同一个坑）。
      */
+    /*
+     * 演示口子（`SMARTCLIP_NOTES_DEMO=1`）的落盘路径**必须赶在这里换掉**。
+     *
+     * 原来那句写在 start() 之后（下面那块），于是"跑一次演示"实际是：先把用户
+     * 真实的 notes.json 读进来建一遍窗口，再把临时清单叠上去 —— 演示里看到的
+     * 便签有一半是用户自己的；更要命的是"清单已存在"那条路又调了一次
+     * notes.start()，两边撞在一起，起来约 2 秒就是一个访问违例（0xC0000005）。
+     * 现在全程只有这一发 start()，下面那块只负责"空清单时补三块演示便签"。
+     */
+    const bool notesDemo = qEnvironmentVariableIsSet("SMARTCLIP_NOTES_DEMO");
+    const QString notesDemoPath = QDir::tempPath() + QStringLiteral("/smartclip-notes-demo.json");
+    const bool notesDemoRestore = notesDemo && QFileInfo::exists(notesDemoPath);
+    if (notesDemo)
+        notes.store()->setFilePath(notesDemoPath);
+
     notes.start();
 
     /*
@@ -655,42 +670,33 @@ int main(int argc, char *argv[]) {
      * 看一眼"一摞便签 + 左边标签条"长什么样（`SMARTCLIP_NOTES_DEMO=1`）。
      *
      * 只在设了这个环境变量时跑：建三块不同底色的便签、归到一摞里 —— 界面上
-     * 就是左边三个色块、右边露出当前那张。它是**看效果**用的口子，正常启动
-     * 一个字都不做。
+     * 就是左边三个色块、右边露出当前那张。它是**看效果 / 量帧**用的口子，正常
+     * 启动一个字都不做。
      *
-     * 清单在 start() **之前**就指到临时目录：不然这几块演示便签会写进用户自己的
-     * notes.json（踩过：跑一次演示，用户的便签清单里就多出三张"第 N 张纸"），
-     * 而且会把用户自己的便签一起显示出来。
-     *
-     * 已经有过演示清单（上一次跑剩下的）就不再建新的：直接让 start() 把它恢复
-     * 出来 —— 恢复那条路（一摞只摆一张纸、其余几块收起来）和正常启动完全一样，
-     * 正好用来看"重启之后是不是还是那个样子"。
+     * 路径已经在上面 notes.start() **之前**指到临时目录了（在那儿写了为什么），
+     * 所以这里只剩一件事：临时清单是空的（notesDemoRestore 为假）就补三块进去。
+     * 已经有过演示清单（上一次跑剩下的）就什么都不做 —— 上面那一发 start()
+     * 已经把它恢复出来了，恢复那条路（一摞只摆一张纸、其余几块收起来）和正常
+     * 启动完全一样，正好用来看"重启之后是不是还是那个样子"。
      */
-    if (qEnvironmentVariableIsSet("SMARTCLIP_NOTES_DEMO")) {
-        const QString demoPath = QDir::tempPath() + QStringLiteral("/smartclip-notes-demo.json");
-        const bool restoreExisting = QFileInfo::exists(demoPath);
-        notes.store()->setFilePath(demoPath);
-        if (restoreExisting) {
-            notes.start();
-        } else {
-            QList<StickyNote *> demo;
-            const QStringList colors{QStringLiteral("#ffe9a8"), QStringLiteral("#f7b6d2"),
-                                     QStringLiteral("#c9b6f7")};
-            for (int i = 0; i < colors.size(); ++i) {
-                StickyNote *note = notes.createNote();
-                if (!note)
-                    continue;
-                note->setColor(QColor(colors.at(i)));
-                note->setText(QStringLiteral("第 %1 张纸：这份便签的底色是 %2。\n"
-                                             "左边那排色块就是这一摞里的几张纸，点一下换一张。")
-                                  .arg(i + 1).arg(colors.at(i)));
-                demo.append(note);
-            }
-            /* 第一块（黄的）露头，其余两块跟着它 —— demo.first() 就是露头那张 */
-            if (demo.size() > 1)
-                notes.groupWith(demo.first(), demo.mid(1));
-            notes.store()->flush();
+    if (notesDemo && !notesDemoRestore) {
+        QList<StickyNote *> demo;
+        const QStringList colors{QStringLiteral("#ffe9a8"), QStringLiteral("#f7b6d2"),
+                                 QStringLiteral("#c9b6f7")};
+        for (int i = 0; i < colors.size(); ++i) {
+            StickyNote *note = notes.createNote();
+            if (!note)
+                continue;
+            note->setColor(QColor(colors.at(i)));
+            note->setText(QStringLiteral("第 %1 张纸：这份便签的底色是 %2。\n"
+                                         "左边那排色块就是这一摞里的几张纸，点一下换一张。")
+                              .arg(i + 1).arg(colors.at(i)));
+            demo.append(note);
         }
+        /* 第一块（黄的）露头，其余两块跟着它 —— demo.first() 就是露头那张 */
+        if (demo.size() > 1)
+            notes.groupWith(demo.first(), demo.mid(1));
+        notes.store()->flush();
     }
 
     /*

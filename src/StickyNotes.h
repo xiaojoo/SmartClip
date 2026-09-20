@@ -192,7 +192,29 @@ public:
 
     /* ---- 左边那条标签条（一个色块一块便签） ---- */
     /*
-     * 标签条占的宽度（色块 + 它和便签纸之间那条缝）。
+     * 色块本身多大（正方形的一格，参考图里就是这个比例）。
+     *
+     * 单独一个数是因为**选中的那块要比其余的宽一截**（见 chipProtrude）：
+     * 色块的右沿是对齐的，选中那块往纸外多伸出去一段，于是它的宽度不等于
+     * 标签条的宽度。界面（StickyNoteWindow.qml）用同一个数画，两边不会各说各话。
+     */
+    static int chipSize();
+    /*
+     * 选中的那块往外多伸多少（其余几块缩回去这么多）。
+     *
+     * 参考图（用户给的 partThreeGif.gif 第 22 帧）里就是靠这个位移差表示
+     * "现在看的是这一张"，不是靠描边 —— 描边我们也留着。
+     */
+    static int chipProtrude();
+    /*
+     * 界面画标签条要用的三个数（{ strip, chip, protrude }）。
+     *
+     * 走函数而不是抄死数字：QML 那边早先把条宽写成 `on ? 34 : 0`，C++ 一改
+     * 宽度两边就对不上（选中那块伸出去的一截被窗口左边裁掉）。
+     */
+    Q_INVOKABLE QVariantMap chipMetrics() const;
+    /*
+     * 标签条占的宽度（色块 + 选中那块多伸出去的一截 + 它和便签纸之间那条缝）。
      *
      * 窗口 = 标签条 + 便签纸（见 frameRectFor）：窗口比卡片宽这么多，卡片
      * 本身的位置和尺寸一点没变 —— 自检量"色块整块落在纸外面"就是靠这个。
@@ -287,6 +309,19 @@ public:
     Q_INVOKABLE void setPlacement(const QRect &rect) { placeAt(rect); }
     /* 记下当前几何（拖动 / 改大小之后调；load 时和 placeAt 分开） */
     void rememberGeometry();
+    /*
+     * 强制同步渲染一帧，把这一帧真推到屏幕上。两个地方要用它：
+     *
+     * 1) **补第一帧**：从文件恢复时，一摞里那几块是"show 出来 -> 同一趟里
+     *    hide 掉"的手，一帧都没画上。第一次点它的标签，屏幕上就是约 2 帧
+     *    **整块卡片都不在**（露桌面），用户报的"第一次点开有黑影 / 位置闪"
+     *    就是这两帧。所以恢复那一趟在收起来之前先补一次（见 StickyNotes::start）。
+     * 2) **堵改宽那一帧**：标签条出现/消失那一刻窗口宽度差 tabStripWidth()，
+     *    而纸的左边界要等 QML 下一次布局才跟上，中间那一帧屏幕上就是整张纸
+     *    偏一个标签条的宽度（用户："位移正好是左边 tab 的位置"）。所以在
+     *    几何和标签状态都改完之后再补一次（见 StickyNotes::refreshTabs）。
+     */
+    void renderOneFrameNow();
 
     /* ---- QML 调的（界面动作） ---- */
     /* 标题栏上按住：交给窗口管理器拖动（和主窗口顶栏、贴图窗口同一个做法） */
@@ -508,6 +543,21 @@ public:
      */
     Q_INVOKABLE bool arrangeAll();
 
+    /*
+     * 一键叠成一摞：把桌面上**摆着的每一块**便签（连着它们各自那一摞里藏着
+     * 的成员）并成一摞，整摞吸附到**工作区右上角**（和 nextFreeRect 的第 0 格
+     * 同一个落点），只露 keepFront 那一张纸，其余收成左边那排色块。
+     *
+     * 用户要的"全部自动一摞，不用拖动"：归堆这件事本来只有拖一块到另一块身
+     * 上（dropNoteOn）和菜单里一块一块挑（groupWith）两条路，两条都要动手；
+     * 这里给第三条 —— 点一下就走，摆法（重叠 + 右上角）由函数定，不看原来的
+     * 位置。拖放那条路保留（老习惯还在用）。
+     *
+     * keepFront 给空就用当前露头那块（没有就取编号最小的）。露着的不足两块
+     * 返回 false。
+     */
+    Q_INVOKABLE bool stackAll(StickyNote *keepFront = nullptr);
+
     /* 全部叫到桌面上（托盘"显示全部便签"） */
     Q_INVOKABLE void showAll();
     /* 全部收起来（数据留着） */
@@ -630,8 +680,14 @@ public:
      * 一摞里**只留 keep 那一块露着**，其余几块摆到同一格再藏起来（keep 给空
      * 就按 activeInGroup 现挑）。桌面上"一摞 = 一张纸 + 左边那排标签"就靠它：
      * 点标签换纸（switchGroupTab）和从文件恢复（start）都走这里。
+     *
+     * deferHide 只给"刚松手那一下"用（dropNoteOn）：藏一块正露着的窗口要
+     * 12~37ms，别卡在拖动那条路上，所以推到下一个事件回合。别的入口**不许**
+     * 传 true —— 旧窗口多露一回合，它的色块就会从新窗口那条透明的标签列里
+     * 透出来（实测连着 7 帧乱跳）。理由全在 .cpp 那段注释里。
      */
-    void showOnlyInGroup(const QString &groupId, StickyNoteWindow *keep = nullptr);
+    void showOnlyInGroup(const QString &groupId, StickyNoteWindow *keep = nullptr,
+                         bool deferHide = false);
     /*
      * 点左边标签条上的一个色块：那一块换上来（其余几块收成色块）。
      *
@@ -639,32 +695,9 @@ public:
      * 所以这里不带 groupId 的便签直接返回 false。
      */
     Q_INVOKABLE bool switchGroupTab(const QString &noteId);
-    /*
-     * 某条便签的编号（"便签 3"里的那个 3）。
-     *
-     * 菜单里"与…组合"那几条要写清楚"和哪一块"，而编号本来只在**窗口**上
-     * （StickyNoteWindow::noteNumber）—— 菜单手里只有一条便签数据，拿不到
-     * 窗口。编号就是它在清单里的位次（start() 和 createNote() 都是按这个发的），
-     * 这里现算一遍；找不到返回 0。
-     */
-    Q_INVOKABLE int noteNumberFor(const QString &noteId) const;
 
     /*
-     * 某块便签可以叠到哪几块身上（每条 { id, label }，直接给菜单那一栏用）。
-     *
-     * 为什么不让 QML 自己去 store 里翻（`Notes.store.notes()`）：store() 不是
-     * Q_INVOKABLE，QML 读到的是 undefined —— 菜单那一栏会静默变空（踩过：
-     * 点"与…组合"返回 false、界面上什么都没有，stderr 干干净净）。这里的
-     * 规矩是：**列表在 C++ 这边算好**，QML 只负责画。
-     *
-     * 顺序按清单先后（也就是便签编号）；便签自己不在名单里。别摞里的便签也
-     * 算（叠上去就是把两摞并成一摞）。
-     */
-    Q_INVOKABLE QVariantList groupMatesFor(const QString &noteId) const;
-
-    /*
-     * 全部便签（给便签自己的界面用：菜单里"与…组合"拿到 id 之后要靠它换成
-     * 一条数据再交给 groupWith）。
+     * 全部便签（给界面 / 自检用：拿一条便签数据换成 id 之类的现算）。
      *
      * 单独开这个口子而不是让 QML 读 store()：store() 不是 Q_INVOKABLE
      * （QML 里读到 undefined），而 StickyNote 也不是注册过的 QML 类型 ——
@@ -799,11 +832,13 @@ private:
     /* ---- 组合 与 排列成摞 ---- */
     /*
      * 把 ordered 这一串便签归成一摞（front 是露头那块，anchorAt 是整摞左上角
-     * 落在哪），并摆成层叠的样子。groupWith / dropNoteOn 都走这里 —— 归堆的
-     * 逻辑只有这一份。
+     * 落在哪），并摆成层叠的样子。groupWith / dropNoteOn / stackAll 都走这里
+     * —— 归堆的逻辑只有这一份。
+     *
+     * deferHide 只有"刚松手那一下"（dropNoteOn）传 true：见 showOnlyInGroup。
      */
     bool applyGroupInto(const QList<StickyNote *> &ordered, StickyNoteWindow *front,
-                        const QPoint *anchorAt = nullptr);
+                        const QPoint *anchorAt = nullptr, bool deferHide = false);
     /* "把 dragged 放下去会落到谁身上"（同一摞 / 不在头部那条上都不算） */
     StickyNoteWindow *dropTargetFor(StickyNoteWindow *dragged, const QPoint &at) const;
     /* 把"落点候选中"的标记从所有便签上抹掉 */

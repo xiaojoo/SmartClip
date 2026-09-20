@@ -89,11 +89,12 @@ Window {
     /* 主栏条目 */
     property var entries: []
     /*
-     * 子面板里是什么："" 没有 / "opacity" / "group"。
+     * 子面板里是什么："" 没有 / "opacity"。
      *
-     * 两条都是**鼠标停上去就飞出面板**（移开就收）。
-     * 原来那两条（「更多颜色」和"正文里的链接"）用户都不要了，一并删掉
-     * —— 换底色的入口只剩便签头上那个颜色弹窗（见 StickyNoteWindow 的
+     * 鼠标停上去就飞出面板（移开就收）。原来还有第二条「与…组合」（一条一块）
+     * —— 用户说"这个选项不要了"，连同那块面板一起删了：归到一摞走「全部叠成
+     * 一摞」，或者用鼠标拖。更早那两条（「更多颜色」和"正文里的链接"）也都不
+     * 要了 —— 换底色的入口只剩便签头上那个颜色弹窗（见 StickyNoteWindow 的
      * palettePopup）。
      */
     property string flyoutKind: ""
@@ -108,14 +109,6 @@ Window {
 
     /* 透明度档位 */
     property var opacities: []
-    /*
-     * 组合那一栏：可以叠到这一块身上的便签（"与「便签 3」组合"那一串）。
-     * 每条是 { id, label }，点一条走 fireGroupMate（act 形如 "group:<id>"）。
-     *
-     * 这是"组合"（归到一摞里）的**菜单入口**；用鼠标做就是拖一块便签的头部
-     * 到另一块身上松手（见 StickyNotes::dropNoteOn）。
-     */
-    property var groupMates: []
     /* 这一块自己在不在某一摞里（决定那一条是"组合成摞"还是"拆分组合"） */
     property bool grouped: false
 
@@ -133,8 +126,6 @@ Window {
     function heightForKind(kind) {
         if (kind === "opacity")
             return 2 * panePadding + (opacities ? opacities.length : 0) * itemHeight
-        if (kind === "group")
-            return 2 * panePadding + (groupMates ? groupMates.length : 0) * itemHeight
         return 0
     }
 
@@ -588,22 +579,21 @@ Window {
         currentOpacity = note ? note.opacityPercent : 100
         opacities = [100, 85, 70, 55, 40]
 
-        /*
-         * 组合那一栏的清单：叠到这一块身上的候选。
-         *
-         * 那份清单在 C++ 侧算（Notes.groupMatesFor）—— QML 这边翻不到 store
-         * （store() 不是 Q_INVOKABLE，读到 undefined，菜单会静默变空）。
-         *
-         * 已经在同一摞里的不列（点了什么也不会发生）；**别的摞里的要列**：选它
-         * 就是把两摞并成一摞（见 StickyNotes::groupWith）。自己也不列。
-         */
+        /* 在不在某一摞里：决定「拆分组合」那一条出不出现 */
         grouped = note ? note.groupId !== "" : false
-        groupMates = notes ? notes.groupMatesFor(note ? String(note.id) : "") : []
 
         var out = []
         out.push({ label: "新建便签", act: "new", icon: "plus", shortcut: "Ctrl+Alt+N" })
         out.push({ label: shown > 0 ? "排列所有便签（" + shown + " 块）" : "排列所有便签",
                    act: "arrange", icon: "grid", disabled: shown === 0 })
+        /*
+         * 一键叠成一摞：摆着的每一块都归进同一摞，整摞吸附到屏幕右上角。
+         *
+         * 和上一条是**两件相反的事**，都留着（用户明确说的）：这条收拢成一张纸
+         * + 一排标签，那条摊开成网格。两条都不用鼠标拖。
+         */
+        out.push({ label: shown > 1 ? "全部叠成一摞（" + shown + " 块）" : "全部叠成一摞",
+                   act: "stack", icon: "stack", disabled: shown < 2 })
         out.push({ separator: true })
         /*
          * 颜色和锁定**都不在这里**：它们已经搬到便签头上当按钮了（颜色是件 T 恤、
@@ -624,23 +614,17 @@ Window {
                    act: "unlock", icon: "unlock", disabled: lockedTotal === 0 })
         out.push({ separator: true })
         /*
-         * 组合那一条（**只有"组合"这一个意思**：哪几块归到一起）。
+         * 组合这一条只剩「拆分组合」。
          *
-         *   * 已经在某一摞里 -> 只给"拆分组合"，没有子面板；
-         *   * 别处还有能组合的便签 -> 带子面板，里面一条一块（"与「便签 3」组合"）；
-         *   * 一块能组合的都没有 -> 这一条根本不出现（没什么可点的）。
+         * 「与…组合」那一栏（带飞出面板、一条一块）整块删了（用户："这个与……
+         * 的组合这个选项不要了"）：归到一摞现在走上面那条「全部叠成一摞」，
+         * 或者用鼠标拖一块到另一块身上 —— 一块一块挑着合并没人用。
          *
-         * 用鼠标做同一件事就是"拖一块便签的头部到另一块身上"。
-         *
-         * 名字里不带"摞 / 叠"：摆法（谁叠在谁上面、错开多少）是**排列**那件事，
-         * 和"哪几块归到一起"无关 —— 早先这条叫"组合成摞"，把两件事混成了一个
-         * 说法（用户明确要求分开）。
+         * 名字里不带"摞 / 叠"：摆法（谁叠在谁上面）是**排列**那件事，和"哪几块
+         * 归到一起"无关 —— 早先这条叫"组合成摞"，把两件事混成了一个说法。
          */
-        if (grouped) {
+        if (grouped)
             out.push({ label: "拆分组合", act: "ungroup", icon: "group" })
-        } else if (groupMates.length > 0) {
-            out.push({ label: "与…组合", act: "group", flyout: "group", icon: "group" })
-        }
         out.push({ separator: true })
         out.push({ label: "收起这块便签", act: "hide", icon: "hide" })
         out.push({ label: "收起其他便签", act: "hideothers", icon: "hide", disabled: shown <= 1 })
@@ -694,6 +678,8 @@ Window {
             notes.createNote()
         else if (act === "arrange")
             notes.arrangeAll()
+        else if (act === "stack")
+            notes.stackAll(note)
         else if (act === "unlock")
             notes.unlockAll()
         else if (act === "hide")
@@ -710,30 +696,6 @@ Window {
             target.toggleStaysOnTop()
         else if (act === "ungroup")
             notes.ungroup(note)
-    }
-
-    /*
-     * 组合那一栏里点了一条（"与「便签 3」组合"）。
-     *
-     * 和别的条目不一样：它得带一个参数（跟**哪一块**组合）。act 统一写成
-     * "group:<便签 id>"，转发给便签 QML 根的 handleMenuAct —— 便签这边负责把
-     * id 换成那条数据再叫 Notes.groupWith（见 StickyNoteWindow.qml）。
-     */
-    function fireGroupMate(mateId) {
-        /*
-         * handleMenuAct 是**便签 QML 根对象**（paper）上的函数，不在 C++ 那个
-         * StickyNoteWindow（win）上 —— 写成 win.handleMenuAct 会报
-         * "Property 'handleMenuAct' of object StickyNoteWindow(…) is not a function"
-         * （踩过）。win 上那些能用的是 C++ 侧的 Q_INVOKABLE（closeNote /
-         * copyText / setLocked…），两条路别混。
-         *
-         * 返回值一路带出去（成没成组）：自检按它判断这一下真的成了。
-         */
-        var target = paper
-        closeMenu()
-        if (target && mateId)
-            return target.handleMenuAct("group:" + mateId)
-        return false
     }
 
     /* ---- 自检口子（见 src/SelfTest.cpp）：外面点不出 hover，只能从进程内走 ---- */
@@ -1070,46 +1032,6 @@ Window {
                     }
                 }
             }
-
-            /* ---- 组合：与哪一块组合（一条一块） ---- */
-            Column {
-                visible: root.flyoutKind === "group"
-                anchors.fill: parent
-                anchors.margins: root.panePadding
-                clip: true
-
-                Repeater {
-                    model: root.groupMates
-
-                    delegate: Rectangle {
-                        id: mateRow
-                        required property var modelData
-                        width: parent.width
-                        height: root.itemHeight
-                        radius: 4
-                        color: mateHit.containsMouse ? root.hoverColor : "transparent"
-
-                        Label {
-                            anchors.fill: parent
-                            anchors.leftMargin: 8
-                            anchors.rightMargin: 8
-                            verticalAlignment: Text.AlignVCenter
-                            text: mateRow.modelData.label
-                            font.pixelSize: 11
-                            color: root.textColor
-                            elide: Text.ElideRight
-                        }
-
-                        MouseArea {
-                            id: mateHit
-                            anchors.fill: parent
-                            hoverEnabled: true
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: root.fireGroupMate(mateRow.modelData.id)
-                        }
-                    }
-                }
-            }
         }
     }
 
@@ -1210,6 +1132,11 @@ Window {
                 ctx.beginPath()
                 ctx.moveTo(4.5, 11.5); ctx.lineTo(11.5, 11.5); ctx.lineTo(11.5, 4.5)
                 ctx.stroke()
+            } else if (k === "stack") {
+                /* 叠成一摞：三张纸严丝合缝压着，侧面看就是三条边 */
+                ctx.strokeRect(2.5, 2.5, 9, 2.4)
+                ctx.strokeRect(2.5, 5.9, 9, 2.4)
+                ctx.strokeRect(2.5, 9.3, 9, 2.4)
             } else if (k === "trash") {
                 ctx.beginPath()
                 ctx.moveTo(3.5, 4); ctx.lineTo(10.5, 4)
