@@ -271,10 +271,18 @@ QString surfaceShotText(const SurfaceShot &shot) {
  * 返回 true = 稳。detail 给"第一帧（连采 N 帧没变）"或者"第一帧 -> 变掉那帧"。
  * 采不到（一直没露出来 / 露出来得太晚，一帧都没跟上）算失败 —— 那种情况下
  * "没看见它变"没有意义，不能当通过。
+ *
+ * contentOf（可空）：除了窗口几何，再盯一个"内容长齐了没有"的读数。
+ * 几何没变 ≠ 画面没变 —— 下拉菜单那块弹窗的尺寸是**算出来的**（条目数 * 行高），
+ * 所以窗口第一帧就已经是最终大小，可委托项要是那一帧还没建出来，屏幕上就是
+ * 一块空面板。几何采样对这种是瞎的，得连内容一起采（读数见
+ * qml/components/DropdownMenu.qml 的 itemCount）。
  */
 bool surfaceStaysPut(const std::function<QQuickWindow *()> &windowOf, int samples,
-                     QString *detail) {
+                     QString *detail,
+                     const std::function<int()> &contentOf = nullptr) {
     SurfaceShot first;
+    int firstContent = -1;
     int taken = 0;
     QElapsedTimer clock;
     clock.start();
@@ -286,14 +294,19 @@ bool surfaceStaysPut(const std::function<QQuickWindow *()> &windowOf, int sample
             continue;                     /* 原生窗口还没建出来 / 还没找到 */
         if (!now.visible)
             continue;                     /* 还没露出来：从"可见"那一帧才算起 */
+        const int nowContent = contentOf ? contentOf() : 0;
         if (!first.valid) {
             first = now;                  /* 第一帧：这就是它的"最终样子" */
+            firstContent = nowContent;
             continue;
         }
-        if (now.geo != first.geo || now.flags != first.flags) {
+        if (now.geo != first.geo || now.flags != first.flags
+            || nowContent != firstContent) {
             if (detail)
                 *detail = QStringLiteral("%1 -> %2")
                               .arg(surfaceShotText(first), surfaceShotText(now));
+            if (detail && contentOf)
+                *detail += QStringLiteral("（内容 %1 -> %2）").arg(firstContent).arg(nowContent);
             return false;
         }
         if (++taken >= samples)
@@ -307,7 +320,9 @@ bool surfaceStaysPut(const std::function<QQuickWindow *()> &windowOf, int sample
     if (detail)
         *detail = QStringLiteral("%1（连采 %2 帧没变）")
                       .arg(surfaceShotText(first))
-                      .arg(taken + 1);
+                      .arg(taken + 1)
+                  + (contentOf ? QStringLiteral("（内容 %1 条）").arg(firstContent)
+                               : QString());
     return taken >= 1;
 }
 
@@ -6332,6 +6347,15 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
                 if (item)
                     cardWindow = item->window();
             }
+            /*
+             * 先等一会儿再数顶层窗口：上一节关掉的菜单还有一段"淡出 + 按住"的
+             * 退场过渡（见 qml/components/DropdownMenu.qml 的 exit，为了把 DWM
+             * 缓存那一帧洗成透明）。那 32ms 里它的窗口仍然 isVisible，而它 460 高
+             * 会被下面的 big 算进去 —— 实测三次撞红一次。
+             */
+            for (int i = 0; i < 8; ++i)
+                QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+
             int big = 0;
             QStringList seen;
             const auto tops = QGuiApplication::topLevelWindows();
@@ -6576,11 +6600,18 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
         dispatch(QStringLiteral("menu:文件"));
         {
             QString detail;
+            /*
+             * 连内容一起采：这块弹窗的宽高是**算出来的**（条目数 * 行高，见
+             * DropdownMenu 的 menuHeight），所以"窗口尺寸没变"根本证明不了
+             * "画面没变" —— 委托项晚一拍建出来，屏幕上就是一块空面板，
+             * 几何一个像素都没动。
+             */
             const bool stable =
                 surfaceStaysPut([&] { return surfaceWindow(QStringLiteral("dropdownMenu")); },
-                                5, &detail);
+                                5, &detail,
+                                [&] { return uiState().value(QStringLiteral("menuItemCount")).toInt(); });
             check(stable,
-                  QStringLiteral("弹窗：下拉菜单露出来的第一帧就是最终样子"), detail);
+                  QStringLiteral("弹窗：下拉菜单露出来的第一帧就是最终样子（含条目建齐）"), detail);
             QMetaObject::invokeMethod(qmlRoot, "closeMenu");
             settle();
         }

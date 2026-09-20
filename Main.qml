@@ -2295,6 +2295,8 @@ Rectangle {
             menuScrollable: ddMenu.scrollable,
             /* 有图标的菜单：图标在左、快捷键在右（工具栏已取消） */
             menuHasIcons: ddMenu.hasIcons,
+            /* 弹窗里已经建出来的条目数（"露出来之后再补内容"那条自检读它） */
+            menuItemCount: ddMenu.itemCount,
 
             /*
              * 子菜单（视图 -> 语言 / 编码 / 换行符）：右边那一块面板。

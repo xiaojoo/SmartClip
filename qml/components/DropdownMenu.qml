@@ -72,6 +72,16 @@ Popup {
      */
     property int openShifts: 0
 
+    /*
+     * 主菜单这一块**已经建出来的条目数**（自检拿它当"内容长齐了没有"的读数，
+     * 见 src/SelfTest.cpp 的 surfaceStaysPut）。
+     *
+     * 为什么要有它：这块弹窗的宽高是算出来的（条目数 * 行高），所以"窗口尺寸
+     * 没变"证明不了"画面没变" —— 委托项要哪一拍没建出来，屏幕上就是一块空面板，
+     * 几何一个像素都不动。只看几何的自检对这种是瞎的。
+     */
+    readonly property int itemCount: entriesRepeater.count
+
     signal selected(string act)
 
     readonly property color bgColor:     "#3c3f41"
@@ -287,6 +297,61 @@ Popup {
         subEntries = []
         submenuTop = 0
         submenuRowY = 0
+    }
+
+    /*
+     * ======================================================================
+     * 收菜单先淡一帧再藏：治"菜单在旧位置闪一下"
+     * ======================================================================
+     *
+     * 现场量法（两样一起跑，时间点能对上）：
+     *   powershell -File build/menu-geom-watch.ps1        # 每 ~1ms 采弹窗原生窗的矩形
+     *   ffmpeg -f lavfi -i ddagrab=framerate=240 -vf "hwdownload,format=bgra,crop=…"
+     *        -c:v libx264 -preset ultrafast -t 20 out.mp4 # 屏幕，实际能到 148fps
+     * 逐帧量画面用：ffmpeg -i out.mp4 -vf "crop=…,signalstats,metadata=print:file=-"
+     * 他连点 23 次，矩形日志里**每一次都只有一条，而且已经是最终位置**
+     * （09:36:11.120 @2401,1041 → 09:36:11.869 @2059,1041 一步到位）
+     * —— 说明 Qt 摆位没晚，"位置在开之前一次定死"那条规矩是守住了的。
+     *
+     * 但同一时刻的录屏（148fps 那段，帧 1180 / 1181）里：
+     *
+     *   帧 1180  菜单画在 (1855,1040)   ← 上一回开菜单的位置，YAVG 48.3066
+     *   帧 1181  菜单画在 (2405, 985)   ← 这一次该在的地方，YAVG 47.1918
+     *
+     * 48.3066 和上一回稳定期的 48.3079 只差 0.0013 —— 那是**上一帧画面被原样重放**，
+     * 不是新内容画错了地方。窗口重新露出来那一拍，DWM 先把它缓存的最后一帧
+     * （旧内容、旧位置）合成出去，下一拍才轮到 Qt 画的新内容。一帧在 144Hz 上是
+     * 6.9ms：24fps 的录屏看不见，眼睛看得见。
+     *
+     * DWM 那一拍管不了，能管的是**它缓存里存的是什么**：让这块窗口在被藏掉之前
+     * 先画一帧全透的，于是下次露出来时被重放的那一帧是透明的 —— 屏幕上什么都没有，
+     * 菜单直接出现在它该在的地方。
+     *
+     * 为什么用 exit 过渡而不是"藏掉再开一次透明的"：后者重新 show 的那一拍，
+     * 被重放的正好是**旧菜单那一帧**，等于把闪烁从"开"挪到了"关"。过渡期窗口
+     * 一直是露着的，只是画成透明，没有第二次 show。
+     *
+     * 淡出 8ms + 按住 24ms（一共 32ms）：够 DWM 至少合成一帧全透的，而"菜单正在
+     * 消失"这件事本身没人会去盯。enter 那一段只负责把 opacity 拨回 1，时长 0 ——
+     * 开菜单不许有任何淡入，那会真的慢一帧。
+     *
+     * 代价：这 32ms 里那块弹窗窗口还算"可见"（只是全透）。自检里数顶层窗口的
+     * 那条会撞上它（"问句是一块小卡片"那条，实测三次一次红），所以那边数之前
+     * 先泵一会儿事件等它落定（见 src/SelfTest.cpp 同一处）。
+     */
+    enter: Transition {
+        PropertyAnimation { property: "opacity"; to: 1.0; duration: 0 }
+    }
+    exit: Transition {
+        SequentialAnimation {
+            PropertyAnimation { property: "opacity"; to: 0.0; duration: 8 }
+            /*
+             * 淡到 0 之后再按住 24ms。只淡不按住，实测"还是有点闪，但频率少了
+             * 很多"——说明偶尔那一帧全透的还没被合成出去，窗口就已经藏了，
+             * DWM 缓存里存的仍然是菜单。按住一段就是逼它至少出一帧空的。
+             */
+            PauseAnimation { duration: 24 }
+        }
     }
 
     /*
@@ -582,6 +647,7 @@ Popup {
                     spacing: 0
 
                     Repeater {
+                        id: entriesRepeater
                         model: root.entries
                         delegate: MenuEntryItem {}
                     }
