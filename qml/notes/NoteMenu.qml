@@ -300,13 +300,14 @@ Window {
         syncFlyoutWindow()
 
         /*
-         * "这次弹出之后，光标进来过没有"。
+         * 按键沿检测复位。
          *
-         * 界面上点「⋯」走的就是这条路，点开那一下光标就压在菜单角上，所以这里
-         * 量一次就够。自检里用 hook 打开菜单（见 SelfTestNotes）时，真实光标还
-         * 在屏幕别处 —— 那种情况下保持 false，否则 watchHover 一上来就按"光标
-         * 在外面"把菜单收掉，菜单那一节的用例会全红。
+         * 界面上点右键走的是"抬起那一下"才到这里（TapHandler onTapped），右键
+         * 已经松了；但自检是用 hook 直接打开的，真实光标/按键状态跟菜单无关 ——
+         * 不复位的话，按下沿可能落在弹出之前的那一下上，菜单刚开就被自己收掉。
          */
+        mouseWasDown = false
+        /* 光标进来过没有：见 menuHoverSeen */
         menuHoverSeen = cursorInsideMenu()
 
         opened = true
@@ -344,9 +345,12 @@ Window {
     /*
      * 关掉菜单。
      *
-     * Window 没有 Popup 那套 closePolicy，所以"点别处"和 Esc 都要自己接：
-     * 点别处由便签窗口那边的点击转发过来（见 StickyNoteWindow 的 closeNoteMenu
-     * 调用点），Esc 走 handleEscape。
+     * Window 没有 Popup 那套 closePolicy，所以三条路都要自己接：
+     *   * 点在这块便签上（左键抽层、右键切换菜单）—— 由便签窗口自己调
+     *     closeMenu / closeNoteMenu（见 StickyNoteWindow 那两个 TapHandler）；
+     *   * 点在**别的地方**（桌面、别的程序、别的便签）—— 由 pressWatch 那拍按
+     *     系统按键状态收（见 watchPress）；
+     *   * Esc 走 handleEscape。
      */
     function closeMenu() {
         closeFlyout()          /* 面板窗口跟着藏（见 syncFlyoutWindow） */
@@ -424,7 +428,7 @@ Window {
 
     /*
      * ===================================================================
-     * 「鼠标挪开就收」：一律看光标在哪儿，不看 hover 事件
+     * 什么时候收：子面板跟着光标，整块菜单跟着"在别处按了一下"
      * ===================================================================
      *
      * 两条规矩：
@@ -433,27 +437,25 @@ Window {
      *      只停在"挂着这块面板的那一条"上时留着：不然鼠标从面板上往回流，
      *      面板已经没了，而鼠标还压在那一条上、onEntered 不会再响，就再也叫不
      *      出来了（Windows 便签也是停在父条目上不收）。
-     *   2) 鼠标离开整块菜单 —— 连菜单一起收掉。
+     *   2) 整块菜单**不再**跟着鼠标挪开就收（原来就是这条，用户要求改成
+     *      "点别的地方才隐藏"）。现在由 pressWatch 那条定时器盯着系统按键：
+     *      左键或右键**按下的那一下**、光标又在菜单外面 -> 收（见 watchPress）。
      *
-     * 为什么不靠每一行的 onEntered/onExited：
+     * 为什么光标位置/按键都要绕 C++：QML 里没有取光标位置的原语（QCursor 是
+     * C++ 类，写在这儿会报 "QCursor is not defined"，然后整个判断静默失效），
+     * 也没有"全局按键状态"；而菜单是不接激活的置顶窗口，在别处点一下既不让它
+     * 失焦、Qt 也收不到那一下（见 mouseAnyDown 的说明）。
+     *
+     * 为什么不靠每一行的 onEntered/onExited 收子面板：
      *
      *   * 主栏的留白（panePadding 4px）和主栏/子面板之间那条缝（paneGap 6px）
-     *     上没有 MouseArea —— 鼠标"从留白上走出去"一个事件都没有，菜单（或者
-     *     子面板）就挂在那儿不走了；
+     *     上没有 MouseArea —— 鼠标"从留白上走出去"一个事件都没有，子面板就
+     *     挂在那儿不走了；
      *   * 菜单是独立原生窗口，展开子面板时窗口正在改尺寸，那一瞬间的 hover
      *     事件并不可靠（原来那条"子菜单闪一下就消失"就是这么来的）。
      *
-     * 所以这里 160ms 问一次光标在哪儿。光标位置从 C++ 拿：QML 里没有取光标
-     * 位置的原语（QCursor 是 C++ 类，写在这儿会报 "QCursor is not defined"，
-     * 然后整个判断静默失效）。
+     * 所以这里 160ms 问一次光标在哪儿。
      */
-
-    /*
-     * "这次弹出之后，光标进来过没有"。
-     *
-     * 没进来过就什么都不做 —— 菜单也有不是鼠标点开的时候（见 openAt 里的说明）。
-     */
-    property bool menuHoverSeen: false
 
     /* 光标在屏幕上的位置；拿不到就 null */
     function cursorOnScreen() {
@@ -513,31 +515,70 @@ Window {
     }
 
     /*
-     * 一拍：光标出了菜单就把菜单收了；还在菜单里、但不在"父条目或子面板"那一片
-     * 上（比如挪到了别的条目）就把子面板收了。
+     * "这次弹出之后，光标真进过菜单没有"。
+     *
+     * 没进来过就不收子面板 —— 自检是用 hook 打开菜单的（量的是 hook 给的那个点），
+     * 真实光标一直待在屏幕别处，没有这道闸的话面板一弹出来就被 watchHover 按
+     * "光标在外面"收掉，菜单那一节会全红。界面上点右键那一下光标必然在菜单上，
+     * 这道闸不会改变用户看到的行为。
+     */
+    property bool menuHoverSeen: false
+
+    /*
+     * 一拍：光标出了菜单就把子面板收了；还在菜单里、但不在"父条目或子面板"那
+     * 一片上（比如挪到了别的条目）也把子面板收了。整块菜单**不**跟着光标走
+     * （见上面那两条规矩的第 2 条）。
      */
     function watchHover() {
+        if (!flyoutOpen)
+            return
         const p = cursorOnScreen()
         if (!p)
             return
         if (!cursorInsideMenu()) {
-            /* 光标在菜单外面：进来过才收（见 menuHoverSeen） */
             if (menuHoverSeen)
-                closeMenu()
+                closeFlyout()
             return
         }
         menuHoverSeen = true
-        if (flyoutOpen && !cursorKeepsFlyout(p))
+        if (!cursorKeepsFlyout(p))
             closeFlyout()
     }
 
-    /* 菜单开着的时候就盯着（160ms 一拍，看着就是"鼠标一移开就收"） */
+    /* 菜单开着的时候就盯着（160ms 一拍，看着就是"子面板跟着鼠标走"） */
     Timer {
         id: hoverWatch
         interval: 160
         repeat: true
         running: root.opened
         onTriggered: root.watchHover()
+    }
+
+    /* 上一次问的时候鼠标按着没 —— 只认"从松开到按下"那一下沿 */
+    property bool mouseWasDown: false
+
+    /*
+     * 一拍：在菜单**外面**按了左键或右键，就把菜单收掉。
+     *
+     * 40ms 一问：一次点击按下通常按住几十毫秒，问太稀会整个漏掉那一下；这拍只
+     * 是两次 GetAsyncKeyState，开着菜单才跑，花不了什么。
+     */
+    function watchPress() {
+        const down = win && win.mouseAnyDown ? win.mouseAnyDown() : false
+        const edge = down && !mouseWasDown
+        mouseWasDown = down
+        if (!edge)
+            return
+        if (!cursorInsideMenu())
+            closeMenu()
+    }
+
+    Timer {
+        id: pressWatch
+        interval: 40
+        repeat: true
+        running: root.opened
+        onTriggered: root.watchPress()
     }
 
     /* 鼠标停在某一条上（每一行的 MouseArea onEntered 调） */
@@ -966,11 +1007,13 @@ Window {
             }
 
             /*
-             * 鼠标在这块面板上（面板的留白 / 子项没盖到的地方）。
+             * 鼠标在这块面板上（面板的留白 / 子项没盖到的地方）：记一笔"光标
+             * 进来过"。收不收由 watchHover 按光标实际位置定，不靠进出的先后 ——
+             * 从主栏往面板上挪的那一路（缝里、留白上）收不到事件，而且现在这
+             * 还是**另一块窗口**。
              *
-             * 这里只记"光标进来过"：收不收由 watchHover 按光标实际位置定，不靠
-             * 进出的先后 —— 从主栏往面板上挪的那一路（缝里、留白上）收不到事件，
-             * 而且现在这还是**另一块窗口**。
+             * 别顺手删它：删掉之后自检那条"把光标放进主栏和面板之间那条缝，面板
+             * 不能闪掉"就红（面板在缝上被收掉）。没挖到底为什么。
              */
             MouseArea {
                 anchors.fill: parent

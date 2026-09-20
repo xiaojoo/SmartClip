@@ -30,6 +30,10 @@
 
 #include <algorithm>
 
+#if defined(Q_OS_WIN)
+#  include <windows.h>
+#endif
+
 namespace {
 
 /*
@@ -419,6 +423,24 @@ QRect StickyNoteWindow::screenBounds() const {
 QPoint StickyNoteWindow::cursorPos() const {
     /* 屏幕坐标（QCursor::pos 就是这个口径，和菜单的 anchorX/anchorY 一致） */
     return QCursor::pos();
+}
+
+bool StickyNoteWindow::mouseAnyDown() const {
+    /*
+     * 左/右键**此刻**在系统层面按着没有。
+     *
+     * 给便签菜单收"在别处点一下就关"用：那块菜单是不接激活的置顶窗口（见
+     * NoteMenu 的 flags 那段），在别处点一下既不会让它失焦，Qt 也收不到那一下
+     * （事件发给的是别的程序的窗口）—— 只能直接问系统。GetAsyncKeyState 读的
+     * 是全局状态，**不吞点击**：别处那一下照常落到它自己的窗口上，不像
+     * Popup 的 CloseOnPressOutside 那样要先垫一块全屏抓取窗。
+     */
+#if defined(Q_OS_WIN)
+    return (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0
+        || (GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0;
+#else
+    return QGuiApplication::mouseButtons() != Qt::NoButton;
+#endif
 }
 
 QRect StickyNoteWindow::noteRect() const {

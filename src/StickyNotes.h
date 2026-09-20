@@ -140,6 +140,15 @@ public:
     Q_INVOKABLE QPoint cursorPos() const;
 
     /*
+     * 左/右键此刻在系统层面按着没有（给便签菜单的"点别处才收"用）。
+     *
+     * 菜单是不接激活的置顶窗口：在别处点一下既不让它失焦，Qt 也收不到那一下
+     * 事件，所以只能问系统要全局按键状态（见 StickyNoteWindow::mouseAnyDown
+     * 里为什么不用 Popup 的 CloseOnPressOutside）。
+     */
+    Q_INVOKABLE bool mouseAnyDown() const;
+
+    /*
      * 「⋯」菜单要用：便签窗口自己的矩形（屏幕坐标）。
      *
      * 菜单拿它来**躲开便签**：便签贴近屏幕右边时，子面板往右挂就会压在便签

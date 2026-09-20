@@ -409,6 +409,26 @@ int SelfTest::runNotes(ClipboardStore *store, TrayIcon *tray, EditorController *
         noteCheck(open.value(QStringLiteral("flyout")).toString().isEmpty(),
                   QStringLiteral("菜单：刚打开时右边没有子面板"));
         /*
+         * 「鼠标挪开就收」这条已经换成「在别处按一下就收」（用户要求）。
+         * 这里钉住前半段：光标一直待在菜单外面、让 160ms 那拍看门狗至少跑两轮，
+         * 菜单必须还开着。
+         *
+         * 后半段（按一下就收）没法在无头自检里钉 —— 那要真按一次鼠标，而合成
+         * 点击会落到光标所在处**别人的**窗口上（踩过：连点左树弹出重命名卡片、
+         * 回车就把文件改了）。那半段只能人工验。
+         */
+        {
+            QElapsedTimer sinceParked;
+            sinceParked.start();
+            while (sinceParked.elapsed() < 400)
+                QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+            const QVariantMap still = notes->menuState(menuNote->id());
+            noteCheck(still.value(QStringLiteral("opened")).toBool(),
+                      QStringLiteral("菜单：光标一直挪在外面也不自己收（改成点别处才收）"),
+                      QStringLiteral("400ms 之后 opened=%1")
+                          .arg(still.value(QStringLiteral("opened")).toBool()));
+        }
+        /*
          * 颜色弹窗：便签头上那个**色块按钮**点开的调色板（用户要求"颜色放到外面
          * 来、做成弹窗的形式"）。这里走的就是按钮那条路（root.openPalette），
          * 量三件事：弹窗真开了、整份调色板都在里面、第一格就是默认的便签黄。
