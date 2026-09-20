@@ -899,6 +899,7 @@ void StickyNoteWindow::deleteNote() {
         return;
     StickyNotes *manager = m_owner;
     StickyNote *note = m_note;
+    notesLog(QStringLiteral("删除请求（菜单那条）→ 排到下一轮 %1").arg(noteBrief(this)));
     QTimer::singleShot(0, manager, [manager, note]() { manager->deleteNote(note); });
 }
 
@@ -1493,6 +1494,8 @@ void StickyNotes::deleteNote(StickyNote *note) {
     const QString groupId = note->groupId();
 
     StickyNoteWindow *window = windowFor(note);
+    /* 临时读数（查删除那一帧闪，量完删）：这三步各花多少毫秒，日志时间戳直接能算 */
+    notesLog(QStringLiteral("删除开始 %1").arg(noteBrief(window)));
     if (window)
         m_windows.removeAll(window);
     /*
@@ -1504,29 +1507,66 @@ void StickyNotes::deleteNote(StickyNote *note) {
      */
     m_store->remove(note);
 
-    if (window) {
-        /*
-         * 当场 delete，不走 deleteLater。
-         *
-         * deleteLater 只是排一个事件，得等事件循环转回去才真的析构 ——
-         * 自检是"一口气跑完再退出"的，中间那次 processEvents 不保证已经
-         * 处理掉延迟删除，于是"删了但窗口还挂在屏幕上"（实测：后面那节
-         * 数可见顶层窗口时数出多余的便签）。
-         *
-         * 同步删是安全的：进来的是界面上的删除动作（或自检直接调），而
-         * 界面那条路已经由 StickyNoteWindow::deleteNote 用
-         * QTimer::singleShot(0) 推到下一轮了，不会在 QML 求值中间拆窗口。
-         */
+    /* 临时 A/B 开关（量完删）：置了 SMARTCLIP_NOTES_DEL_OLD 就回到旧顺序 ——
+       先藏旧纸、也不补帧，和他手点 HEAD 那版一模一样 */
+    const bool delOldOrder = qEnvironmentVariableIsSet("SMARTCLIP_NOTES_DEL_OLD");
+    if (delOldOrder && window) {
         window->hide();
-        delete window;
+        notesLog(QStringLiteral("删除：【A/B 旧顺序】先藏了"));
     }
 
     /*
+     * 这里**不 hide** 旧窗口：藏了之后到"新纸真上屏"之间必有一帧整块纸都不在，
+     * 144Hz 下就是一条黑缝（他报的"黑/空的洞"）。让它继续垫在底下，等顶上那张
+     * 纸交到 DWM 之后再一起收（见下面那一段）。
+     *
+     * 不 hide 也不会把 repairGroup 的判断带错：上面已经 m_windows.removeAll，
+     * groupMembers 取的是 m_windows，这块将死的窗口不在成员里，那里
+     * "这摞还有没有露着的"（anyShown）扫的是活下来的那几块。
+     *
      * 组合窗口：它从那一摞里没了，剩下几块要收拾 —— 露头那块被删就换一块顶上
      * 并重排，只剩一块了就直接散伙（见 repairGroup）。不在组里就什么都不做。
      */
+    StickyNoteWindow *face = nullptr;
     if (!groupId.isEmpty())
-        repairGroup(groupId);
+        face = repairGroup(groupId);
+    notesLog(QStringLiteral("删除：repairGroup 完，这一摞收拾完了"));
+
+    if (window) {
+        /*
+         * **先把顶上那张纸真交出去，再收旧窗口、再拆。**
+         *
+         * 拆一块便签的窗口要 50~60ms（他机器实测，我机器 25ms），这几十毫秒事件
+         * 循环是停着的。原来"先 hide 再拆"就是把这段空档摊在屏幕上；现在让旧纸
+         * 垫着，新纸 raise 到它上面、补一帧、过三拍交到 DWM，然后才动旧窗口。
+         *
+         * raise() 不能省：顶上这块是 repairGroup 叫出来的，散伙那条支路只 show
+         * 没 raise（2664），层叠顺序里它可能还在旧纸下面。
+         * grabFramebuffer + repaint 只画进 Qt 自己的缓冲，原生窗口那一帧要过几拍
+         * 才交到 DWM —— 和点标签那一趟同一笔账（见 switchGroupTab）。
+         *
+         * 当场 delete、不走 deleteLater：deleteLater 只是排一个事件，自检那种
+         * "一口气跑完再退出"的跑法不保证真析构，会留下"清单里没了、窗口还挂着"
+         * 的残窗。同步删是安全的：进来的是界面上的删除动作（或自检直接调），而
+         * 界面那条路已经由 StickyNoteWindow::deleteNote 用 QTimer::singleShot(0)
+         * 推到下一轮了，不会在 QML 求值中间拆窗口。
+         */
+        if (face && face->isVisible() && !delOldOrder) {
+            face->raise();
+            face->renderOneFrameNow();
+            notesLog(QStringLiteral("删除：新纸补帧完 %1").arg(noteBrief(face)));
+            /* 临时 A/B：SMARTCLIP_NOTES_PUMP_N 调过几拍（默认 3，量完删） */
+            bool ok = false;
+            const int pumpN = qEnvironmentVariableIntValue("SMARTCLIP_NOTES_PUMP_N", &ok);
+            for (int i = 0; i < (ok && pumpN > 0 ? pumpN : 3); ++i)
+                QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
+            notesLog(QStringLiteral("删除：过三拍完"));
+        }
+        window->hide();
+        notesLog(QStringLiteral("删除：旧窗口 hide 完"));
+        delete window;
+        notesLog(QStringLiteral("删除：旧窗口 delete 完"));
+    }
 
     emit changed();
     emit arrangementChanged();
@@ -2630,10 +2670,11 @@ void StickyNotes::forgetGroupIfEmpty(const QString &groupId) {
  * 一摞里少了一块之后的收拾：露头那块没了就换一块顶上、整摞重排；
  * 组里只剩一块了就直接散伙（"组合"至少得有两块）。
  */
-void StickyNotes::repairGroup(const QString &groupId) {
+StickyNoteWindow *StickyNotes::repairGroup(const QString &groupId) {
     if (groupId.isEmpty())
-        return;
+        return nullptr;
     const QList<StickyNoteWindow *> members = groupMembers(groupId);
+    notesLog(QStringLiteral("收拾那一摞 组=%1 成员=%2 块").arg(groupId).arg(members.size()));
     forgetGroupIfEmpty(groupId);
     if (members.size() < 2) {
         /* 只剩一块（或者一块都不剩了）：那一块当普通便签，摞就没了 */
@@ -2641,14 +2682,17 @@ void StickyNotes::repairGroup(const QString &groupId) {
             members.first()->note()->setGroupId(QString());
             if (members.first()->note()->visible() && !members.first()->isVisible())
                 members.first()->show();
+            notesLog(QStringLiteral("散伙：最后一块 show 完 %1").arg(noteBrief(members.first())));
             members.first()->rememberGeometry();
             members.first()->notifyGroupChanged();
             /* 只剩它一块了：左边那条标签条收掉（它不再是"一摞"） */
             refreshTabs();
             m_store->scheduleSave();
             emit groupChanged();
+            notesLog(QStringLiteral("散伙：标签条收完 %1").arg(noteBrief(members.first())));
+            return members.first();
         }
-        return;
+        return nullptr;
     }
     /*
      * 少了一块之后先保证"至少有一块是露着的"：露头那块被删 / 被收起来时，
@@ -2677,10 +2721,14 @@ void StickyNotes::repairGroup(const QString &groupId) {
             member->note()->setVisible(true);
             member->show();
             member->raise();
+            notesLog(QStringLiteral("顶上：露头那块没了，叫出 %1").arg(noteBrief(member)));
             break;
         }
     }
     applyGroupLayout(groupId);
+    StickyNoteWindow *face = activeInGroup(groupId);
+    notesLog(QStringLiteral("收拾完 组=%1 现在露头=%2").arg(groupId).arg(noteBrief(face)));
+    return face;
 }
 
 /*

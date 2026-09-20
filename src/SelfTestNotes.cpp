@@ -2335,6 +2335,70 @@ int SelfTest::runNotes(ClipboardStore *store, TrayIcon *tray, EditorController *
         noteOut(QStringLiteral("（没有命令中枢，跳过热键那条）"));
     }
 
+    /*
+     * 临时探针（查"从菜单删一张"闪的那一帧；量完删）：
+     * SMARTCLIP_NOTES_DELETE_PROBE=1 才跑。走的是和他手点**完全同一条路**：
+     * openNoteMenu → noteMenu.fire("delete") → StickyNoteWindow::deleteNote
+     * → singleShot(0) → StickyNotes::deleteNote。之前那版探针直接调的是
+     * manager->deleteNote()，跳过了菜单和那个 singleShot —— 所以量不出来。
+     * 每一步之间睡 600~900ms，好让 144fps 的录制把"删之前 / 那一下 / 之后"分开。
+     */
+    if (qEnvironmentVariableIsSet("SMARTCLIP_NOTES_DELETE_PROBE")) {
+        noteOut(QStringLiteral("【探针】菜单删除逐帧：建 4 块 → 叠成一摞 → 连删 3 次"));
+        StickyNote *first = notes->createNote();
+        for (int i = 0; i < 3; ++i)
+            notes->createNote();
+        settle();
+        QThread::msleep(500);
+        notes->stackAll(first);
+        settle();
+        /* 只留这一摞的组 id（字符串）：下面每轮删掉的那块，它的裸指针当场就悬了 */
+        const QString probeGroup = first ? first->groupId() : QString();
+        QThread::msleep(900);
+
+        /* 删到散伙为止：9→8→…→2→1，最后那一刀会让整条标签条消失 */
+        for (int round = 0; round < 8; ++round) {
+            StickyNoteWindow *face = notes->activeInGroup(probeGroup);
+            const QString faceId = face && face->note() ? face->note()->id() : QString();
+            QObject *root = notes->windowRootForId(faceId);
+            const QVariantMap geo = notes->windowState(faceId);
+            noteOut(QStringLiteral("【探针】第 %1 轮：露着的那块 id=%2 卡片=%3x%4@%5,%6 摞里 %7 块")
+                        .arg(round + 1)
+                        .arg(faceId.right(4))
+                        .arg(geo.value(QStringLiteral("w")).toInt())
+                        .arg(geo.value(QStringLiteral("h")).toInt())
+                        .arg(geo.value(QStringLiteral("x")).toInt())
+                        .arg(geo.value(QStringLiteral("y")).toInt())
+                        .arg(notes->groupMembers(probeGroup).size()));
+            std::fflush(stdout);
+            if (!root) {
+                noteOut(QStringLiteral("【探针】拿不到 QML 根，停"));
+                break;
+            }
+            /*
+             * 标记：**要被删的那块先涂红**。录屏里红 = "这一摞此刻露着的纸"，
+             * 红消失之后到下一张纸出现之前那几帧是什么颜色，就是用户看到的闪。
+             * 分析只盯纸面左上角一小块（菜单弹在右下，盖不到那里）。
+             */
+            face->note()->setColor(QColor(QStringLiteral("#d81b1b")));
+            settle();
+            QThread::msleep(400);
+            QMetaObject::invokeMethod(root, "openNoteMenu",
+                                      Q_ARG(QVariant, geo.value(QStringLiteral("x")).toInt() + 90),
+                                      Q_ARG(QVariant, geo.value(QStringLiteral("y")).toInt() + 90));
+            settle();
+            QThread::msleep(600);
+            QObject *menu = root->findChild<QObject *>(QStringLiteral("noteMenu"));
+            if (menu)
+                QMetaObject::invokeMethod(menu, "fire", Q_ARG(QVariant, QVariant("delete")));
+            settle();
+            noteOut(QStringLiteral("【探针】  ·那一拍之后：还剩 %1 块").arg(notes->count()));
+            std::fflush(stdout);
+            QThread::msleep(900);
+        }
+        QThread::msleep(900);
+    }
+
     /* =====================================================================
      * 收工：删干净，桌面上不留残窗
      * =================================================================== */

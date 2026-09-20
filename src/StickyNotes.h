@@ -844,8 +844,12 @@ private:
     void notifyGroupWindows(const QString &groupId);
     /* 一块便签被藏起来 / 删掉了：把它的摞收拾干净（空摞要忘掉） */
     void forgetGroupIfEmpty(const QString &groupId);
-    /* 摞里露头那张纸被藏了 / 删了：换一块顶上并重排（没有别的就什么都没了） */
-    void repairGroup(const QString &groupId);
+    /*
+     * 摞里露头那张纸被藏了 / 删了：换一块顶上并重排（没有别的就什么都没了）。
+     * 返回收拾完这一刻"该露着"的那块窗口（一块都不该露着时返回 nullptr）——
+     * 删窗口那条路要用它先补一帧再拆（见 StickyNotes::deleteNote）。
+     */
+    StickyNoteWindow *repairGroup(const QString &groupId);
 
     QQmlEngine *m_engine = nullptr;
     NoteThumbs *m_thumbs = nullptr;
