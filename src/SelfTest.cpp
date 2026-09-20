@@ -4791,10 +4791,21 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
             check(shot->pinnedCount() == 1 && pin != nullptr,
                   QStringLiteral("截图：固定到桌面开出了一个贴图窗口"));
             if (pin) {
-                check(qAbs(pin->width() - qRound(selW)) <= 1
-                          && qAbs(pin->height() - qRound(selH)) <= 1,
-                      QStringLiteral("截图：贴图窗口就是选区那么大"),
-                      QStringLiteral("窗口 %1x%2").arg(pin->width()).arg(pin->height()));
+                /*
+                 * 窗口 = 图片 + 一圈外边距（左右上 kPadSide，底部再多一条放常驻工具栏
+                 * kPadBottom）。贴图现在比选区大一圈是有意为之（外投影 + 图外工具栏），
+                 * 所以这里量的不再是"窗口==选区"，而是"窗口去掉边距==图片"。
+                 */
+                auto *pw = qobject_cast<PinWindow *>(pin);
+                const qreal imgW = pw ? pw->viewWidth() : qRound(selW);
+                const qreal imgH = pw ? pw->viewHeight() : qRound(selH);
+                check(qAbs(pin->width() - qRound(imgW + 2 * PinWindow::kPadSide)) <= 1
+                          && qAbs(pin->height() - qRound(imgH + PinWindow::kPadSide
+                                                         + PinWindow::kPadBottom)) <= 1,
+                      QStringLiteral("截图：贴图窗口 = 图片 + 外边距（阴影 + 图外工具栏那条）"),
+                      QStringLiteral("窗口 %1x%2 / 图片 %3x%4")
+                          .arg(pin->width()).arg(pin->height())
+                          .arg(qRound(imgW)).arg(qRound(imgH)));
                 check(pin->windowFlags().testFlag(Qt::WindowStaysOnTopHint)
                           && pin->windowFlags().testFlag(Qt::FramelessWindowHint),
                       QStringLiteral("截图：贴图窗口是置顶 + 无边框（钉在桌面上）"));
@@ -4985,12 +4996,9 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
                 }
 
                 /*
-                 * 工具条真的铺得开。
-                 *
-                 * 这条是**实测踩出来的**：bar.width 绑 barFlow.implicitWidth、而
-                 * Flow.width 又绑 bar.width，两边成环 —— 量出来是 59×492（所有键
-                 * 竖成一列、整条工具条还跑到窗口外，"关闭"根本点不到）。光看"键在
-                 * 不在"（上面那条）是看不出来的，必须量几何。
+                 * 工具条：单行、常驻、摆在图片下沿**外面**（不再叠在图上、也不再
+                 * 随窗口宽窄折行）。量三件事：① 条够宽（一排键铺开，不是竖成几列）
+                 * ② 条高固定 barH ③ 条顶在图片下沿之下、但整条还在窗口那条底边距里。
                  */
                 QVariant barState;
                 QMetaObject::invokeMethod(pinRoot, "barState", Q_RETURN_ARG(QVariant, barState));
@@ -4998,162 +5006,91 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
                 const double barW = barMap.value(QStringLiteral("width")).toDouble();
                 const double barH = barMap.value(QStringLiteral("height")).toDouble();
                 const double barY = barMap.value(QStringLiteral("y")).toDouble();
-                check(barW > 300 && barH < 150 && barY + barH <= pin->height() + 1,
-                      QStringLiteral("贴图：工具条铺得开、摆在窗口里（不是竖成一列 / 跑出窗口）"),
-                      QStringLiteral("%1x%2 @y=%3 / 窗口 %4x%5")
-                          .arg(barW).arg(barH).arg(barY).arg(pin->width()).arg(pin->height()));
+                const double imageBottom = barMap.value(QStringLiteral("imageBottom")).toDouble();
+                check(barW > 300 && barH > 20 && barH <= 60
+                          && barY >= imageBottom - 1
+                          && barY + barH <= pin->height() + 1,
+                      QStringLiteral("贴图：工具条单行铺开、摆在图片下沿外且仍在窗口里"),
+                      QStringLiteral("%1x%2 @y=%3 图底=%4 / 窗口 %5x%6")
+                          .arg(barW).arg(barH).arg(barY).arg(imageBottom)
+                          .arg(pin->width()).arg(pin->height()));
 
                 /*
-                 * 工具条宽度**跟着内容走**：窗口够宽时贴着键收窄，不再一路撑满
-                 * （贴图宽到一千多时，两边各留一大片空，键挤在中间一小段里）。
-                 *
-                 * 上面那个窗口（462）本来就摆不下这一串键，只能撑满 + 折行，量不出
-                 * "收窄"，所以这里先把窗口拉宽量一次，量完立刻摆回去。
+                 * 工具条宽度只由内容定、不随窗口 / 缩放变（用户要"不随截图缩小放大"）：
+                 * 把窗口拉宽一次，条宽应当纹丝不动（singleRowWidth 与 Flow 都不折行）。
                  */
                 {
                     const QSize keepSize = pin->size();
-                    pin->resize(1000, 700);
+                    pin->resize(1200, qRound(pin->height() * 1.8));
                     settle();
                     QVariant wideState;
                     QMetaObject::invokeMethod(pinRoot, "barState",
                                               Q_RETURN_ARG(QVariant, wideState));
                     const QVariantMap wideMap = wideState.toMap();
-                    const double wideW = wideMap.value(QStringLiteral("width")).toDouble();
-                    const double wantW = wideMap.value(QStringLiteral("singleRowWidth")).toDouble();
-                    check(wideW < pin->width() - 40 && wantW > 300
-                              && qAbs(wideW - (wantW + 18)) <= 2.0,
-                          QStringLiteral("贴图：工具条宽度跟着内容走（窗口宽的时候不撑满）"),
-                          QStringLiteral("条宽 %1 / 键串 %2 / 窗口 %3")
-                              .arg(wideW, 0, 'f', 1).arg(wantW, 0, 'f', 1)
-                              .arg(pin->width()));
-                    /* 摆不下的时候（窄窗口）：撑满 + 折行，不能把键挤到窗口外 */
-                    QVariant narrowState;
                     pin->resize(keepSize);
                     settle();
-                    QMetaObject::invokeMethod(pinRoot, "barState",
-                                              Q_RETURN_ARG(QVariant, narrowState));
-                    const QVariantMap narrowMap = narrowState.toMap();
-                    const double narrowW = narrowMap.value(QStringLiteral("width")).toDouble();
-                    const double narrowFlowW =
-                        narrowMap.value(QStringLiteral("flowWidth")).toDouble();
-                    check(narrowW <= pin->width() - 15
-                              && narrowFlowW <= narrowW - 15
-                              && narrowMap.value(QStringLiteral("singleRowWidth")).toDouble()
-                                     > narrowW,
-                          QStringLiteral("贴图：窄窗口时工具条撑满并折行（键串比条宽还长）"),
-                          QStringLiteral("条宽 %1 / Flow %2 / 键串 %3 / 窗口 %4")
-                              .arg(narrowW, 0, 'f', 1).arg(narrowFlowW, 0, 'f', 1)
-                              .arg(narrowMap.value(QStringLiteral("singleRowWidth")).toDouble(),
-                                   0, 'f', 1)
-                              .arg(pin->width()));
+                    const double wideW = wideMap.value(QStringLiteral("width")).toDouble();
+                    check(qAbs(wideW - barW) <= 2.0,
+                          QStringLiteral("贴图：窗口变宽，工具条宽度不变（单行、不撑满）"),
+                          QStringLiteral("宽窗时条宽 %1 / 平时 %2")
+                              .arg(wideW, 0, 'f', 1).arg(barW, 0, 'f', 1));
                 }
 
                 /*
-                 * 工具条"鼠标进来才露、一离开就收"（用户要求）。
-                 *
-                 * 走真鼠标事件（HoverLeave / HoverMove / 真点击），量三件事：
-                 *   ① 鼠标离开 -> 收起来（透明度归零，**命中也一并关掉**）
-                 *   ② 这时点在它原来的位置上不能误按到那一排键
-                 *   ③ 鼠标再进来 -> 又露出来，而且点得动了
-                 *
-                 * ②挑「认字」来点，不挑「关闭」：判据是同一条（父项 enabled=false
-                 * 会把子项那些 MouseArea 一起关掉），而「关闭」真被点到就把这块贴图
-                 * 关了 —— 万一哪天判据坏了，这条要红得能看懂，不该把后面全带崩。
+                 * 图片最小宽 = 工具条宽（用户要求）：把窗口往窄里拖，宽度不能小于那条
+                 * 工具条 —— 缩小到极限时图片宽就等于条宽（zoom 被 C++ 钳住）。
                  */
                 {
-                    auto barNow = [pinRoot]() {
-                        QVariant value;
-                        QMetaObject::invokeMethod(pinRoot, "barState",
-                                                  Q_RETURN_ARG(QVariant, value));
-                        return value.toMap();
-                    };
-                    /*
-                     * 露 / 收都带 150ms 淡入淡出，而 settle() 一轮差不多就 150ms ——
-                     * 只等一轮会量到"淡到一半"（实测 0.72），得等它淡完再读数。
-                     */
-                    auto settleOpacity = [&](bool shown) {
-                        double o = barNow().value(QStringLiteral("opacity")).toDouble();
-                        for (int i = 0; i < 12; ++i) {
-                            if (shown ? (o >= 0.99) : (o <= 0.01))
-                                break;
-                            settle();
-                            o = barNow().value(QStringLiteral("opacity")).toDouble();
-                        }
-                        return o;
-                    };
-                    QQuickWindow *scene = pinRoot->window();
-                    /* 鼠标离开：收起来 */
-                    hoverScene(scene, QPoint(qRound(pin->width() / 2.0),
-                                             qRound(pin->height() / 2.0)), false);
+                    const QSize keepSize = pin->size();
+                    pin->resize(60, 60);
                     settle();
-                    const double hiddenOpacity = settleOpacity(false);
-                    const QVariantMap hidden = barNow();
-                    check(!hidden.value(QStringLiteral("hovered")).toBool()
-                              && !hidden.value(QStringLiteral("shown")).toBool()
-                              && hiddenOpacity <= 0.01
-                              && !hidden.value(QStringLiteral("enabled")).toBool(),
-                          QStringLiteral("贴图：鼠标一离开就把工具条收起来（连命中一起关）"),
-                          QStringLiteral("hovered=%1 shown=%2 透明度=%3 enabled=%4")
-                              .arg(hidden.value(QStringLiteral("hovered")).toBool())
-                              .arg(hidden.value(QStringLiteral("shown")).toBool())
-                              .arg(hiddenOpacity, 0, 'f', 2)
-                              .arg(hidden.value(QStringLiteral("enabled")).toBool()));
+                    const double minWinW = pin->width();
+                    const double wantMin = barW + 2 * PinWindow::kPadSide;
+                    check(minWinW >= wantMin - 2.0,
+                          QStringLiteral("贴图：窄到极限时窗口宽 >= 工具条宽（图片最小宽=条宽）"),
+                          QStringLiteral("窗口宽 %1 / 期望 >= %2").arg(minWinW).arg(wantMin));
+                    pin->resize(keepSize);
+                    settle();
+                }
 
-                    /*
-                     * ② 收起来的时候这一下**吃不吃**：拿同一个键、同一种事件
-                     * （按下+抬起，不带那一下移动）在两种状态下各点一次 ——
-                     * 收着的时候不该有反应，露出来的时候必须有反应。一正一反
-                     * 才算量到，不然"事件根本没送到"会假装通过。
-                     *
-                     * 挑「认字」不挑「关闭」：判据是同一条（父项 enabled=false 把
-                     * 子项那些 MouseArea 一起关掉），而「关闭」真被点到就把这块贴图
-                     * 关了 —— 万一哪天判据坏了，这条要红得能看懂，不该把后面全带崩。
-                     */
-                    QQuickItem *ocrButton = pinRoot->findChild<QQuickItem *>(QStringLiteral("pinOcr"));
+                /*
+                 * 工具条常驻：鼠标离开窗口也照样露着、也点得动（原来的"hover 才露、
+                 * 离开就收"已经撤了，改成图片下方常驻）。
+                 */
+                {
+                    QQuickWindow *scene = pinRoot->window();
+                    /* 先把鼠标甩到窗口外，制造"没 hover"的状态 */
+                    hoverScene(scene, QPoint(-200, -200), false);
+                    settle();
+                    QVariant value;
+                    QMetaObject::invokeMethod(pinRoot, "barState", Q_RETURN_ARG(QVariant, value));
+                    const QVariantMap m = value.toMap();
+                    check(m.value(QStringLiteral("opacity")).toDouble() >= 0.99
+                              && m.value(QStringLiteral("enabled")).toBool()
+                              && m.value(QStringLiteral("visible")).toBool(),
+                          QStringLiteral("贴图：鼠标不在窗口里时工具条也常驻（不淡出、命中不关）"),
+                          QStringLiteral("透明度=%1 enabled=%2 visible=%3")
+                              .arg(m.value(QStringLiteral("opacity")).toDouble(), 0, 'f', 2)
+                              .arg(m.value(QStringLiteral("enabled")).toBool())
+                              .arg(m.value(QStringLiteral("visible")).toBool()));
+
+                    /* 露着的时候「认字」那个键点得动（证明命中真开着，不是个摆设） */
+                    QQuickItem *ocrButton =
+                        pinRoot->findChild<QQuickItem *>(QStringLiteral("pinOcr"));
                     check(ocrButton != nullptr,
-                          QStringLiteral("贴图：收起来也要问得出「认字」在哪儿（自检按它点）"));
+                          QStringLiteral("贴图：问得出「认字」在哪儿（自检按它点）"));
                     if (ocrButton) {
                         QMetaObject::invokeMethod(pinRoot, "testOcrMenu",
                                                   Q_ARG(QVariant, QVariant(false)));
                         settle();
-                        const QPoint at = ocrButton
-                                              ->mapToScene(QPointF(ocrButton->width() / 2.0,
-                                                                   ocrButton->height() / 2.0))
+                        const QPoint at = ocrButton->mapToScene(
+                                              QPointF(ocrButton->width() / 2.0,
+                                                      ocrButton->height() / 2.0))
                                               .toPoint();
-                        clickSceneNoHover(scene, at);      /* 收着 */
-                        settle();
-                        check(!pinRoot->property("ocrMenuOpen").toBool(),
-                              QStringLiteral("贴图：收起来的时候那个键不吃点击"),
-                              QStringLiteral("点在 %1,%2（「认字」的位置）/ 菜单 %3")
-                                  .arg(at.x()).arg(at.y())
-                                  .arg(pinRoot->property("ocrMenuOpen").toBool()));
-                    }
-
-                    /* ③ 鼠标再进来：露出来、点得动（同一下点击这回必须有反应） */
-                    hoverScene(scene, QPoint(qRound(pin->width() / 2.0),
-                                             qRound(pin->height() / 2.0)), true);
-                    settle();
-                    const double shownOpacity = settleOpacity(true);
-                    const QVariantMap shown = barNow();
-                    check(shown.value(QStringLiteral("hovered")).toBool()
-                              && shown.value(QStringLiteral("shown")).toBool()
-                              && shownOpacity >= 0.99
-                              && shown.value(QStringLiteral("enabled")).toBool(),
-                          QStringLiteral("贴图：鼠标一进来工具条又露出来（还是可点的）"),
-                          QStringLiteral("hovered=%1 shown=%2 透明度=%3 enabled=%4")
-                              .arg(shown.value(QStringLiteral("hovered")).toBool())
-                              .arg(shown.value(QStringLiteral("shown")).toBool())
-                              .arg(shownOpacity, 0, 'f', 2)
-                              .arg(shown.value(QStringLiteral("enabled")).toBool()));
-                    if (ocrButton) {
-                        const QPoint at = ocrButton
-                                              ->mapToScene(QPointF(ocrButton->width() / 2.0,
-                                                                   ocrButton->height() / 2.0))
-                                              .toPoint();
-                        clickSceneNoHover(scene, at);      /* 露着 */
+                        clickSceneNoHover(scene, at);
                         settle();
                         check(pinRoot->property("ocrMenuOpen").toBool(),
-                              QStringLiteral("贴图：露出来之后同一个键就吃了（菜单叫得出来）"),
+                              QStringLiteral("贴图：常驻的工具条点得动「认字」（菜单叫得出来）"),
                               QStringLiteral("点在 %1,%2 / 菜单 %3")
                                   .arg(at.x()).arg(at.y())
                                   .arg(pinRoot->property("ocrMenuOpen").toBool()));
@@ -5211,7 +5148,9 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
                 pin->zoomBy(1.1);
                 settle();
                 check(pin->zoom() > zoom0
-                          && qAbs(pin->width() - qRound(pinSel.width() * pin->zoom())) <= 2,
+                          && qAbs(pin->width()
+                                  - qRound(pinSel.width() * pin->zoom()
+                                           + 2 * PinWindow::kPadSide)) <= 2,
                       QStringLiteral("贴图：放大之后窗口跟着图一起变大"),
                       QStringLiteral("zoom %1 -> %2 / 窗口 %3")
                           .arg(zoom0).arg(pin->zoom()).arg(pin->width()));
@@ -5544,8 +5483,15 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
                  * 连着选、空白处拖动有没有被吃掉"。这截不依赖这台机器装没装 OCR。
                  */
                 {
-                    const double vw = double(pin->width());
-                    const double vh = double(pin->height());
+                    /*
+                     * vw/vh 必须是**图片**尺寸（viewWidth/viewHeight），不是窗口尺寸：
+                     * 贴图现在比图片大一圈（外边距 + 图外工具栏），而 OCR 行是相对
+                     * 图片归一化的、testOcrDrag 喂的也是图片坐标 —— 拿窗口尺寸换算
+                     * 会把每一行都摆偏（加边距之后这几条就是这么红的）。
+                     */
+                    auto *pwImg = qobject_cast<PinWindow *>(pin);
+                    const double vw = pwImg ? double(pwImg->viewWidth()) : double(pin->width());
+                    const double vh = pwImg ? double(pwImg->viewHeight()) : double(pin->height());
                     const QString line1 = QStringLiteral("第一行 HELLO WORLD");
                     const QString line2 = QStringLiteral("第二行 你好世界");
 

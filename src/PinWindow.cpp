@@ -316,6 +316,14 @@ PinWindow::PinWindow(const QImage &image, const QPoint &pos, QQmlEngine *engine,
     /* 关掉就删：贴图是"用完即弃"的东西（见 Screenshot::m_pins 那份 QPointer） */
     setAttribute(Qt::WA_DeleteOnClose);
     /*
+     * 窗口要**半透明**：现在贴图比底图大一圈，那圈留白（外投影 + 图外工具栏）
+     * 在 QML 里是透明的，只有开了 WA_TranslucentBackground 才真透到桌面上、
+     * 让投影看着像"浮起来"。不加这一句，透明区会被填成黑色 —— 那圈黑就是
+     * 用户报的"黑色边框"（和便签 / 翻译卡片同一个套路，见 StickyNotes / Translate；
+     * 注意是加在顶层 QWidget 上，加到 QQuickWidget 上整块会变黑，见 main.cpp 的说明）。
+     */
+    setAttribute(Qt::WA_TranslucentBackground);
+    /*
      * 别把焦点从主窗口抢走：贴上去的图主要是看。但文字框要能打字 —— 用户点进
      * 文字框时 QQuickWidget 会自己把焦点拿过去，这一条只管"刚贴上去那一下别抢"。
      */
@@ -358,6 +366,11 @@ PinWindow::PinWindow(const QImage &image, const QPoint &pos, QQmlEngine *engine,
         { QStringLiteral("imageId"), m_id },
         { QStringLiteral("viewWidth"), viewWidth() },
         { QStringLiteral("viewHeight"), viewHeight() },
+        /* 外边距 / 工具栏条：和 shownSize 用的是同一组常量，QML 照着摆内容 */
+        { QStringLiteral("padSide"), kPadSide },
+        { QStringLiteral("padBottom"), kPadBottom },
+        { QStringLiteral("barGap"), kBarGap },
+        { QStringLiteral("barH"), kBarH },
     });
     m_view->setSource(QUrl(QStringLiteral("qrc:/qt/qml/SmartClip/qml/screenshot/PinOverlay.qml")));
     if (m_view->status() == QQuickWidget::Error) {
@@ -586,7 +599,7 @@ void PinWindow::beginResize() {
 }
 
 void PinWindow::setZoom(qreal value) {
-    const qreal next = qBound(0.1, value, 8.0);
+    const qreal next = qBound(minZoom(), value, 8.0);
     if (qFuzzyCompare(next, m_zoom))
         return;
     m_zoom = next;
@@ -594,6 +607,21 @@ void PinWindow::setZoom(qreal value) {
     resize(shownSize());
     m_settingZoom = false;
     emit zoomChanged();
+}
+
+qreal PinWindow::minZoom() const {
+    if (m_picture.width() <= 0 || m_minBarWidth <= 0)
+        return 0.1;
+    return qMax(0.1, m_minBarWidth / m_picture.width());
+}
+
+void PinWindow::setMinBarWidth(qreal width) {
+    if (width <= 0 || qFuzzyCompare(width, m_minBarWidth))
+        return;
+    m_minBarWidth = width;
+    /* 图片当前比工具栏还窄的话，就地抬到刚好等宽（否则那条下限就是摆设） */
+    if (m_zoom < minZoom())
+        setZoom(minZoom());
 }
 
 /*
@@ -609,16 +637,31 @@ void PinWindow::resizeEvent(QResizeEvent *event) {
         return;                 /* 是我们自己按缩放摆的窗口，别倒过来算一遍 */
     if (m_picture.width() <= 0 || m_picture.height() <= 0)
         return;
-    const qreal next = qBound(0.1, qreal(width()) / m_picture.width(), 8.0);
-    if (qFuzzyCompare(next, m_zoom))
-        return;
-    m_zoom = next;
-    emit zoomChanged();
+    /* 窗口比图片大一圈（外边距 + 底部工具栏条），反算缩放要先扣掉左右边距 */
+    const qreal imgW = qreal(width()) - 2.0 * kPadSide;
+    const qreal next = qBound(minZoom(), imgW / m_picture.width(), 8.0);
+    const bool changed = !qFuzzyCompare(next, m_zoom);
+    if (changed)
+        m_zoom = next;
+    /*
+     * 缩放下限（图片最小宽 = 工具栏宽）可能把窗口顶得比"该多大"还小 —— 这时候
+     * 光改 zoom 不够，窗口还停在用户拖到的那个小尺寸上（图就会溢出）。按新的 zoom
+     * 反算回来，窗口不足 shownSize 就撑回去（m_settingZoom 挡住这一下的递归）。
+     */
+    const QSize want = shownSize();
+    if (width() < want.width() || height() < want.height()) {
+        m_settingZoom = true;
+        resize(want);
+        m_settingZoom = false;
+    }
+    if (changed)
+        emit zoomChanged();
 }
 
 QSize PinWindow::shownSize() const {
-    return QSize(qMax(1, qRound(m_picture.width() * m_zoom)),
-                 qMax(1, qRound(m_picture.height() * m_zoom)));
+    /* 底图 × 缩放，再套上左右上下的外边距（下边多一条放常驻工具栏） */
+    return QSize(qMax(1, qRound(m_picture.width() * m_zoom + 2.0 * kPadSide)),
+                 qMax(1, qRound(m_picture.height() * m_zoom + kPadSide + kPadBottom)));
 }
 
 void PinWindow::wheelEvent(QWheelEvent *event) {

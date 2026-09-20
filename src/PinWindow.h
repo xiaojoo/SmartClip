@@ -95,6 +95,22 @@ public:
     qreal zoom() const { return m_zoom; }
     qreal viewWidth() const { return m_picture.width() * m_zoom; }
     qreal viewHeight() const { return m_picture.height() * m_zoom; }
+
+    /*
+     * 贴图窗口现在比底图大一圈（见 shownSize）：四周留 kPadSide 放外投影，
+     * 底下再多留一条放常驻工具栏（kBarGap + kBarH + kPadSide）。这几个数是
+     * 窗口几何的唯一出处，同时作为 initialProperties 推给 PinOverlay.qml，
+     * 两边必须同一份值 —— 少一处对齐，图片就会在窗口里错位 / 工具栏跑出窗口。
+     */
+    static constexpr qreal kPadSide = 30;   /* 左 / 右 / 上的外边距（辉光散得开） */
+    static constexpr qreal kBarGap = 10;    /* 图片下沿到工具栏的间隙 */
+    static constexpr qreal kBarH = 48;      /* 工具栏条高（单行固定） */
+    static constexpr qreal kPadBottom = kBarGap + kBarH + kPadSide;
+    qreal padSide() const { return kPadSide; }
+    qreal padBottom() const { return kPadBottom; }
+    qreal barGap() const { return kBarGap; }
+    qreal barH() const { return kBarH; }
+
     bool ocrAvailable() const;
     bool ocrBusy() const { return m_ocrBusy; }
     QVariantList ocrLines() const { return m_ocrLines; }
@@ -139,6 +155,12 @@ public:
     Q_INVOKABLE void endDrag();
     /* 改大小交给窗口管理器（右下角那个把手） */
     Q_INVOKABLE void beginResize();
+    /*
+     * 图片能缩到的下限 = 工具栏那条的宽度（用户要求：工具栏不换行，图片缩小
+     * 最小就等于工具栏宽）。宽度是 QML 按每个键的实际内容量出来的（单行不折行，
+     * 与缩放无关），量好后调这里回报给 C++，C++ 据此钳住 setZoom 的下限。
+     */
+    Q_INVOKABLE void setMinBarWidth(qreal width);
     /* QML 那边改完标注喊一声：复制 / 保存 / 识别要用的那份得跟着重画 */
     Q_INVOKABLE void annotationsChanged(const QVariantList &list);
     /*
@@ -189,6 +211,8 @@ protected:
 
 private:
     void setZoom(qreal value);
+    /* 缩放下限：图片宽度不得小于工具栏条宽（见 setMinBarWidth）；还没量到时退回 0.1 */
+    qreal minZoom() const;
     /* 窗口该多大：图 × 缩放（图是"一像素是一像素"，见 .cpp 里 kPinDpr 的说明） */
     QSize shownSize() const;
 
@@ -199,6 +223,8 @@ private:
     Screenshot *m_owner = nullptr;
     QVariantList m_annotations;
     qreal m_zoom = 1.0;
+    /* 图片最小宽度（= 工具栏条宽，QML 量好后回报，见 setMinBarWidth）；0 = 还没量到 */
+    qreal m_minBarWidth = 0.0;
     /* 正在按缩放摆窗口（那时候的 resize 事件不该再反过来改缩放，见 resizeEvent） */
     bool m_settingZoom = false;
     /*

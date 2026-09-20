@@ -3,6 +3,7 @@ pragma ComponentBehavior: Bound
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import QtQuick.Effects
 import "../utils"
 import SmartClip.Globals 1.0
 
@@ -47,6 +48,15 @@ Rectangle {
     /* 逻辑尺寸：窗口按它摆、标注按它裁 */
     property real viewWidth: 320
     property real viewHeight: 240
+    /*
+     * 外边距 / 工具栏条（C++ 的 shownSize 用同一组常量算出来的窗口尺寸推下来）：
+     * 底图不再是"铺满整个窗口"，而是内缩到 (padSide, padSide, viewWidth, viewHeight)
+     * 这一块"图片矩形"里；四周的 padSide 留给外投影，底下 padBottom 那条留给常驻工具栏。
+     */
+    property real padSide: 30
+    property real padBottom: 88
+    property real barGap: 10
+    property real barH: 48
 
     /* ---- 标注 ---- */
     /*
@@ -172,14 +182,9 @@ Rectangle {
     /*
      * 鼠标在不在贴图上（HoverHandler 喂它，见下面）。
      *
-     * 工具条**只在鼠标进来时露**（用户要求）：贴图平时就像一张静态图，鼠标划过来
-     * 才把工具条显出来；鼠标一离开就收掉，不挡着图、也不占视线。
+     * 现在工具条常驻、不再靠 hover 淡入淡出，hovered 只留着给光标形状判断用。
      */
     property bool hovered: false
-    /* 工具条这会儿该不该露：鼠标在窗口里，或者正按着左键（拖着窗口 / 划着线
-       —— 拖动时鼠标可能短暂跑到窗口外，别让工具条在手里闪） */
-    readonly property bool barShown: hovered || leftDown
-    
 
     readonly property color accent: "#4c96d8"
     readonly property color borderColor: "#4b4d4f"
@@ -1008,8 +1013,9 @@ Rectangle {
         return { x: bar.x, y: bar.y, width: bar.width, height: bar.height,
                  flowWidth: barFlow.width, flowHeight: barFlow.implicitHeight,
                  singleRowWidth: barFlow.singleRowWidth,
-                 /* 鼠标在不在窗口里 / 工具条这会儿露没露（收起来时还得关掉命中） */
-                 hovered: root.hovered, shown: root.barShown,
+                 /* 工具条现在常驻、摆在图片下沿外面（这条 imageBottom 给自检判"在图外"） */
+                 imageBottom: root.padSide + root.viewHeight,
+                 hovered: root.hovered, shown: true,
                  opacity: bar.opacity, enabled: bar.enabled, visible: bar.visible }
     }
 
@@ -1115,10 +1121,48 @@ Rectangle {
 
     /* ================= 底图 / 标注层 / 工具条 ================= */
 
+    /*
+     * 外发光：把浮在桌面上的贴图"抬起来"，好和桌面区分开。
+     *
+     * 只画在屏幕上 —— 复制 / 保存走的是 C++ composedImage()（只含底图 + 标注），
+     * 这圈光根本不在那条路里，所以成品图干净、不带发光（用户要求）。
+     *
+     * 用一张和图片同尺寸、同位置的实心矩形当"投影源"，MultiEffect 只在它四周
+     * 晕出一圈**四边等距**的淡蓝白辉光（offset 都取 0）；实心那块正好被压在底图
+     * 下面看不见，于是屏幕上只剩这圈光。
+     */
+    Rectangle {
+        id: shadowCaster
+
+        x: root.padSide
+        y: root.padSide
+        width: root.viewWidth
+        height: root.viewHeight
+        radius: 2
+        color: "#ff000000"
+        visible: root.viewWidth > 0 && root.viewHeight > 0
+
+        layer.enabled: true
+        layer.effect: MultiEffect {
+            shadowEnabled: true
+            shadowColor: "#cfe6ff"          /* 白 + 蓝：偏白的淡蓝 */
+            shadowOpacity: 0.9              /* 加深 */
+            shadowBlur: 0.45
+            shadowScale: 1.0
+            shadowVerticalOffset: 0         /* 四边等距：不做下偏 */
+            shadowHorizontalOffset: 0
+            /* 开自动补边：不然光被裁在图片矩形里，散不到四周那条留白上 */
+            autoPaddingEnabled: true
+        }
+    }
+
     Image {
         id: shotImage
 
-        anchors.fill: parent
+        x: root.padSide
+        y: root.padSide
+        width: root.viewWidth
+        height: root.viewHeight
         source: root.imageId !== "" ? "image://pin/" + root.imageId : ""
         fillMode: Image.Stretch
         /* 不进 QQuickPixmapCache（id 里那个序号已经绕开了，这条是双保险） */
@@ -1138,7 +1182,10 @@ Rectangle {
     Item {
         id: ocrHighlight
 
-        anchors.fill: parent
+        x: root.padSide
+        y: root.padSide
+        width: root.viewWidth
+        height: root.viewHeight
         visible: root.hlRanges.length > 0
 
         Repeater {
@@ -1161,7 +1208,10 @@ Rectangle {
     Item {
         id: pinLayer
 
-        anchors.fill: parent
+        x: root.padSide
+        y: root.padSide
+        width: root.viewWidth
+        height: root.viewHeight
 
         Canvas {
             id: canvas
@@ -1408,13 +1458,13 @@ Rectangle {
                         hoverEnabled: true
                         cursorShape: Qt.SizeAllCursor
                         onPressed: (mouse) => {
-                            const at = mapToItem(root, mouse.x, mouse.y)
+                            const at = mapToItem(pinLayer, mouse.x, mouse.y)
                             root.beginMove(entry.index, at.x, at.y)
                         }
                         onPositionChanged: (mouse) => {
                             if (!pressed)
                                 return
-                            const at = mapToItem(root, mouse.x, mouse.y)
+                            const at = mapToItem(pinLayer, mouse.x, mouse.y)
                             root.pointerMove(at.x, at.y)
                         }
                         onReleased: root.pointerUp()
@@ -1467,56 +1517,38 @@ Rectangle {
     }
 
     /*
-     * 工具条。前五个就是用户指的那排（复制 / 荧光笔 / 波浪线 / 直线 / 删除线），
-     * 后面几个是这块贴图能干的其余事情（选中、认字、翻这段、撤销、翻译、存盘、
-     * 缩放、关闭）。按住最左边那块空白能拖着挪 —— 贴图有大小，工具条压在内容上
-     * 时要能让开。
+     * 工具条。**常驻**摆在图片下沿**外面**那条边距里（不叠在图上），水平居中于图片。
+     *
+     * 单行、不换行（用户要求）：宽度 = 所有键摆成一排的宽度（barFlow.singleRowWidth），
+     * Flow 给的宽度比它略大所以永远排成一列不折；条高固定 barH。
+     *
+     * "不随截图缩小放大"：条的宽高只由**内容**决定，跟 zoom / viewWidth 无关 ——
+     * 图放大缩小，条一直是那么大。图片缩到最小的时候宽度就等于这条的宽
+     * （量好后回报给 C++：见下面 onWidthChanged → setMinBarWidth）。
      */
     Rectangle {
         id: bar
 
-        /*
-         * 宽度**跟着内容走**：一串键摆完就收住，最多到"窗口宽 - 16"（摆不下才撑满 +
-         * 折行）。以前是一直撑满窗口 —— 贴图一宽（一千多的截图很常见），工具条两边
-         * 各留一大片空，键都挤在中间一小段里，看着像"工具条断了半截"。
-         *
-         * 依赖是**单向**的：bar.width 读 barFlow.singleRowWidth（把每个键的宽度加一遍，
-         * 那个属性不读 Flow 自己的 width），Flow.width 只跟 bar.width 走 —— 不再是
-         * "我读你、你读我"那个环。
-         *
-         * 这个环是踩过的（实测量出来 59×492：所有键竖成一列、整条工具条还跑到窗口
-         * 外面）：那时 bar.width 绑的是 Flow 的 implicitWidth，而 implicitWidth 会随
-         * Flow 自己的 width 变（一折行就变），于是某一刻两边都算成 0，环就定死在
-         * 一个荒唐的值上。现在读的是"不折行要占多宽"，跟 Flow 的宽度无关。
-         */
-        width: Math.max(140, Math.min(root.width - 16, barFlow.singleRowWidth + 18))
-        height: barFlow.implicitHeight + 14
+        width: barFlow.singleRowWidth + 18
+        height: root.barH
         radius: 8
         color: "#26282b"
         border.color: root.borderColor
         border.width: 1
-        opacity: root.barShown ? 1.0 : 0.0
+
+        x: Math.max(0, Math.min(root.width - width,
+                                root.padSide + (root.viewWidth - width) / 2))
+        y: root.padSide + root.viewHeight + root.barGap
+
+        /* 条宽一定下来就回报给 C++ 当缩放下限（图片最小宽 = 这条宽） */
+        onWidthChanged: if (root.pinWin && width > 0) root.pinWin.setMinBarWidth(width)
+        Component.onCompleted: if (root.pinWin && width > 0) root.pinWin.setMinBarWidth(width)
+
         /*
-         * 收起来时**必须一并关掉命中**：不然那条工具条还在原地（只是全透明），
-         * 点在图上却打到了看不见的键上 —— 「关闭」正好也在那一排，一点就把贴图
-         * 关了。enabled 会连子项（那些 MouseArea）一起关，点就穿过去了。
-         *
-         * 注意**不能**顺手写 `visible: opacity > 0`：不可见的项不摆子项，Flow 里
-         * 那些键的宽度会一直是 0，于是 singleRowWidth = 0、工具条缩成最小宽度
-         * （实测：140×172，键全挤成一列）—— 露出来的时候也是错的。
+         * Flow 的宽度只跟 bar.width 走，且**恒大于** singleRowWidth（+2）——
+         * 所以永远排成一行、绝不折行（用户要求）。singleRowWidth 只读每个键自己的
+         * 宽度、不回读 Flow 的 width，依赖是单向的（那个环踩过的，见文件别处说明）。
          */
-        enabled: root.barShown
-
-        Behavior on opacity { NumberAnimation { duration: 150 } }
-
-        x: barX >= 0 ? Math.max(0, Math.min(root.width - width, barX))
-                     : Math.max(4, (root.width - width) / 2)
-        y: barY >= 0 ? Math.max(0, Math.min(root.height - height, barY))
-                     : Math.max(4, root.height - height - 8)
-
-        /* 拖过之后就按拖到的位置摆（-1 = 还没拖过，跟着默认位置） */
-        property real barX: -1
-        property real barY: -1
 
         component BarButton: Rectangle {
             id: btn
@@ -1607,39 +1639,6 @@ Rectangle {
             anchors.verticalCenter: parent.verticalCenter
             width: bar.width - 16
             spacing: 2
-
-            /* 拖动把手：按住它就能挪整条工具条 */
-            Rectangle {
-                width: 12
-                height: 30
-                color: "transparent"
-
-                Text {
-                    anchors.centerIn: parent
-                    text: "⣿"
-                    font.pixelSize: 10
-                    color: "#6f737a"
-                }
-                MouseArea {
-                    id: grip
-                    anchors.fill: parent
-                    cursorShape: Qt.SizeAllCursor
-                    property var pressAt: ({ x: 0, y: 0, bx: 0, by: 0 })
-                    onPressed: (mouse) => {
-                        const p = mapToItem(root, mouse.x, mouse.y)
-                        pressAt = { x: p.x, y: p.y, bx: bar.x, by: bar.y }
-                    }
-                    onPositionChanged: (mouse) => {
-                        if (!pressed)
-                            return
-                        const p = mapToItem(root, mouse.x, mouse.y)
-                        bar.barX = Math.max(0, Math.min(root.width - bar.width,
-                                                        pressAt.bx + p.x - pressAt.x))
-                        bar.barY = Math.max(0, Math.min(root.height - bar.height,
-                                                        pressAt.by + p.y - pressAt.y))
-                    }
-                }
-            }
 
             /* ---- 用户点名的那五个 ---- */
             BarButton {
@@ -1934,53 +1933,6 @@ Rectangle {
          * 见 RecognitionCard 里 closeRequested 的说明。
          */
         onCloseRequested: recognitionCard.hasResult = false
-    }
-
-    /*
-     * 右下角的改大小把手：按住拖就是改这张贴图多大。
-     *
-     * 注意它改的是**缩放**（见 PinWindow::beginResize -> startSystemResize ->
-     * resize 事件里的比例），不是把窗口拉大而图不动 —— 贴图的内容是"一张按比例
-     * 显示的图 + 标注"，窗口和内容必须同一个比例，不然标注就对不上底图了。
-     */
-    Rectangle {
-        id: resizeGrip
-
-        width: 14
-        height: 14
-        anchors.right: parent.right
-        anchors.bottom: parent.bottom
-        color: "transparent"
-        visible: root.width > 60 && root.height > 60
-
-        /* 右下角那三道斜线 */
-        Canvas {
-            id: gripMarks
-
-            anchors.fill: parent
-            onPaint: {
-                const c = getContext("2d")
-                c.clearRect(0, 0, width, height)
-                c.strokeStyle = "#8a9098"
-                c.lineWidth = 1
-                for (let i = 1; i <= 3; ++i) {
-                    c.beginPath()
-                    c.moveTo(width - 3 * i, height - 2)
-                    c.lineTo(width - 2, height - 3 * i)
-                    c.stroke()
-                }
-            }
-            Component.onCompleted: requestPaint()
-            onWidthChanged: requestPaint()
-            onHeightChanged: requestPaint()
-        }
-
-        MouseArea {
-            anchors.fill: parent
-            anchors.margins: -4
-            cursorShape: Qt.SizeFDiagCursor
-            onPressed: if (root.pinWin) root.pinWin.beginResize()
-        }
     }
 
     IconProvider { id: icons }
