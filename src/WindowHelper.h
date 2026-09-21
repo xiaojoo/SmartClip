@@ -71,6 +71,17 @@ class WindowHelper final : public QObject {
                NOTIFY cornerRadiusChanged)
 
     /*
+     * 圆角是不是交给系统裁了（见 src/DialogStyle.h 的 applyDwmRoundedCorners）。
+     *
+     * true = 走 DWM 那套带抗锯齿的裁剪，本类的 setMask 遮罩**不再落**，
+     *        界面那条自绘描边也该让位（系统已经按我们给的颜色画了一条 1px 边）；
+     * false = Windows 10 / 22621 之前，或者那两条属性没设上，回退到 1-bit 遮罩。
+     *
+     * 只在 attachWidget 里定一次（show 之前），所以是 CONSTANT。
+     */
+    Q_PROPERTY(bool dwmRound READ dwmRound CONSTANT)
+
+    /*
      * 这个窗口的**系统转场动画**写进去了没有（见 src/DialogStyle.h 的
      * disableDwmTransitions，它返回 DwmSetWindowAttribute 那个 HRESULT）。
      *
@@ -101,6 +112,7 @@ public:
     bool transitioned() const { return m_transitioned; }
     bool transitionsDisabled() const { return m_transitionsDisabled; }
     int cornerRadius() const { return m_cornerRadius; }
+    bool dwmRound() const { return m_dwmRound; }
 
     /* 供外部（main.cpp）在窗口显示后主动刷新一次圆角遮罩 */
     Q_INVOKABLE void refreshMask();
@@ -383,11 +395,12 @@ private:
     qint64 m_traceFramesUntil = -1;
 
     /*
-     * 把窗口裁成圆角矩形。
+     * 把窗口裁成圆角矩形 —— **只在系统那条路走不通的时候才用**。
      *
-     * 窗口是无边框 QWidget，透明 + 圆角必须自己来。用 QRegion 遮罩，
-     * 这是各平台上最可靠的做法（Windows 上落到 SetWindowRgn）。
-     * 最大化时不做圆角，和原生最大化窗口一致。
+     * 窗口是无边框 QWidget，四角得自己处理。Windows 11 上优先走 DWM 的抗锯齿裁剪
+     * （见 m_dwmRound 和 src/DialogStyle.h），这条路成了就根本不调这里。
+     * 剩下才用它：落到 Windows 上是 SetWindowRgn，**1-bit**、没有抗锯齿，
+     * 所以角上必然是一级一级的硬台阶（实测见 applyDwmRoundedCorners 的注释）。
      */
     void applyRoundedMask();
 
@@ -430,6 +443,13 @@ private:
      */
     QRegion m_appliedMask;
     bool m_maskApplied = false;
+
+    /*
+     * 圆角交给系统裁了没有（见 src/DialogStyle.h 的 applyDwmRoundedCorners）。
+     * true 的时候 applyRoundedMask 直接不干活 —— 1-bit 遮罩只会把系统那条
+     * 抗锯齿的弧重新切成台阶。
+     */
+    bool m_dwmRound = false;
 
     /*
      * "正在换尺寸"那一小段（applyState 全程）。

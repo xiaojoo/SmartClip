@@ -7188,12 +7188,27 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
             };
 
 #if defined(Q_OS_WIN)
-            /* 圆角是靠遮罩裁的（不是靠窗口透明）—— 这一条钉住"四角真的被裁掉了"，
-               免得哪天把窗口改成不透明之后，四角悄悄变成方的 */
-            check(!host->mask().isEmpty() && !host->mask().contains(QPoint(0, 0)),
-                  QStringLiteral("窗口：圆角遮罩落上了（左上角那一像素真的被裁掉）"),
-                  host->mask().isEmpty() ? QStringLiteral("遮罩是空的")
-                                         : QStringLiteral("遮罩在，但左上角没被裁"));
+            /*
+             * 钉住"四角真的被裁掉了"，而且**走的是哪条路要和它自己声称的一致**。
+             *
+             * 首选 DWM 那条（合成器裁的，带抗锯齿）。这条路成立时遮罩**必须是空的**：
+             * 再叠一层 1-bit 的 SetWindowRgn，等于把系统画好的平滑弧重新切成硬台阶，
+             * 而且每落一次就是整块窗口重画一遍。
+             * 走不通（Win10 / 22621 之前 / 那两条属性没设上）才回退到遮罩。
+             *
+             * 两条都不成立就是回归：四角悄悄变方（把窗口改成不透明那次踩过）。
+             */
+            if (uiState().value(QStringLiteral("dwmRound")).toBool()) {
+                check(host->mask().isEmpty(),
+                      QStringLiteral("窗口：圆角走 DWM 抗锯齿裁剪（遮罩已让位，没再叠 1-bit 硬边）"),
+                      QStringLiteral("dwmRound=1 但遮罩还在 —— 平滑的弧会被重新切成台阶"));
+            } else {
+                check(!host->mask().isEmpty() && !host->mask().contains(QPoint(0, 0)),
+                      QStringLiteral("窗口：圆角回退到遮罩（左上角那一像素真的被裁掉）"),
+                      host->mask().isEmpty()
+                          ? QStringLiteral("dwmRound=0 且遮罩也是空的 = 四角是方的")
+                          : QStringLiteral("遮罩在，但左上角没被裁"));
+            }
 #endif
 
             /* 先把"系统转场动画关掉了没有"钉住：那条动画就是用户说的"窗口先跑到

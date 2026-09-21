@@ -352,9 +352,11 @@ int main(int argc, char *argv[]) {
      * 半透明窗口上降透明度 = 整块界面变半透明、露出桌面；不透明窗口上降透明度
      * 才是注释里写的那个效果（压暗再回全亮）。
      *
-     * 四角的圆角不受影响：真正负责裁圆角的是 WindowHelper 的**遮罩**
-     * （setMask -> Windows 的 SetWindowRgn），透明那层只是"顺手"，
-     * 自检里有一条量过"遮罩落上了、左上角真的被裁掉"。
+     * 四角的圆角不受影响：负责裁圆角的是 WindowHelper —— 优先让**系统**（DWM）裁，
+     * 那是合成器做的、带抗锯齿；系统管不着的机器（Win10）才回退到自己的
+     * **遮罩**（setMask -> Windows 的 SetWindowRgn，1-bit、角上有硬台阶）。
+     * 两条路的判据和实测数字都写在 src/DialogStyle.h 的 applyDwmRoundedCorners 上。
+     * 自检里有一条钉"四角真的被裁掉了、而且走的路和声称的一致"。
      */
     host.setAutoFillBackground(true);
     {

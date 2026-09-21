@@ -43,8 +43,17 @@ Rectangle {
      */
     color: "transparent"
 
-    // 整窗圆角半径（和 FolderTree / EditorArea 卡片的 radius: 10 同一套观感）
-    readonly property real cornerRadius: 12
+    /*
+     * 整窗圆角半径：**只有一个来源**，就是 C++ 那个遮罩半径（WindowHelper.cornerRadius）。
+     *
+     * 这里以前抄死成 12，而遮罩用的是 10 —— 于是描边那段本来就带抗锯齿的弧
+     * 被更小的遮罩削掉了，露出来的恰好是最硬的那条边（实测 (9,0) 该有约 62% 的
+     * 描边，量到的是纯桌面白 255）。
+     *
+     * 走 DWM 那条路时（Win.dwmRound）半径由系统定（100% 缩放下实测约 8px），
+     * 这个值只喂下面那条描边，而那条描边也跟着让位了。
+     */
+    readonly property real cornerRadius: Win.cornerRadius
 
     /*
      * 是否处于最大化（或正在进出的过程中）。
@@ -2459,6 +2468,8 @@ Rectangle {
              * 看着就是"窗口先跑到右边、还在放大"。
              */
             transitionsDisabled: Win.transitionsDisabled,
+            /* 圆角是系统裁的（抗锯齿）还是自己遮罩裁的（1-bit、有台阶） */
+            dwmRound: Win.dwmRound,
             menuHeight: ddMenu.menuHeight,
             menuContentHeight: ddMenu.entriesHeight,
             menuScrollable: ddMenu.scrollable,
@@ -3850,13 +3861,16 @@ Rectangle {
     /*
      * 圆角外侧那一圈描边。
      *
-     * 窗口底色已经是透明的，深灰界面直接贴到桌面上会显得“糊”，
-     * 压一条比底色亮一点点的细线，边界才立得住。
-     * 它和遮罩用同一个半径，所以描边是贴着裁剪边缘走的。
+     * 无边框窗口贴到深底桌面上会显得"糊"，压一条比底色亮一点点的细线，边界才立得住。
+     *
+     * **走 DWM 圆角时这条要退场**：系统已经按我们给的颜色（#4b4d4f，见
+     * WindowHelper::attachWidget）沿着它自己那条弧画了一条 1px 边，再叠一条
+     * 就是两条线、而且半径对不齐。回退到遮罩那条路（Win10）时它还得在。
      */
     Rectangle {
         anchors.fill: parent
         z: 10
+        visible: !Win.dwmRound
         color: "transparent"
         radius: window.cornerRadius
         border.width: 1

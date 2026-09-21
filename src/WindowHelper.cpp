@@ -16,6 +16,7 @@
 #include <QLayout>
 #include <QPainter>
 #include <QPainterPath>
+#include <QOperatingSystemVersion>
 #include <QQuickItem>
 #include <QQuickWidget>
 #include <QRegion>
@@ -459,6 +460,14 @@ void WindowHelper::applyRoundedMask()
         trace(QStringLiteral("applyRoundedMask：没窗口"));
         return;
     }
+    /*
+     * 系统那条抗锯齿的路已经走通了，这里就一行都不该做。
+     *
+     * 遮罩是 1-bit 的，落上去等于把系统画好的那条平滑弧重新切成硬台阶；
+     * 而且每落一次就是一次 SetWindowRgn —— 整块窗口重画一遍。
+     */
+    if (m_dwmRound)
+        return;
     trace(QStringLiteral("applyRoundedMask：进（%1x%2 最大=%3 半径=%4）")
               .arg(m_widget->width()).arg(m_widget->height())
               .arg(m_maximized ? 1 : 0)
@@ -893,6 +902,32 @@ void WindowHelper::attachWidget(QWidget *widget)
                                ? QStringLiteral("**没关**（探针要求留着）")
                                : dwmTransitionNote(m_widget->internalWinId(), dwhr);
         trace(QStringLiteral("系统转场动画：%1").arg(m_transitionNote));
+
+        /*
+         * 圆角交给系统裁（Windows 11 22621 起）。
+         *
+         * 这一笔**必须在第一次最大化之前**落下：实测先最大化再设 ROUND 完全不生效，
+         * 所以只能放在这种一次性的地方，不能等 Resize / 最大化分支再补。
+         *
+         * 描边颜色沿用界面原来那条 #4b4d4f —— 系统会按我们给的颜色画一条 1px 边，
+         * 所以 Main.qml 那条自绘描边跟着让位（见 Win.dwmRound）。
+         * 注意这里绝不能传 DWMWA_COLOR_NONE：那样圆角会一起被关掉。
+         *
+         * SMARTCLIP_SQUARE_WHEN_MAXIMIZED 是"整条退回遮罩老路"的调试开关
+         * （它要求最大化 = 直角，而系统的圆角管不住最大化），设了就不碰 DWM。
+         */
+        static const bool squareWhenMaximized
+            = qEnvironmentVariableIsSet("SMARTCLIP_SQUARE_WHEN_MAXIMIZED");
+        const HRESULT roundHr = squareWhenMaximized
+                                    ? E_NOTIMPL
+                                    : applyDwmRoundedCorners(m_widget, RGB(0x4b, 0x4d, 0x4f));
+        m_dwmRound = SUCCEEDED(roundHr);
+        trace(QStringLiteral("圆角：%1（系统 build %2）")
+                  .arg(m_dwmRound
+                           ? QStringLiteral("走 DWM 抗锯齿裁剪，半径由系统定")
+                           : QStringLiteral("**回退到 1-bit 遮罩** 0x%1")
+                                     .arg(quint32(roundHr), 8, 16, QLatin1Char('0')))
+                  .arg(QOperatingSystemVersion::current().microVersion()));
 #else
         m_transitionNote = QStringLiteral("非 Windows，关不了");
 #endif
