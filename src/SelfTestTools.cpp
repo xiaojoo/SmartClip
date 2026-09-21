@@ -1165,6 +1165,41 @@ int SelfTest::runTools(Formatter *fmt, DiffEngine *differ, Checker *check, LlmCl
             QCoreApplication::processEvents();
     }
 
+    /* ------------------------------------------------------------------
+     * 8. 提示框不许越过窗口右边缘（qml/components/AppToolTip.qml）
+     *
+     * 原来气泡的 x 是 (父项宽 - 气泡宽)/2 —— 居中。父项贴着窗口右边缘时
+     * （标签栏最右边那个"源码 / 预览"开关）右半边就跑到窗口外，被切掉半截。
+     * 现在 place() 按窗口边夹一次，这里量夹没夹住。
+     * ------------------------------------------------------------------ */
+    if (qmlRoot) {
+        std::fputs("\n-- 提示框的窗口边界 --\n", stdout);
+        QVariant tipVar;
+        QMetaObject::invokeMethod(qmlRoot, "tipEdgeProbeState", Q_RETURN_ARG(QVariant, tipVar));
+        const QVariantMap tip = tipVar.toMap();
+        const double winW = tip.value(QStringLiteral("windowWidth")).toDouble();
+        const double left = tip.value(QStringLiteral("tipLeft")).toDouble();
+        const double right = tip.value(QStringLiteral("tipRight")).toDouble();
+        const double btnRight = tip.value(QStringLiteral("buttonRight")).toDouble();
+        const double btnLeft = tip.value(QStringLiteral("buttonLeft")).toDouble();
+        tout(QStringLiteral("窗口宽 %1  按钮占 %2..%3  气泡宽 %4  气泡占 %5..%6")
+                 .arg(winW).arg(btnLeft).arg(btnRight)
+                 .arg(tip.value(QStringLiteral("tipWidth")).toDouble())
+                 .arg(left).arg(right));
+        tcheck(right <= winW && left >= 0.0,
+               QStringLiteral("贴右边缘的气泡不出窗口"),
+               QStringLiteral("%1..%2 对 0..%3").arg(left).arg(right).arg(winW));
+        /*
+         * 夹住之后还得**指着那个按钮**：整块被推到左边去等于换了个地方被切。
+         * 口径取按钮的水平中心 —— 气泡贴边时被夹掉的最多就是边缘那几个像素，
+         * 要求它连按钮最后一个像素都盖住反而是苛求（真做到反而要压到按钮外边）。
+         */
+        const double center = (btnLeft + btnRight) / 2.0;
+        tcheck(left <= center && right >= center,
+               QStringLiteral("夹回来之后气泡仍然指着那个按钮（按钮中心在气泡里）"),
+               QStringLiteral("气泡 %1..%2 含按钮中心 %3").arg(left).arg(right).arg(center));
+    }
+
     /* 自检改过的设置按原样放回去 */
     if (savedTool.isValid())
         settings.setValue(QStringLiteral("format/tool/plain"), savedTool);

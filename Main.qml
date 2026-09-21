@@ -3025,6 +3025,54 @@ Rectangle {
     }
 
     /*
+     * 自检用：一个贴着窗口右边缘的小格子 + 挂在它上面的提示框。
+     *
+     * 量的是"居中会不会越界"：原来 AppToolTip 的 x 是 (父宽 - 气泡宽)/2，
+     * 父项本身贴右边缘时气泡右半边就跑到窗口外面了（标签栏那个
+     * "源码 / 预览"开关实测被切掉半截）。这里造一个同样的位置让自检量得到。
+     */
+    Item {
+        id: tipEdgeProbe
+
+        width: 24
+        height: 24
+        anchors.right: parent.right
+        anchors.top: parent.top
+
+        AppToolTip {
+            id: tipRightProbe
+
+            text: "预览 Markdown（Ctrl+Shift+V）—— 这段文字够长，居中就会越界"
+            visible: false
+        }
+    }
+
+    /*
+     * 自检用：量"提示框弹出来之后有没有越过窗口左右两边"。
+     *
+     * 必须真的 open 一次：Popup 收着的时候 x 读出来是旧值（实测写 -486 进去，
+     * 关着的时候读回 0，open 之后才落地），所以不能只调 place() 再看属性。
+     * open 走的就是真路径 —— onAboutToShow 里那个 place() 会被触发。
+     * 透明度置 0 免得自检时右上角闪一块气泡。
+     */
+    function tipEdgeProbeState() {
+        tipRightProbe.opacity = 0
+        tipRightProbe.open()
+        const btn = tipEdgeProbe.mapToItem(null, 0, 0)
+        const state = {
+            windowWidth: window.width,
+            tipLeft: btn.x + tipRightProbe.x,
+            tipRight: btn.x + tipRightProbe.x + tipRightProbe.width,
+            buttonLeft: btn.x,
+            buttonRight: btn.x + tipEdgeProbe.width,
+            tipWidth: tipRightProbe.width
+        }
+        tipRightProbe.close()
+        tipRightProbe.opacity = 1
+        return state
+    }
+
+    /*
      * 设置面板（快捷键 / 关于）。
      *
      * 和下拉菜单一样是**原生弹窗**（见 qml/components/SettingsPanel.qml 开头）：

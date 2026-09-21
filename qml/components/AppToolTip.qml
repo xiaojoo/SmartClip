@@ -40,9 +40,50 @@ Popup {
 
     padding: 6
 
-    /* 和 Qt 自带提示框一样：贴在父项上方居中 */
-    x: parent ? Math.round((parent.width - implicitWidth) / 2) : 0
+    /*
+     * 贴在父项上方居中，但**不许越过窗口左右两边**。
+     *
+     * 原来是一条绑定 `x: (parent.width - implicitWidth) / 2`：贴着右边缘的那些
+     * 按钮（标签栏最右边那个"源码 / 预览"开关）居中之后有一半跑到窗口外面，
+     * 气泡被切掉半截。
+     *
+     * 改成在要弹出来之前算一次（place()）而不是写绑定：夹取要看父项在**窗口**
+     * 里的位置，那是 mapToItem 的量 —— 绑定不会在窗口移动 / 改大小之后自己重算，
+     * 而 hover 弹出本来就是一个"此刻"的动作，在那一刻算最准也最省。
+     * 每次弹出都会重算（onAboutToShow），实测窗口从 1460 拉到 700 之后第二次
+     * 弹出夹的是新边界。
+     *
+     * 一个坑（自检因此要真 open 一次，见 Main.qml 的 tipEdgeProbeState）：
+     * Popup **收着的时候 x 写了不落地** —— 实测写 -486，关着读回来还是 0，
+     * open 之后才生效。所以"调一下 place() 再读属性"量不到东西。
+     */
+    property int edgeMargin: 6
+
+    function place() {
+        if (!parent) {
+            x = 0
+            return
+        }
+        const want = Math.round((parent.width - implicitWidth) / 2)
+        /*
+         * Popup 自己没有 window 属性，所以从父项那边取挂载属性 Window.window；
+         * 拿不到（父项还不在任何窗口里）就退回原来的"居中"算法，别算出个 NaN。
+         */
+        const win = parent.Window ? parent.Window.window : null
+        if (!win) {
+            x = want
+            return
+        }
+        const parentX = parent.mapToItem(null, 0, 0).x
+        const low = edgeMargin - parentX
+        const high = win.width - edgeMargin - implicitWidth - parentX
+        /* 气泡比窗口还宽时（high < low）只能先保住左边不被切 */
+        x = high < low ? low : Math.max(low, Math.min(high, want))
+    }
+
     y: parent ? -implicitHeight - 3 : 0
+
+    onAboutToShow: place()
 
     /*
      * 可见性完全由 hovered 驱动，不做属性绑定 —— 绑了之后在 Timer 里赋值会把
