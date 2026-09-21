@@ -32,6 +32,10 @@ namespace {
  */
 const QString kContentDirName = QStringLiteral("剪贴板");
 
+/* 汇总成品那一层（<root>/文档）和它底下的草稿层（<root>/文档/待审） */
+const QString kDocsDirName = QStringLiteral("文档");
+const QString kDraftDirName = QStringLiteral("待审");
+
 /* 我们自己写进 md 的段首标记："## 07:31:00" */
 const QString kEntryMark = QStringLiteral("## ");
 /* 日期目录名：2026-09-13 */
@@ -183,6 +187,11 @@ bool ClipboardStore::open() {
      * （旧布局的清理在 rescan() 里，open 底下会调它。）
      */
     QDir().mkpath(contentRoot());
+    /*
+     * 「文档」那一层也一并建出来：树是按扫到的文件/目录拼的，空目录不建就
+     * 一个节点都没有 —— 用户第一次用汇总功能时看不见成品往哪儿放。
+     */
+    QDir().mkpath(docsRoot());
 
     /*
      * 元数据库还是放在应用数据目录（%APPDATA%/SmartClip/SmartClip/smartclip.db）——
@@ -223,6 +232,17 @@ bool ClipboardStore::open() {
     if (!query.exec(QStringLiteral(
             "CREATE TABLE IF NOT EXISTS clip_state ("
             "date_key TEXT PRIMARY KEY, path TEXT NOT NULL)")))
+        return false;
+    /*
+     * 归档：汇总过的剪贴板文件，树上不再显示（见 ClipboardStore::archiveFiles）。
+     *
+     * 单独一张表而不是在 clip_files 上加一列：那张表是**每次 rescan 从磁盘重建**
+     * 的缓存（reindexFile 会先 forgetFile 再重插），标记放那儿会被扫盘抹掉；
+     * 而且给一列加在重建表上，等于给"文件自己的属性"记了一件"我们怎么看待它"。
+     */
+    if (!query.exec(QStringLiteral(
+            "CREATE TABLE IF NOT EXISTS clip_archived ("
+            "path TEXT PRIMARY KEY, run_id TEXT NOT NULL, archived_at TEXT NOT NULL)")))
         return false;
     query.exec(QStringLiteral("CREATE INDEX IF NOT EXISTS idx_entries_file "
                               "ON clip_entries(file_path)"));
@@ -563,6 +583,16 @@ void ClipboardStore::rescan() {
         scanFolder(QDir::cleanPath(imported), true, seen, 0, &cached);
 
     /*
+     * 「文档」那一层（汇总成品 + 待审草稿）：借用导入目录那套扫法（递归、
+     * 什么后缀都收、空目录也记一行），所以它在库里同样记成 imported=1。
+     *
+     * 记成 imported 而不是给它一个新标记，是因为树上"点开一个文件夹看里面的
+     * md"这件事本来就已经支持得很成熟；只有"它归谁管、能不能被移除"不同 ——
+     * 那一点在 tree() 里按路径单独认（见 docsClean）。
+     */
+    scanFolder(QDir::cleanPath(docsRoot()), true, seen, 0, &cached);
+
+    /*
      * 缓存里有、这次没扫到的：文件被删掉或改名了，元数据跟着清。
      * 判据直接用刚才读进内存的那张表，不用再查一遍库。
      */
@@ -695,43 +725,19 @@ void ClipboardStore::reindexFile(const QString &path, bool imported,
 
     dropOld();
 
-    /* 按 "## 时分秒" 分段 */
-    struct Segment {
-        QString time;
-        QString body;
-    };
-    QList<Segment> segments;
-    {
-        Segment current;
-        bool started = false;
-        const QStringList lines = text.split(QLatin1Char('\n'));
-        for (const QString &raw : lines) {
-            const QString line =
-                raw.endsWith(QLatin1Char('\r')) ? raw.left(raw.size() - 1) : raw;
-            if (line.startsWith(kEntryMark)) {
-                if (started)
-                    segments.append(current);
-                current = Segment{};
-                current.time = line.mid(3).trimmed();
-                started = true;
-            } else if (started) {
-                current.body += line + QLatin1Char('\n');
-            }
-        }
-        if (started)
-            segments.append(current);
-    }
+    /* 按 "## 时分秒" 分段（和汇总用的是同一个函数，见 parseSections） */
+    QList<Section> segments = parseSections(text);
 
     /* 没有段首标记（导入的外部文件）-> 整篇算一条，时间取文件修改时间 */
     if (segments.isEmpty()) {
-        Segment whole;
+        Section whole;
         whole.time = info.lastModified().toString(QStringLiteral("HH:mm:ss"));
         whole.body = text;
         segments.append(whole);
     }
 
     int written = 0;
-    for (const Segment &segment : std::as_const(segments)) {
+    for (const Section &segment : std::as_const(segments)) {
         const QString body = segment.body.trimmed();
 
         QString type = QStringLiteral("text");
@@ -804,6 +810,16 @@ QVariantList ClipboardStore::tree(const QString &query, bool newestFirst) const 
     if (!needle.isEmpty())
         allowed = searchFiles(needle);
 
+    /* 归档掉的文件不列（内容还在磁盘上，只是这一层不给它出场 —— 见 archiveFiles） */
+    const QSet<QString> archived = archivedPathSet();
+    /*
+     * 「文档」那层是 rescan 一起扫的，但不在用户那份导入清单里，所以拼树的
+     * 时候要把扫描根和导入根这两件事分开列（后者决定右键菜单里有没有"移除"）。
+     */
+    const QString docsClean = QDir::cleanPath(docsRoot());
+    QStringList scanRoots = m_imported;
+    scanRoots << docsClean;
+
     struct MetaFile {
         QString path;
         QString folder;
@@ -829,6 +845,8 @@ QVariantList ClipboardStore::tree(const QString &query, bool newestFirst) const 
             file.imported = query2.value(5).toBool();
             if (!needle.isEmpty() && !allowed.contains(file.path))
                 continue;
+            if (archived.contains(QDir::cleanPath(file.path)))
+                continue;
             files.append(file);
         }
     }
@@ -852,6 +870,7 @@ QVariantList ClipboardStore::tree(const QString &query, bool newestFirst) const 
         /* 这个文件挂在"哪一串目录节点"下面（由外到里） */
         QStringList chain;
         bool isDate = false;
+        bool isDocs = false;
         if (!file.imported) {
             /*
              * 剪贴板这一支：**两层** —— 先「剪贴板」，再日期目录。
@@ -868,9 +887,9 @@ QVariantList ClipboardStore::tree(const QString &query, bool newestFirst) const 
             chain << QDir::cleanPath(contentRoot()) << folder;
             isDate = true;
         } else {
-            /* 找到它所属的那个导入根（可能套了好几层） */
+            /* 找到它所属的那个扫描根（导入的、或「文档」那一层；可能套了好几层） */
             QString root;
-            for (const QString &candidate : std::as_const(m_imported)) {
+            for (const QString &candidate : std::as_const(scanRoots)) {
                 const QString clean = QDir::cleanPath(candidate);
                 if (file.folder == clean
                     || file.folder.startsWith(clean + QLatin1Char('/'))) {
@@ -880,6 +899,7 @@ QVariantList ClipboardStore::tree(const QString &query, bool newestFirst) const 
             }
             if (root.isEmpty())
                 continue;   /* 这个导入目录已经从设置里移除了 */
+            isDocs = root == docsClean;
 
             QString acc = root;
             chain << acc;
@@ -906,9 +926,15 @@ QVariantList ClipboardStore::tree(const QString &query, bool newestFirst) const 
                  * （i == 0）不是时间，它按普通文件夹画。
                  */
                 node.chronological = isDate && i == 1;
+                /*
+                 * 「文档」那个根画成普通文件夹：它不是导入进来的，右键给它
+                 * "移除此导入目录"会移除一个根本不在清单里的东西（点了没反应，
+                 * 或者更糟：把同名的那个导入目录给移了）。
+                 */
                 node.kind = isDate
                                 ? (i == 0 ? QStringLiteral("folder") : QStringLiteral("date"))
-                                : (i == 0 ? QStringLiteral("imported") : QStringLiteral("folder"));
+                                : (i == 0 && !isDocs ? QStringLiteral("imported")
+                                                     : QStringLiteral("folder"));
                 it = pool.emplace(key, node).first;
                 if (parent)
                     parent->children.append(&it->second);
@@ -944,9 +970,9 @@ QVariantList ClipboardStore::tree(const QString &query, bool newestFirst) const 
             if (pool.find(key) != pool.end())
                 continue;
 
-            /* 挂在哪个导入根下面、往里第几层（口径和文件那条路一样） */
+            /* 挂在哪个扫描根下面、往里第几层（口径和文件那条路一样） */
             QString root;
-            for (const QString &candidate : std::as_const(m_imported)) {
+            for (const QString &candidate : std::as_const(scanRoots)) {
                 const QString clean = QDir::cleanPath(candidate);
                 if (dir == clean || dir.startsWith(clean + QLatin1Char('/'))) {
                     if (clean.size() > root.size())
@@ -966,7 +992,9 @@ QVariantList ClipboardStore::tree(const QString &query, bool newestFirst) const 
             node.path = dir;
             node.label = QFileInfo(dir).fileName();
             node.depth = depth;
-            node.kind = depth == 0 ? QStringLiteral("imported") : QStringLiteral("folder");
+            node.kind = (depth == 0 && root != docsClean)
+                            ? QStringLiteral("imported")
+                            : QStringLiteral("folder");
             /* 没进去扫的那种（依赖 / 构建目录）：树上报一声，界面标"未索引" */
             node.skipped = contentSkipped(dir) && depth > 0;
             auto it = pool.emplace(key, node).first;
@@ -1086,6 +1114,40 @@ QVariantList ClipboardStore::tree(const QString &query, bool newestFirst) const 
     for (Node *node : std::as_const(top))
         out.append(dump(node));
     return out;
+}
+
+/* ------------------------------------------------------------------ */
+/* 分段解析                                                             */
+/* ------------------------------------------------------------------ */
+
+/*
+ * 一份 md 按 "## 时分秒" 切成段。
+ *
+ * 这是**扫描和汇总共用**的那一把尺子（reindexFile 原来自己内联着一份同样的
+ * 循环）：树上的条数是它数出来的，喂给模型的原文是它切出来的，分成两份写迟早
+ * 一份先改、一份后改 —— 到那时候"树上写着 12 条、汇总只吃到 9 条"这种不一致
+ * 没有任何报错，只会让人觉得功能在丢内容。
+ */
+QList<ClipboardStore::Section> ClipboardStore::parseSections(const QString &text) {
+    QList<Section> sections;
+    Section current;
+    bool started = false;
+    const QStringList lines = text.split(QLatin1Char('\n'));
+    for (const QString &raw : lines) {
+        const QString line = raw.endsWith(QLatin1Char('\r')) ? raw.left(raw.size() - 1) : raw;
+        if (line.startsWith(kEntryMark)) {
+            if (started)
+                sections.append(current);
+            current = Section{};
+            current.time = line.mid(3).trimmed();
+            started = true;
+        } else if (started) {
+            current.body += line + QLatin1Char('\n');
+        }
+    }
+    if (started)
+        sections.append(current);
+    return sections;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1266,6 +1328,386 @@ bool ClipboardStore::fileExists(const QString &path) const {
 
 QString ClipboardStore::textOf(const QString &path) const {
     return readAllText(path);
+}
+
+/* ------------------------------------------------------------------ */
+/* 汇总：文档 / 草稿 / 归档                                              */
+/* ------------------------------------------------------------------ */
+
+QString ClipboardStore::docsRoot() const {
+    return m_rootPath + QLatin1Char('/') + kDocsDirName;
+}
+
+QString ClipboardStore::draftDir() const {
+    return docsRoot() + QLatin1Char('/') + kDraftDirName;
+}
+
+/*
+ * 分类名洗成文件名。
+ *
+ * 分类名是**模型给的**，所以这里按"外来输入"对待：Windows 不能用的字符换成
+ * 下划线，去掉首尾的点和空白（"前端." 这种建出来的文件在资源管理器里看不见），
+ * 中间换行压成空格（模型偶尔把分类写成两行），限长 60 字（文件名整条上限 255，
+ * 但 60 字以外的分类名基本可以断定是它把整句话当分类了）。
+ * 洗空了给"未分类"，不给空串 —— 空串建出来的文件叫 ".md"。
+ */
+QString ClipboardStore::safeDocName(const QString &category) {
+    QString name = category;
+    name.replace(QLatin1Char('\r'), QLatin1Char(' '));
+    name.replace(QLatin1Char('\n'), QLatin1Char(' '));
+    static const QString forbidden = QStringLiteral("/\\:*?\"<>|");
+    for (const QChar bad : forbidden)
+        name.replace(bad, QLatin1Char('_'));
+    name = name.simplified();
+    /* 模型会把 "# 前端" 这种带井号的原句当分类名交回来 */
+    while (name.startsWith(QLatin1Char('#')) || name.startsWith(QLatin1Char(' ')))
+        name = name.mid(1).trimmed();
+    while (name.endsWith(QLatin1Char('.')) || name.endsWith(QLatin1Char(' ')))
+        name.chop(1);
+    if (name.endsWith(QStringLiteral(".md"), Qt::CaseInsensitive))
+        name.chop(3);
+    if (name.size() > 60)
+        name = name.left(60);
+    if (name == QLatin1String(".") || name == QLatin1String("..") || name.isEmpty())
+        return QStringLiteral("未分类");
+    return name;
+}
+
+QStringList ClipboardStore::categories() const {
+    QStringList out;
+    const QFileInfoList entries = QDir(docsRoot()).entryInfoList(
+        { QStringLiteral("*.md") }, QDir::Files, QDir::Name);
+    for (const QFileInfo &info : entries) {
+        const QString name = info.completeBaseName();
+        if (!name.isEmpty())
+            out.append(name);
+    }
+    return out;
+}
+
+/*
+ * 一段时间里的剪贴板原文（汇总的输入）。
+ *
+ * 判"这个文件是不是剪贴板自动记的"用两条一起（理由见 .h 上那段）：
+ *   1) 开头那一行严格等于 `# <它自己所在的日期目录名>`；
+ *   2) 每一段的段首都能解析成真的时分秒。
+ * 单看文件名不行：识别出来的笔记、左侧 "+" 建的空白笔记，文件名和剪贴板文件
+ * 是同一套（都走 newFilePath）。
+ */
+QVariantList ClipboardStore::sectionsInRange(const QString &fromDate,
+                                             const QString &toDate) const {
+    const QString from = fromDate.trimmed();
+    const QString to = toDate.trimmed();
+    QVariantList out;
+    if (from.isEmpty() || to.isEmpty() || from > to)
+        return out;
+
+    const QSet<QString> archived = archivedPathSet();
+
+    QSqlQuery query(m_db);
+    query.prepare(QStringLiteral(
+        "SELECT path FROM clip_files WHERE imported = 0 ORDER BY date_key, path"));
+    if (!query.exec())
+        return out;
+    const QStringList candidates = [&query]() {
+        QStringList list;
+        while (query.next())
+            list.append(query.value(0).toString());
+        return list;
+    }();
+
+    for (const QString &raw : candidates) {
+        const QString path = QDir::cleanPath(raw);
+        if (archived.contains(path))
+            continue;
+
+        /*
+         * 区间判据用的是**目录名**，不是库里的 date_key —— 那一列可能是拿文件
+         * 修改时间兜出来的（reindexFile 里日期目录名认不出来时就那么填），
+         * 信它会把不相干的日子卷进来。目录名是我们自己写的，才是准的。
+         */
+        const QFileInfo info(path);
+        const QString day = info.dir().dirName();
+        if (!dateDirPattern().match(day).hasMatch())
+            continue;
+        if (day < from || day > to)
+            continue;
+
+        QString text;
+        if (!readTextFile(info, &text))
+            continue;
+        const int newline = text.indexOf(QLatin1Char('\n'));
+        const QString heading = (newline < 0 ? text : text.left(newline)).trimmed();
+        if (heading != QStringLiteral("# %1").arg(day))
+            continue;
+
+        const QList<Section> sections = parseSections(text);
+        if (sections.isEmpty())
+            continue;
+
+        QString joined;
+        int count = 0;
+        int images = 0;
+        bool clipboardShaped = true;
+        for (const Section &section : sections) {
+            const QDateTime when =
+                QDateTime::fromString(day + QLatin1Char('T') + section.time, Qt::ISODate);
+            if (!when.isValid()) {
+                clipboardShaped = false;   /* "## 结论" 这种小标题不是剪贴板格式 */
+                break;
+            }
+            const QString body = section.body.trimmed();
+            if (body.isEmpty())
+                continue;
+            /*
+             * 纯图片那一段跳过：这一版不把图喂给模型，正文里那句
+             * `![](assets/x.png)` 对它毫无意义，而剪贴板里的图片引用是
+             * **相对它自己那个日期目录**的 —— 抄进文档就成了断链。
+             */
+            if (body.startsWith(QStringLiteral("![")) && !body.contains(QLatin1Char('\n'))) {
+                ++images;
+                continue;
+            }
+            /* 段首带上日期：跨天的原文混在一批里，模型才知道先后 */
+            joined += QStringLiteral("### %1 %2\n\n").arg(day, section.time) + body
+                    + QStringLiteral("\n\n");
+            ++count;
+        }
+        if (!clipboardShaped || count == 0)
+            continue;
+
+        QVariantMap row;
+        row.insert(QStringLiteral("path"), path);
+        row.insert(QStringLiteral("label"), info.fileName());
+        row.insert(QStringLiteral("dateKey"), day);
+        row.insert(QStringLiteral("count"), count);
+        row.insert(QStringLiteral("images"), images);
+        row.insert(QStringLiteral("text"), joined.trimmed() + QLatin1Char('\n'));
+        out.append(row);
+    }
+    return out;
+}
+
+/* 草稿文件名 = "<批次号>-<分类>.md"；批次号里不带 '-'，所以按第一个 '-' 拆是准的 */
+static QString draftCategoryOf(const QString &fileName) {
+    QString name = fileName;
+    if (name.endsWith(QStringLiteral(".md"), Qt::CaseInsensitive))
+        name.chop(3);
+    const int dash = name.indexOf(QLatin1Char('-'));
+    return dash > 0 ? name.mid(dash + 1) : name;
+}
+
+QString ClipboardStore::writeDraft(const QString &runId, const QString &category,
+                                   const QString &markdown) {
+    const QString dir = draftDir();
+    if (!QDir().mkpath(dir))
+        return QString();
+
+    QString stamp = runId.trimmed();
+    if (stamp.isEmpty())
+        stamp = QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd_HHmmss"));
+    const QString name = safeDocName(category);
+
+    /* 同一次运行里两个分类洗出同一个名字（"C++" 和 "C?" 都变成 "C__"）：往后加序号 */
+    QString path = dir + QLatin1Char('/') + stamp + QLatin1Char('-') + name + QStringLiteral(".md");
+    for (int n = 2; QFileInfo::exists(path); ++n)
+        path = dir + QLatin1Char('/')
+             + stamp + QLatin1Char('-') + name + QStringLiteral("-%1.md").arg(n);
+
+    /*
+     * 草稿自己就长成"文档"的样子（`# 分类` + 若干 `## 节`），采纳时只做"并进
+     * 目标文件"这一步。要是草稿另搞一套格式，采纳就得再写一个转换器，而那两个
+     * 格式迟早对不上。
+     */
+    QString body = QStringLiteral("# %1\n\n").arg(name) + markdown.trimmed()
+                 + QStringLiteral("\n");
+    QFile file(path);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate))
+        return QString();
+    const QByteArray bytes = body.toUtf8();
+    const bool ok = file.write(bytes) == bytes.size();
+    file.close();
+    if (!ok) {
+        QFile::remove(path);
+        return QString();
+    }
+
+    reindexFile(path, true);
+    recount();
+    emit changed();
+    return path;
+}
+
+QVariantList ClipboardStore::drafts() const {
+    QVariantList out;
+    const QFileInfoList entries = QDir(draftDir()).entryInfoList(
+        { QStringLiteral("*.md") }, QDir::Files, QDir::Time);
+    for (const QFileInfo &info : entries) {
+        QVariantMap row;
+        row.insert(QStringLiteral("path"), QDir::cleanPath(info.absoluteFilePath()));
+        row.insert(QStringLiteral("label"), info.fileName());
+        row.insert(QStringLiteral("category"), draftCategoryOf(info.fileName()));
+        row.insert(QStringLiteral("size"), info.size());
+        out.append(row);
+    }
+    return out;
+}
+
+QString ClipboardStore::adoptDraft(const QString &draftPath) {
+    const QFileInfo info(draftPath);
+    const QString from = QDir::cleanPath(info.absoluteFilePath());
+    /*
+     * 只认「待审」那一层下面的文件：这条路会把草稿的正文并进别的文档并**删掉**
+     * 传进来的那个文件，不卡这一道就等于给了界面一个"删任意 md"的入口。
+     */
+    if (!info.exists() || !from.startsWith(QDir::cleanPath(draftDir()) + QLatin1Char('/')))
+        return QString();
+
+    const QString category = safeDocName(draftCategoryOf(info.fileName()));
+    QString text = readAllText(from);
+    if (text.trimmed().isEmpty())
+        return QString();
+
+    /* 去掉草稿自己那行 `# 分类`：并进去之后标题由目标文档那份当家 */
+    const int newline = text.indexOf(QLatin1Char('\n'));
+    const QString first = (newline < 0 ? text : text.left(newline)).trimmed();
+    if (first.startsWith(QStringLiteral("# ")))
+        text = newline < 0 ? QString() : text.mid(newline + 1);
+
+    QDir().mkpath(docsRoot());
+    const QString to = QDir::cleanPath(docsRoot() + QLatin1Char('/') + category
+                                       + QStringLiteral(".md"));
+
+    QString body = readAllText(to);
+    if (body.trimmed().isEmpty())
+        body = QStringLiteral("# %1\n").arg(category);
+    while (body.endsWith(QLatin1Char('\n')) || body.endsWith(QLatin1Char('\r')))
+        body.chop(1);
+    body += QStringLiteral("\n\n") + text.trimmed() + QStringLiteral("\n");
+
+    QFile file(to);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate))
+        return QString();
+    const QByteArray bytes = body.toUtf8();
+    const bool written = file.write(bytes) == bytes.size();
+    file.close();
+    if (!written) {
+        QFile::remove(to);   /* 半截文件比没写更糟：下一次采纳会把残骸当正文并进去 */
+        return QString();
+    }
+
+    QFile::remove(from);
+    forgetFile(from);
+    reindexFile(to, true);
+    recount();
+    emit changed();
+    return to;
+}
+
+bool ClipboardStore::discardDraft(const QString &draftPath) {
+    const QFileInfo info(draftPath);
+    const QString from = QDir::cleanPath(info.absoluteFilePath());
+    if (!from.startsWith(QDir::cleanPath(draftDir()) + QLatin1Char('/')))
+        return false;
+    return deleteFile(from);
+}
+
+/*
+ * 把一段时间里的剪贴板原文收进归档，返回收了几份。
+ *
+ * 判据直接复用 sectionsInRange（同一把尺子：是不是剪贴板自动记的、有没有正文），
+ * 所以"这一轮喂给模型的"和"这一轮能收进归档的"是同一批文件，不会出现
+ * 汇总没吃到、却被顺手藏起来的情况。
+ *
+ * 为什么不记"这次运行吃了哪些文件"再照着那份清单归档：那样得把清单存下来才
+ * 熬得过重启，而区间本身就是那份清单 —— 审核和归档之间隔了一晚是常态。
+ */
+int ClipboardStore::archiveRange(const QString &fromDate, const QString &toDate) {
+    QStringList paths;
+    const QVariantList rows = sectionsInRange(fromDate, toDate);
+    for (const QVariant &row : rows) {
+        const QVariantMap map = row.toMap();
+        if (map.value(QStringLiteral("count")).toInt() > 0)
+            paths.append(map.value(QStringLiteral("path")).toString());
+    }
+    archiveFiles(paths, QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd_HHmmss")));
+    return paths.size();
+}
+
+bool ClipboardStore::archiveFiles(const QStringList &paths, const QString &runId) {
+    if (paths.isEmpty())
+        return false;
+
+    const QString stamp = QDateTime::currentDateTime().toString(Qt::ISODate);
+    QSqlQuery query(m_db);
+    query.prepare(QStringLiteral(
+        "INSERT OR REPLACE INTO clip_archived(path, run_id, archived_at) VALUES(?, ?, ?)"));
+    int done = 0;
+    for (const QString &raw : paths) {
+        const QString path = QDir::cleanPath(raw);
+        if (path.isEmpty() || !QFileInfo::exists(path))
+            continue;
+        query.bindValue(0, path);
+        query.bindValue(1, runId);
+        query.bindValue(2, stamp);
+        if (query.exec())
+            ++done;
+    }
+    /*
+     * 不用 rescan：盘上一个字节都没动，只是树少列几行。重扫一遍要把每个文件
+     * 重新读进来分段，为这点事不值当。
+     */
+    if (done > 0)
+        emit changed();
+    return done > 0;
+}
+
+bool ClipboardStore::unarchiveFile(const QString &path) {
+    QSqlQuery query(m_db);
+    query.prepare(QStringLiteral("DELETE FROM clip_archived WHERE path = ?"));
+    query.addBindValue(QDir::cleanPath(path));
+    if (!query.exec())
+        return false;
+    emit changed();
+    return true;
+}
+
+QSet<QString> ClipboardStore::archivedPathSet() const {
+    QSet<QString> out;
+    QSqlQuery query(m_db);
+    if (query.exec(QStringLiteral("SELECT path FROM clip_archived"))) {
+        while (query.next())
+            out.insert(QDir::cleanPath(query.value(0).toString()));
+    }
+    return out;
+}
+
+QVariantList ClipboardStore::archivedFiles() const {
+    QVariantList out;
+    QSqlQuery query(m_db);
+    if (query.exec(QStringLiteral(
+            "SELECT path, run_id, archived_at FROM clip_archived "
+            "ORDER BY archived_at DESC, path"))) {
+        while (query.next()) {
+            const QString path = QDir::cleanPath(query.value(0).toString());
+            const QFileInfo info(path);
+            QVariantMap row;
+            row.insert(QStringLiteral("path"), path);
+            row.insert(QStringLiteral("label"), info.fileName());
+            row.insert(QStringLiteral("dateKey"), info.dir().dirName());
+            row.insert(QStringLiteral("runId"), query.value(1).toString());
+            row.insert(QStringLiteral("archivedAt"), query.value(2).toString());
+            /*
+             * 归档只是"树上不显示"，文件还在原地 —— 在原地却又不在了，那就是
+             * 他自己在文件管理器里删了。这种行界面要能说出来（见设置里那一栏），
+             * 不然看着像程序把内容弄丢了。
+             */
+            row.insert(QStringLiteral("exists"), info.exists());
+            row.insert(QStringLiteral("size"), info.exists() ? info.size() : 0);
+            out.append(row);
+        }
+    }
+    return out;
 }
 
 /* ------------------------------------------------------------------ */

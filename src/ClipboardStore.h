@@ -29,6 +29,8 @@ class QImage;
  *     <root>/剪贴板/2026-09-13/073100.md          当天的剪贴板内容
  *     <root>/剪贴板/2026-09-13/073545.md          前一个文件超过 20K 之后的新文件
  *     <root>/剪贴板/2026-09-13/assets/*.png       图片（md 里用相对路径引用）
+ *     <root>/文档/前端.md                         汇总成品，一个分类一个文件
+ *     <root>/文档/待审/s2-前端.md                  汇总出来的草稿（采纳前）
  *
  * 根目录下面那层「剪贴板」：根目录是用户选的保存位置，里面放剪贴板这一个
  * 子目录 —— 以后要再放别的东西也不会跟剪贴板内容混在一起（见 contentRoot）。
@@ -175,6 +177,97 @@ public:
     /* 读文件正文（"复制全文"这类用；失败返回空串） */
     Q_INVOKABLE QString textOf(const QString &path) const;
 
+    /* ---- 分段解析 ---- */
+
+    /*
+     * 一份 md 按 "## 时分秒" 切成段（reindexFile 和汇总共用这一份判据）。
+     *
+     * 必须是同一个函数：分段的规矩改了（比如以后允许 "## 07:31"），只改一处
+     * 会让"树上的条数"和"喂给模型的正文"数出两样东西，那种不一致最难查。
+     *
+     * time 是段首那一行的原文（"07:31:00"，也可能根本不是时间 —— 导入的外部
+     * 文件、识别出来的笔记里 "## 结论" 这种都算一段）。
+     */
+    struct Section {
+        QString time;
+        QString body;
+    };
+    static QList<Section> parseSections(const QString &text);
+
+    /* ---- 汇总成品（「文档」那一层，见 src/Summarize.h） ---- */
+
+    /*
+     * 汇总出来的文档放在 `<rootPath>/文档`，和「剪贴板」那层平级。
+     *
+     * 为什么不塞进 contentRoot 里面：rescan 在 contentRoot 那一层只认
+     * `yyyy-MM-dd` 的目录名（见 .cpp），文档要是摆在里面，要么被当成日期目录
+     * 扫、要么得在那儿加一条例外 —— 摆外面这两件事都不用做。
+     */
+    QString docsRoot() const;
+    /* 草稿那一层（`<root>/文档/待审`）：树里看得见，采纳前就是普通 md 文件 */
+    QString draftDir() const;
+
+    /* 现有的分类（= `<root>/文档/*.md` 的文件名）。汇总时喂给模型，防止它另起一套分类 */
+    Q_INVOKABLE QStringList categories() const;
+
+    /*
+     * 一段时间里的剪贴板原文，按文件分组（汇总的输入）。
+     *
+     * fromDate / toDate 是 `yyyy-MM-dd`，两端都含。返回
+     *   { path, label, dateKey, count, text }
+     * text 是这些段落拼成的 markdown（每段前面带它自己的时间，模型才知道先后）。
+     *
+     * 只收"看起来就是剪贴板自动记的那一类"文件：每一段段首都得是**真的时分秒**，
+     * 且开头是 `# <自己所在的日期目录名>`。这条判据挡掉的是「文档识别」落进来的
+     * 笔记（`# 文档名` + `## 小节`）和左侧 "+" 建出来又自己写了东西的笔记 ——
+     * 它们和剪贴板内容同住一个日期目录、连文件名格式都一样（见 newFilePath），
+     * 不认内容就没法分开。代价：用 "+" 新建、又按 `## 时分秒` 格式写的笔记会被
+     * 当成剪贴板内容卷进汇总。这种笔记本来就在 `剪贴板/` 底下，混得不冤。
+     *
+     * 已归档的文件不在里面（汇总过的不该再汇总一遍）。
+     */
+    Q_INVOKABLE QVariantList sectionsInRange(const QString &fromDate,
+                                             const QString &toDate) const;
+
+    /* 把一次汇总的结果写成一份草稿，返回它的路径（失败返回空串） */
+    Q_INVOKABLE QString writeDraft(const QString &runId, const QString &category,
+                                   const QString &markdown);
+    /*
+     * 采纳一份草稿：把正文并进 `<root>/文档/<分类>.md`（没有就新建），草稿删掉。
+     *
+     * 返回那份文档的路径；失败返回空串。分类取草稿的文件名，所以他在编辑器里
+     * 改了草稿的文件名，采纳时就并进改名后的那份文档 —— 这就是"人工审核"的出口：
+     * 分类不对不是在界面里点下拉，是直接改文件名。
+     */
+    Q_INVOKABLE QString adoptDraft(const QString &draftPath);
+    /* 丢弃一份草稿（只删草稿，不动任何文档） */
+    Q_INVOKABLE bool discardDraft(const QString &draftPath);
+    /* 待审的草稿清单：{ path, label, category, size }（重启后还在，因为就是磁盘上的文件） */
+    Q_INVOKABLE QVariantList drafts() const;
+
+    /* ---- 归档 ---- */
+
+    /*
+     * 把一批文件收进归档：树上不再显示它们，只在设置「归档」那一栏里能找到。
+     *
+     * 记的是**数据库里的一张表**（clip_archived），文件本身原地不动。为什么不
+     * 把文件挪到 `<root>/归档/` 去：一个日期目录里既有剪贴板内容、又有识别出来
+     * 的笔记和 assets 里的图片，图片引用是相对**自己那个日期目录**写的 —— 单个
+     * 文件挪走图就断，整目录挪走就把人家的笔记一起藏了。挪目录是另一件事，
+     * 要做也得连带改写引用一起做，不该挂在"汇总完顺手藏起来"这一步上。
+     *
+     * 这张表 rescan() 不重建（它只重建 clip_files / clip_entries），所以标记
+     * 活得过重扫；文件真被删了的话那行就成了死行，tree() 按路径查、查不到就
+     * 少一行，无害。
+     */
+    Q_INVOKABLE bool archiveFiles(const QStringList &paths, const QString &runId = QString());
+    /* 按区间收（界面那个"把这轮的原文收进归档"走的正是这条，理由见 .cpp） */
+    Q_INVOKABLE int archiveRange(const QString &fromDate, const QString &toDate);
+    /* 还原一条（重新回到树上） */
+    Q_INVOKABLE bool unarchiveFile(const QString &path);
+    /* 归档清单：{ path, label, dateKey, archivedAt, entries, size }，新收的在前 */
+    Q_INVOKABLE QVariantList archivedFiles() const;
+
     int fileCount() const { return m_fileCount; }
     int entryCount() const { return m_entryCount; }
 
@@ -227,6 +320,11 @@ private:
     bool hashExists(const QString &hash) const;
     /* 搜索：命中 query 的文件路径集合（按条目标题 / 摘要 + 文件名） */
     QSet<QString> searchFiles(const QString &query) const;
+
+    /* 归档里那些文件的路径集合（tree() 和 sectionsInRange 都要按它筛掉） */
+    QSet<QString> archivedPathSet() const;
+    /* 把分类名洗成一个能当文件名的串（去掉 /\:*?"<>| 和首尾空白，空了给"未分类"） */
+    static QString safeDocName(const QString &category);
 
     /*
      * 上次扫盘时一个文件的状态（rescan 时整表读进内存，见 .cpp）。

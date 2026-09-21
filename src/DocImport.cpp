@@ -382,8 +382,12 @@ void DocImport::onTaskFinished(const DocConvert::Result &result) {
         if (!m_created.isEmpty())
             emit createdChanged();
     } else {
-        /* 被取消不算"失败"，状态那行已经写着"已取消"了 */
-        if (result.error != QLatin1String("已取消")) {
+        /*
+         * 被取消不算"失败"，状态那行已经写着"已取消"了。
+         * 判据用 DocConvert 那一份（词只在那儿写一次，见 cancelledError）——
+         * 原来这里比的是 QLatin1String("已取消")，中文走 Latin-1 永不相等。
+         */
+        if (!DocConvert::isCancelledError(result.error)) {
             m_error = QStringLiteral("%1：%2")
                           .arg(QFileInfo(m_current).fileName(), result.error);
         }

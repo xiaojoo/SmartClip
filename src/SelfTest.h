@@ -18,7 +18,9 @@ class Speech;
 class DocImport;
 class Formatter;
 class DiffEngine;
+class DiffEngine;
 class Checker;
+class Summarizer;
 
 /*
  * 自检模式：`SmartClip.exe --self-test`
@@ -192,5 +194,30 @@ int runTools(Formatter *fmt, DiffEngine *differ, Checker *check, LlmClient *llm 
              QObject *qmlRoot = nullptr);
 int toolsPassed();
 int toolsFailed();
+
+/*
+ * 汇总那一节的自检（`--summarize-test`，见 runSummarize）：一段时间里的原文
+ * 取不取得对、模型的回复解析得对不对、草稿采纳之后有没有并进文档、
+ * 归档能不能把剪贴板文件藏起来又只藏它，最后把设置面板那两栏真开出来量尺寸。
+ *
+ * 前半截全在 C++ 里判断（ClipboardStore 那几条 + Summarizer::parseReply），
+ * 一条请求都不发 —— 模型整理得好不好只能靠人看，钉不住；这里钉的是"链路对不对"。
+ */
+bool summarizeTestEnabled(int argc, char **argv);
+
+/*
+ * sum 可以为空（那样解析回复那一节跳过）。**必须传 main.cpp 里那个 Sum 单例**：
+ * 自检改的是 store 看到的磁盘和库，另建一份 Summarizer 就等于没测界面上那个。
+ * llm 同一条约定 —— 流水线那一节要临时把接口地址改到本机一个假模型服务上，
+ * 跑完按原样写回（见那个文件里 ScriptedLlm 那段）。
+ *
+ * qmlRoot 是 Main.qml 的根对象：最后一节要真开设置面板量「汇总」「归档」那两栏
+ * （面板的尺寸绑在宿主窗口上，所以这条自检**会**把主窗口开出来，和 --tool-test
+ * 同一个取舍）。传空就跳过界面那一节。返回失败项数（0 = 全过）。
+ */
+int runSummarize(ClipboardStore *store, Summarizer *sum = nullptr, QObject *qmlRoot = nullptr,
+                 LlmClient *llm = nullptr);
+int summarizePassed();
+int summarizeFailed();
 
 }  // namespace SelfTest

@@ -91,6 +91,10 @@ set(SMARTCLIP_SOURCES
     # 翻译（LLM 客户端 + 桌面卡片，见 src/Translate.h）：
     src/Translate.h
     src/Translate.cpp
+    # 剪贴板内容汇总（见 src/Summarize.h）：分批问模型分类归并 -> 落成待审草稿
+    #（QML 单例 Sum，和翻译 / 校验共用 LlmClient 那一套配置）
+    src/Summarize.h
+    src/Summarize.cpp
     # 朗读（翻译卡片上那个「播放」按钮：系统自带的语音合成，见 src/Speech.h）：
     src/Speech.h
     src/Speech.cpp
@@ -108,6 +112,8 @@ set(SMARTCLIP_SOURCES
     src/SelfTestDoc.cpp
     # 新增工具自检（`--tool-test` 只跑它：对比 / 格式化 / 校验 / Markdown）：
     src/SelfTestTools.cpp
+    # 汇总自检（`--summarize-test` 只跑它：区间取原文 / 回复解析 / 草稿采纳 / 归档）：
+    src/SelfTestSummarize.cpp
 )
 
 qt_add_executable(SmartClip ${SMARTCLIP_SOURCES})

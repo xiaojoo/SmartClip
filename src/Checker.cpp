@@ -388,7 +388,14 @@ QList<QVariantMap> checkChinese(const QStringList &lines, const QString &languag
                 continue;
             const int col = m.capturedStart();
             out.append(makeIssue(row, col, row, col + 2,
-                                 (ch == QLatin1String("的") || ch == QLatin1String("了"))
+                                 /*
+                                  * 这里必须是 QStringLiteral：写成
+                                  * QLatin1String("的") 会把 UTF-8 的三个字节当成
+                                  * 三个 Latin-1 字符，和单个汉字的 QString 永远
+                                  * 不相等 —— 于是这条分支静默地一直是 warn，
+                                  * "我的的书"那种最该报 error 的也只画条黄线。
+                                  */
+                                 (ch == QStringLiteral("的") || ch == QStringLiteral("了"))
                                      ? QStringLiteral("error")
                                      : QStringLiteral("warn"),
                                  QStringLiteral("repeat"),

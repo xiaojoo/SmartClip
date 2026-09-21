@@ -12,6 +12,7 @@
 #include "Speech.h"
 #include "StickyNotes.h"
 #include "StickyNoteStore.h"
+#include "Summarize.h"
 #include "Translate.h"
 #include "TrayIcon.h"
 #include "WindowHelper.h"
@@ -233,6 +234,15 @@ int main(int argc, char *argv[]) {
      * 和上面几个同一个理由声明在 host 之前：界面一构造就要读它的状态。
      */
     DocImport doc(&store);
+
+    /*
+     * 汇总（见 src/Summarize.h）：把一段时间的剪贴板原文交给模型分类归并，
+     * 落成「文档/待审」里的草稿，人工采纳后才并进 <root>/文档/<分类>.md。
+     *
+     * 两个依赖都要：store 是原文和落点，llm 是那条请求（和翻译 / 校验共用一套
+     * 配置，不另开一份模型设置）。
+     */
+    Summarizer summarize(&store, &llm);
 
     /*
      * 主窗口用 QWidget 承载，而不是 QQmlApplicationEngine 直接开 QQuickWindow。
@@ -458,6 +468,8 @@ int main(int argc, char *argv[]) {
     qmlRegisterSingletonInstance("SmartClip.Globals", 1, 0, "Check", &checker);
     /* 文件对比 */
     qmlRegisterSingletonInstance("SmartClip.Globals", 1, 0, "Differ", &differ);
+    /* 剪贴板内容汇总（设置面板「汇总」「归档」那两栏用它） */
+    qmlRegisterSingletonInstance("SmartClip.Globals", 1, 0, "Sum", &summarize);
 
     /* QTP0001 = NEW 之后 QML 模块的资源前缀是 /qt/qml/<URI> */
     quick->setSource(QUrl(QStringLiteral("qrc:/qt/qml/SmartClip/Main.qml")));
@@ -773,6 +785,9 @@ int main(int argc, char *argv[]) {
     /*
      * 自动自检那几条**不显示**主窗口（省得屏幕上窗口乱跳、也免了截图干扰）；
      * 正常启动和 `--doc-demo` 要显示 —— 演示就是给人看卡片的。
+     *
+     * `--summarize-test` 和 `--tool-test` 不在这份名单里：它们后半截要把设置
+     * 面板真开出来量界面，而面板的尺寸是绑在宿主窗口上的（窗口没开出来量不了）。
      */
     if (docDemo || (!noteTest && !translateTest && !docTest && !docE2e && !docQueue)) {
         host.resize(1460, 900);
@@ -910,6 +925,28 @@ int main(int argc, char *argv[]) {
         });
         QTimer::singleShot(30000, &app, []() {
             qWarning("工具自检超时，强制退出");
+            ::exit(9);
+        });
+        app.exec();
+        llm.shutdown();
+        return result < 0 ? 9 : result;
+    }
+
+    /*
+     * 汇总那一节（`--summarize-test`）：区间取原文 / 模型回复解析 / 草稿采纳 /
+     * 归档还原，外加把设置面板那两栏真开出来量一眼（src/SelfTestSummarize.cpp）。
+     *
+     * 它会把保存目录临时改到一个临时文件夹再换回去（见那个文件开头那段说明），
+     * 所以**别和其它自检同时跑** —— 别的检查正盯着真目录呢。
+     */
+    if (SelfTest::summarizeTestEnabled(argc, argv)) {
+        int result = -1;
+        QTimer::singleShot(200, &app, [&]() {
+            result = SelfTest::runSummarize(&store, &summarize, quick->rootObject(), &llm);
+            app.quit();
+        });
+        QTimer::singleShot(30000, &app, []() {
+            qWarning("汇总自检超时，强制退出");
             ::exit(9);
         });
         app.exec();

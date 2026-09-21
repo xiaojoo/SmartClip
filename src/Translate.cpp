@@ -683,6 +683,22 @@ void LlmClient::send(const QString &token, const QString &busyStatus, const QJso
         if (error.isEmpty() && reply->error() != QNetworkReply::NoError)
             error = reply->errorString();
 
+        /*
+         * 401 单独补一句"去哪儿填"。
+         *
+         * 两边的原文都不指路：Qt 是 "Host requires authentication"，DeepSeek 是
+         * "Authentication Fails" —— 用户看到只知道"坏了"，不知道是密钥那一栏空着。
+         * 这里**不能**改成"没填密钥就直接不发请求"：接口模式下留空密钥是合法的
+         * （Ollama / LM Studio 这类本机服务不要 key，设置里那句提示词就是这意思），
+         * 拦下来等于把那条路堵死。所以照发，只把回来的话翻清楚。
+         */
+        if (reply->error() == QNetworkReply::AuthenticationRequiredError
+            || reply->error() == QNetworkReply::ProxyAuthenticationRequiredError) {
+            error = QStringLiteral("%1 —— 若是云端接口，去 设置 → 模型 → 密钥 填上"
+                                   "（填完在那个框里按一次回车才存）")
+                        .arg(error.isEmpty() ? QStringLiteral("接口要求鉴权") : error);
+        }
+
         QString content;
         if (error.isEmpty()) {
             const QJsonArray choices = root.value(QStringLiteral("choices")).toArray();

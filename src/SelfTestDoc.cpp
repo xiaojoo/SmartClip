@@ -501,6 +501,24 @@ int SelfTest::runDoc(ClipboardStore *store) {
     /* ------------------------------------------------------------------
      * 2. 结果 JSON 的解析（宽容那几条）
      * ------------------------------------------------------------------ */
+    /* ------------------------------------------------------------------ */
+    /* 2. 结果 JSON 的解析（宽容那几条）
+     * ------------------------------------------------------------------ */
+    std::fputs("\n-- 取消那句认得出来 --\n", stdout);
+    {
+        /*
+         * 钉的是"写的人"和"认的人"用的是同一份字面量。原来认的那边写成
+         * QLatin1String("已取消")（中文走 Latin-1 是 9 个字节对 3 个汉字，
+         * 永不相等），取消照样被记成一条错误 —— 那种分支不会崩、也不会红，
+         * 只能这样钉一下。
+         */
+        docCheck(DocConvert::isCancelledError(DocConvert::cancelledError()),
+                 "取消的错认得出来", DocConvert::cancelledError());
+        docCheck(!DocConvert::isCancelledError(QStringLiteral("识别程序没装")),
+                 "别的原因不算取消");
+        docCheck(!DocConvert::isCancelledError(QString()), "空错（没失败）也不算取消");
+    }
+
     std::fputs("\n-- 结果 JSON 解析 --\n", stdout);
     {
         const QString plain = QStringLiteral(R"({"markdown":"# 标题\n\n正文","pages":3,"engine":"rapid-doc 0.9.10"})");

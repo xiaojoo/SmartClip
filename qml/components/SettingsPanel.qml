@@ -64,6 +64,79 @@ Popup {
      */
     onSectionChanged: content.contentY = 0
 
+    /* ---- 汇总 / 归档那两栏的状态（见下面的 summarizeColumn / archiveColumn） ---- */
+
+    /*
+     * 待审草稿和归档清单。
+     *
+     * 为什么不直接在 model 里写 Store.drafts()：那两个是**函数**不是属性，
+     * QML 没有任何东西可以绑上去 —— 采纳 / 丢弃之后界面不会自己动。
+     * 所以自己存两份，Store.changed 一来就重取（Store 在每次落盘之后都会发它）。
+     */
+    property var draftRows: []
+    property var archiveRows: []
+    /* 汇总区间（yyyy-MM-dd，和剪贴板日期目录同一套写法） */
+    property string sumFrom: ""
+    property string sumTo: ""
+    /* 采纳 / 归档那几下点完的一句话结果（"收进归档 3 份"），换栏目就清掉 */
+    property string sumHint: ""
+
+    /*
+     * 两份清单只在面板开着的时候才重取。
+     *
+     * Store.changed 是**每次采集剪贴板**都会发的，面板九成时间收着 —— 收着的
+     * 时候去列目录、查库，纯给主线程添活（而且这面板是 Popup.Window，主线程
+     * 一卡就连"打开的那一帧"都受影响）。
+     */
+    function reloadSummarize() {
+        if (!root.opened)
+            return
+        root.draftRows = Store.drafts()
+        root.archiveRows = Store.archivedFiles()
+    }
+
+    /* 相对今天偏移 n 天的日期串（-6 = 最近 7 天里最早那天） */
+    function dayText(offsetDays) {
+        var d = new Date()
+        d.setDate(d.getDate() + offsetDays)
+        return Qt.formatDate(d, "yyyy-MM-dd")
+    }
+
+    /*
+     * 密钥的打码样子：头 4 位 + 尾 2 位 + 总长。
+     *
+     * 为什么留头几位：`sk-` 开头那截本来就不是秘密，留着才认得出"这是 DeepSeek
+     * 那把还是另一把"；为什么不留中段：肩后瞟一眼要抄的就是中段。
+     * 短于 8 位的（本机 Ollama 那种随手填的）干脆全遮 —— 那么短，露两头等于露全部。
+     */
+    function maskedKey(value) {
+        var s = (value === undefined || value === null) ? "" : String(value).trim()
+        if (s === "")
+            return ""
+        if (s.length <= 8)
+            return "•".repeat(s.length) + "（" + s.length + " 位）"
+        return s.substring(0, 4) + "•".repeat(Math.min(12, s.length - 6))
+               + "…（" + s.length + " 位，尾 " + s.substring(s.length - 2) + "）"
+    }
+
+    function setRange(days) {
+        root.sumTo = root.dayText(0)
+        root.sumFrom = root.dayText(-(days - 1))
+        root.sumHint = ""
+    }
+
+    /* 进面板时先备好"今天"这个区间，不然第一次点开始是空串（见上面那处 onCompleted） */
+    Connections {
+        target: Store
+        function onChanged() { root.reloadSummarize() }
+    }
+
+    Connections {
+        target: Sum
+        /* 一轮跑完（中途每写出一份草稿也会经由 Store.changed 刷新，这条是兜底） */
+        function onRunFinished(count) { root.reloadSummarize() }
+    }
+
     /* 顶部标题栏文案（"=" 栏目名），以及它在拖拽时的偏移 */
     property real dragDeltaX: 0
     property real dragDeltaY: 0
@@ -124,7 +197,17 @@ Popup {
      */
     ListModel { id: fmtToolModel }
 
-    Component.onCompleted: refreshFormatTools()
+    Component.onCompleted: {
+        refreshFormatTools()
+        /*
+         * 汇总区间先给"今天"：不然第一次点「开始汇总」传的是空串，
+         * 只能回一句"区间不对"。（清单不在这里取 —— show() 打开面板时取。）
+         */
+        if (root.sumFrom === "" || root.sumTo === "") {
+            root.sumFrom = root.dayText(0)
+            root.sumTo = root.dayText(0)
+        }
+    }
 
     Connections {
         target: Fmt
@@ -146,6 +229,10 @@ Popup {
         /* 格式化：认本机装了哪些格式化工具、按语言指定命令 */
         { key: "format",    label: "格式化", icon: "format" },
         { key: "document",  label: "识别",   icon: "ocr" },
+        /* 汇总：一段时间的复制内容 -> 分类文档（人工审核后才落定） */
+        { key: "summarize", label: "汇总",   icon: "markdown" },
+        /* 归档：已经汇总过、从树上收起来的原文（只有这里找得到） */
+        { key: "archive",   label: "归档",   icon: "archive" },
         { key: "about",     label: "关于",   icon: "info" }
     ]
 
@@ -230,6 +317,8 @@ Popup {
         case "document":  return documentColumn.implicitHeight
         case "check":     return checkColumn.implicitHeight
         case "format":    return formatColumn.implicitHeight
+        case "summarize": return summarizeColumn.implicitHeight
+        case "archive":   return archiveColumn.implicitHeight
         case "about":     return aboutSectionColumn.implicitHeight
         }
         return 0
@@ -275,8 +364,12 @@ Popup {
             section = sectionKey
         capturing = ""
         hint = ""
+        /* 上一次的"收进归档 3 份"不该跟着面板一直开着还在 */
+        sumHint = ""
         placeOverHost()
         open()
+        /* 开完了再取清单：reloadSummarize 只在面板开着的时候干活（见它的说明） */
+        reloadSummarize()
         forceActiveFocus()
     }
 
@@ -393,9 +486,18 @@ Popup {
     readonly property bool closesOnOutsidePress:
         (closePolicy & Popup.CloseOnPressOutside) !== 0
 
+    /*
+     * 密钥那一栏这会儿是不是"显示全文"。
+     *
+     * 放在面板根上而不是那一行的 delegate 里：一栏只有一份，而且收起面板必须
+     * 自动退回打码 —— 不然他哪天开着全文切去别的应用，回来还摊在那儿。
+     */
+    property bool showKey: false
+
     onClosed: {
         capturing = ""
         hint = ""
+        showKey = false
     }
 
     IconProvider { id: icons }
@@ -1327,45 +1429,101 @@ Popup {
                                          { k: "ocrModel", label: "识别模型",
                                            hint: "留空 = 用上面那个；要能看图的，如 qwen-vl-max / glm-4v / gpt-4o" } ]
 
-                                delegate: Row {
+                                delegate: Column {
                                     id: apiRow
                                     required property var modelData
-                                    spacing: 8
+                                    readonly property bool isKey: modelData.k === "apiKey"
+                                    spacing: 3
 
-                                    Text {
-                                        width: 62
-                                        anchors.verticalCenter: parent.verticalCenter
-                                        text: apiRow.modelData.label
-                                        color: root.mutedColor
-                                        font.pixelSize: 12
+                                    Row {
+                                        spacing: 8
+
+                                        Text {
+                                            width: 62
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            text: apiRow.modelData.label
+                                            color: root.mutedColor
+                                            font.pixelSize: 12
+                                        }
+
+                                        PanelField {
+                                            id: apiField
+                                            width: 420
+                                            height: 26
+                                            text: Llm[apiRow.modelData.k]
+                                            placeholderText: apiRow.modelData.hint
+                                            /*
+                                             * 密钥默认打码。这面板经常一开就是半天，
+                                             * 明文摊在那儿等于让身后的人 / 截图 /
+                                             * 投屏替他把 key 读走一遍。
+                                             */
+                                            echoMode: apiRow.isKey && !root.showKey
+                                                      ? TextField.Password : TextField.Normal
+                                            color: root.textColor
+                                            placeholderTextColor: root.mutedColor
+                                            font.pixelSize: 12
+                                            selectByMouse: true
+                                            leftPadding: 7
+                                            rightPadding: 7
+                                            /* 改完（或按回车）就落盘：Llm 的属性 setter 自己写 QSettings */
+                                            onEditingFinished: Llm[apiRow.modelData.k] = text
+                                            /*
+                                             * 路径 / 地址是从存档填进来的，光标默认落在末尾 ——
+                                             * 不聚焦时会显示成"…尾巴那一截"。这里把它拨回开头，
+                                             * 看着才是完整的一条（自己敲字时不动它）。
+                                             */
+                                            onTextChanged: if (!activeFocus) cursorPosition = 0
+                                            background: Rectangle {
+                                                color: "#26282b"
+                                                border.color: root.borderColor
+                                                border.width: 1
+                                                radius: 4
+                                            }
+                                        }
+
+                                        /*
+                                         * "显示"是给**他自己核对**用的（到底存进去的是哪一把），
+                                         * 不是给常态阅读用的：收起面板就自动回到打码
+                                         * （见根上那个 showKey 的 onClosed）。
+                                         */
+                                        Rectangle {
+                                            visible: apiRow.isKey
+                                            width: keyToggleText.width + 18
+                                            height: 26
+                                            radius: 4
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            color: keyToggleHit.containsMouse ? root.rowHover : "transparent"
+                                            border.width: 1
+                                            border.color: root.borderColor
+
+                                            Text {
+                                                id: keyToggleText
+                                                anchors.centerIn: parent
+                                                text: root.showKey ? "隐藏" : "显示"
+                                                color: keyToggleHit.containsMouse ? root.textBright : root.textColor
+                                                font.pixelSize: 12
+                                            }
+                                            MouseArea {
+                                                id: keyToggleHit
+                                                anchors.fill: parent
+                                                hoverEnabled: true
+                                                cursorShape: Qt.PointingHandCursor
+                                                onClicked: root.showKey = !root.showKey
+                                            }
+                                        }
                                     }
 
-                                    PanelField {
-                                        id: apiField
-                                        width: 420
-                                        height: 26
-                                        text: Llm[apiRow.modelData.k]
-                                        placeholderText: apiRow.modelData.hint
-                                        color: root.textColor
-                                        placeholderTextColor: root.mutedColor
-                                        font.pixelSize: 12
-                                        selectByMouse: true
-                                        leftPadding: 7
-                                        rightPadding: 7
-                                        /* 改完（或按回车）就落盘：Llm 的属性 setter 自己写 QSettings */
-                                        onEditingFinished: Llm[apiRow.modelData.k] = text
-                                        /*
-                                         * 路径 / 地址是从存档填进来的，光标默认落在末尾 ——
-                                         * 不聚焦时会显示成"…尾巴那一截"。这里把它拨回开头，
-                                         * 看着才是完整的一条（自己敲字时不动它）。
-                                         */
-                                        onTextChanged: if (!activeFocus) cursorPosition = 0
-                                        background: Rectangle {
-                                            color: "#26282b"
-                                            border.color: root.borderColor
-                                            border.width: 1
-                                            radius: 4
-                                        }
+                                    /*
+                                     * 打码那一行才是"只显示一部分"：头 4 位 + 尾 2 位 +
+                                     * 总长。够他认出这是哪一把 key，又不足以让人瞟一眼抄走。
+                                     * 点「显示」时这行让位（全文已经在框里了，不重复）。
+                                     */
+                                    Text {
+                                        visible: apiRow.isKey && !root.showKey
+                                                 && Llm.apiKey.trim().length > 0
+                                        text: "当前：" + root.maskedKey(Llm.apiKey)
+                                        color: root.mutedColor
+                                        font.pixelSize: 11
                                     }
                                 }
                             }
@@ -2282,6 +2440,522 @@ Popup {
                                         border.color: root.borderColor
                                         border.width: 1
                                         radius: 4
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    /* ============ 汇总（一段时间的复制内容 -> 分类文档） ============ */
+                    Column {
+                        id: summarizeColumn
+                        /* objectName 是给自检用的：它要能按名字找到这一栏量尺寸 */
+                        objectName: "summarizeColumn"
+                        anchors.top: parent.top
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.margins: 14
+                        spacing: 9
+                        visible: root.section === "summarize"
+
+                        Text {
+                            text: "内容汇总"
+                            color: root.textBright
+                            font.pixelSize: 14
+                            font.bold: true
+                        }
+
+                        Text {
+                            width: parent.width
+                            wrapMode: Text.WordWrap
+                            color: root.textColor
+                            font.pixelSize: 12
+                            text: "用法：选好区间 → 「开始汇总」→ 整理出来的东西先进「待审」，"
+                                  + "在编辑器里看过、改过，再点「采纳」并进 <保存位置>/文档/<分类>.md；"
+                                  + "最后那一步「收进归档」把这一段的原文从左侧树上收起来。"
+                        }
+
+                        Text {
+                            width: parent.width
+                            wrapMode: Text.WordWrap
+                            color: root.mutedColor
+                            font.pixelSize: 11
+                            text: "分类是模型起的，但每轮都会把已有分类报给它，优先往里归 —— "
+                                  + "真归错了不用在界面里改：草稿的文件名就是分类名，"
+                                  + "改个名再采纳，内容并进的就是改完那份。"
+                        }
+
+                        Text {
+                            width: parent.width
+                            wrapMode: Text.WordWrap
+                            color: root.mutedColor
+                            font.pixelSize: 11
+                            text: "用的是「模型」那一栏里配的同一个模型（和翻译、校验共用一套配置）。"
+                                  + "内容按每 6000 字分批发，一批一次请求，一轮最多 30 批 —— "
+                                  + "区间拉太长会直接让你缩短，不会闷着烧 token。"
+                                  + "这一版只汇总文字，剪贴板里的截图不进汇总。"
+                        }
+
+                        /* ---- 区间 ---- */
+                        Row {
+                            spacing: 8
+
+                            Repeater {
+                                model: [        { label: "今天", from: 0, to: 0 },
+                                    { label: "昨天", from: -1, to: -1 },
+                                    { label: "最近 7 天", from: -6, to: 0 },
+                                    { label: "最近 30 天", from: -29, to: 0 }
+                                ]
+
+                                delegate: Rectangle {
+                                    id: presetHit
+                                    required property var modelData
+                                    width: presetText.width + 20
+                                    height: 24
+                                    radius: 4
+                                    /* 选中的那个区间给一层底，不然四个按钮看不出点的是哪个 */
+                                    color: root.sumFrom === root.dayText(modelData.from)
+                                           && root.sumTo === root.dayText(modelData.to)
+                                           ? root.rowHover : "transparent"
+                                    border.width: 1
+                                    border.color: root.borderColor
+
+                                    Text {
+                                        id: presetText
+                                        anchors.centerIn: parent
+                                        text: presetHit.modelData.label
+                                        color: root.textColor
+                                        font.pixelSize: 12
+                                    }
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: {
+                                            root.sumFrom = root.dayText(presetHit.modelData.from)
+                                            root.sumTo = root.dayText(presetHit.modelData.to)
+                                            root.sumHint = ""
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        Row {
+                            spacing: 8
+
+                            PanelField {
+                                id: fromField
+                                width: 116
+                                height: 26
+                                text: root.sumFrom
+                                placeholderText: "yyyy-MM-dd"
+                                color: root.textColor
+                                placeholderTextColor: root.mutedColor
+                                font.pixelSize: 12
+                                selectByMouse: true
+                                leftPadding: 7
+                                rightPadding: 7
+                                onEditingFinished: root.sumFrom = text
+                                background: Rectangle {
+                                    color: "#26282b"
+                                    border.color: root.borderColor
+                                    border.width: 1
+                                    radius: 4
+                                }
+                            }
+                            Text {
+                                anchors.verticalCenter: parent.verticalCenter
+                                text: "~"
+                                color: root.mutedColor
+                                font.pixelSize: 12
+                            }
+                            PanelField {
+                                id: toField
+                                width: 116
+                                height: 26
+                                text: root.sumTo
+                                placeholderText: "yyyy-MM-dd"
+                                color: root.textColor
+                                placeholderTextColor: root.mutedColor
+                                font.pixelSize: 12
+                                selectByMouse: true
+                                leftPadding: 7
+                                rightPadding: 7
+                                onEditingFinished: root.sumTo = text
+                                background: Rectangle {
+                                    color: "#26282b"
+                                    border.color: root.borderColor
+                                    border.width: 1
+                                    radius: 4
+                                }
+                            }
+                        }
+
+                        /* ---- 开始 / 停 + 进度 ---- */
+                        Row {
+                            spacing: 8
+
+                            Rectangle {
+                                width: runText.width + 24
+                                height: 26
+                                radius: 4
+                                /* 在跑的时候这颗按钮唯一的用处是"停"，所以它自己变灰 */
+                                color: Sum.busy ? "transparent"
+                                                : (runHit.containsMouse ? root.rowHover : "transparent")
+                                border.width: 1
+                                border.color: Sum.busy ? root.borderColor : root.accentColor
+
+                                Text {
+                                    id: runText
+                                    anchors.centerIn: parent
+                                    text: Sum.busy ? "正在汇总…" : "开始汇总"
+                                    color: Sum.busy ? root.mutedColor : root.textBright
+                                    font.pixelSize: 12
+                                }
+                                MouseArea {
+                                    id: runHit
+                                    anchors.fill: parent
+                                    enabled: !Sum.busy
+                                    hoverEnabled: true
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: {
+                                        root.sumHint = ""
+                                        Sum.start(root.sumFrom, root.sumTo)
+                                    }
+                                }
+                            }
+
+                            Rectangle {
+                                visible: Sum.busy
+                                width: stopText.width + 20
+                                height: 26
+                                radius: 4
+                                color: stopHit.containsMouse ? root.rowHover : "transparent"
+                                border.width: 1
+                                border.color: root.borderColor
+
+                                Text {
+                                    id: stopText
+                                    anchors.centerIn: parent
+                                    text: "停"
+                                    color: root.textColor
+                                    font.pixelSize: 12
+                                }
+                                MouseArea {
+                                    id: stopHit
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: Sum.cancel()
+                                }
+                            }
+                        }
+
+                        /*
+                         * 进度条按 Sum.totalSteps 走。那个分母在跑到一半时会长：
+                         * 同一个分类被切到好几批时，后面还要各补一次"合并"请求，
+                         * 所以这里读的是实时值，不是一开始算出来的批数。
+                         */
+                        Rectangle {
+                            width: parent.width
+                            height: 3
+                            radius: 2
+                            color: root.borderColor
+                            visible: Sum.busy || Sum.totalSteps > 0
+
+                            Rectangle {
+                                anchors.left: parent.left
+                                anchors.top: parent.top
+                                anchors.bottom: parent.bottom
+                                width: Sum.totalSteps > 0
+                                       ? parent.width * Math.min(1, Sum.doneSteps / Sum.totalSteps) : 0
+                                radius: 2
+                                color: root.accentColor
+                            }
+                        }
+
+                        Text {
+                            width: parent.width
+                            wrapMode: Text.WordWrap
+                            color: Sum.busy ? root.accentColor : root.mutedColor
+                            font.pixelSize: 11
+                            text: Sum.status === ""
+                                 ? "还没跑过：选好区间点「开始汇总」。"
+                                 : Sum.status
+                        }
+
+                        /* ---- 待审草稿 ---- */
+                        Text {
+                            text: "待审草稿（" + root.draftRows.length + "）"
+                            color: root.textBright
+                            font.pixelSize: 13
+                            font.bold: true
+                        }
+
+                        Rectangle {
+                            width: parent.width
+                            height: Math.max(30, draftColumn.height + 16)
+                            radius: 6
+                            color: root.rowHover
+                            border.width: 1
+                            border.color: root.borderColor
+
+                            Column {
+                                id: draftColumn
+                                anchors.left: parent.left
+                                anchors.leftMargin: 14
+                                anchors.right: parent.right
+                                anchors.rightMargin: 14
+                                anchors.verticalCenter: parent.verticalCenter
+                                spacing: 6
+
+                                Text {
+                                    visible: root.draftRows.length === 0
+                                    text: "（没有待审的草稿。「文档/待审」里的文件也会列在这儿，"
+                                          + "所以重启还在的）"
+                                    wrapMode: Text.WordWrap
+                                    width: parent.width
+                                    color: root.mutedColor
+                                    font.pixelSize: 12
+                                }
+
+                                Repeater {
+                                    model: root.draftRows
+
+                                    delegate: Row {
+                                        id: draftRow
+                                        required property var modelData
+                                        width: parent.width
+                                        spacing: 8
+
+                                        Text {
+                                            width: parent.width - 190
+                                            text: draftRow.modelData.category
+                                                  + "　" + draftRow.modelData.label
+                                            color: root.textColor
+                                            font.pixelSize: 12
+                                            elide: Text.ElideMiddle
+                                        }
+                                        Repeater {
+                                            model: [            { label: "打开", act: "open" },
+                                                { label: "采纳", act: "adopt" },
+                                                { label: "丢弃", act: "discard" }
+                                            ]
+                                            delegate: Rectangle {
+                                                id: draftAct
+                                                required property var modelData
+                                                width: draftActText.width + 18
+                                                height: 22
+                                                radius: 4
+                                                color: draftActHit.containsMouse ? root.rowHover : "transparent"
+                                                border.width: 1
+                                                border.color: root.borderColor
+
+                                                Text {
+                                                    id: draftActText
+                                                    anchors.centerIn: parent
+                                                    text: draftAct.modelData.label
+                                                    color: draftActHit.containsMouse
+                                                           ? root.textBright : root.textColor
+                                                    font.pixelSize: 11
+                                                }
+                                                MouseArea {
+                                                    id: draftActHit
+                                                    anchors.fill: parent
+                                                    hoverEnabled: true
+                                                    cursorShape: Qt.PointingHandCursor
+                                                    onClicked: {
+                                                        var path = draftRow.modelData.path
+                                                        var act = draftAct.modelData.act
+                                                        if (act === "open") {
+                                                            /* 草稿就是普通 md 文件：直接在编辑区里改 */
+                                                            root.commandRequested("fileOpen:" + path)
+                                                        } else if (act === "adopt") {
+                                                            var doc = Store.adoptDraft(path)
+                                                            root.sumHint = doc === ""
+                                                                           ? "没能并进文档（草稿是空的？）"
+                                                                           : ("已并入 " + doc)
+                                                        } else {
+                                                            Store.discardDraft(path)
+                                                            root.sumHint = "丢掉了那份草稿"
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        /* ---- 收进归档 ---- */
+                        Row {
+                            spacing: 8
+
+                            Rectangle {
+                                width: archiveRunText.width + 24
+                                height: 26
+                                radius: 4
+                                color: archiveRunHit.containsMouse ? root.rowHover : "transparent"
+                                border.width: 1
+                                border.color: root.borderColor
+
+                                Text {
+                                    id: archiveRunText
+                                    anchors.centerIn: parent
+                                    text: "把这区间的原文收进归档"
+                                    color: archiveRunHit.containsMouse ? root.textBright : root.textColor
+                                    font.pixelSize: 12
+                                }
+                                MouseArea {
+                                    id: archiveRunHit
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: {
+                                        var n = Store.archiveRange(root.sumFrom, root.sumTo)
+                                        root.sumHint = n > 0
+                                                       ? ("收进归档 " + n
+                                                          + " 份原文，去左边「归档」那一栏能翻出来")
+                                                       : (root.sumFrom + " ~ " + root.sumTo
+                                                          + " 没有可收的原文（或者已经收过了）")
+                                    }
+                                }
+                            }
+                        }
+
+                        Text {
+                            width: parent.width
+                            wrapMode: Text.WordWrap
+                            visible: root.sumHint !== ""
+                            color: root.accentColor
+                            font.pixelSize: 11
+                            text: root.sumHint
+                        }
+
+                        Text {
+                            width: parent.width
+                            wrapMode: Text.WordWrap
+                            color: root.mutedColor
+                            font.pixelSize: 11
+                            text: "「收进归档」只是让左侧树不再显示那些文件，磁盘上一个字节都没动 —— "
+                                  + "内容还在原来的日期目录里，用记事本也打得开。"
+                        }
+                    }
+
+                    /* ============ 归档（汇总过的原文，树上不再显示） ============ */
+                    Column {
+                        id: archiveColumn
+                        objectName: "archiveColumn"
+                        anchors.top: parent.top
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.margins: 14
+                        spacing: 9
+                        visible: root.section === "archive"
+
+                        Text {
+                            text: "归档内容"
+                            color: root.textBright
+                            font.pixelSize: 14
+                            font.bold: true
+                        }
+
+                        Text {
+                            width: parent.width
+                            wrapMode: Text.WordWrap
+                            color: root.textColor
+                            font.pixelSize: 12
+                            text: "汇总过、已经从左侧树上收起来的原文。要哪份点「还原」，"
+                                  + "它就重新回到自己的日期目录里去；点「打开」直接看内容。"
+                        }
+
+                        Rectangle {
+                            width: parent.width
+                            height: Math.max(30, archivedColumn.height + 16)
+                            radius: 6
+                            color: root.rowHover
+                            border.width: 1
+                            border.color: root.borderColor
+
+                            Column {
+                                id: archivedColumn
+                                anchors.left: parent.left
+                                anchors.leftMargin: 14
+                                anchors.right: parent.right
+                                anchors.rightMargin: 14
+                                anchors.verticalCenter: parent.verticalCenter
+                                spacing: 6
+
+                                Text {
+                                    visible: root.archiveRows.length === 0
+                                    text: "（还没归档过任何内容）"
+                                    color: root.mutedColor
+                                    font.pixelSize: 12
+                                }
+
+                                Repeater {
+                                    model: root.archiveRows
+
+                                    delegate: Row {
+                                        id: archivedRow
+                                        required property var modelData
+                                        width: parent.width
+                                        spacing: 8
+
+                                        Text {
+                                            /*
+                                             * 归档只是"树上不显示"，文件本来还在原地 —— 原地却又不在了，
+                                             * 那就是他自己从文件管理器里删了。这一句必须说出来，
+                                             * 不然看着像这个程序把内容弄丢了。
+                                             */
+                                            width: parent.width - 150
+                                            text: archivedRow.modelData.dateKey + " / "
+                                                  + archivedRow.modelData.label
+                                                  + (archivedRow.modelData.exists
+                                                     ? "" : "（文件已不在）")
+                                            color: archivedRow.modelData.exists
+                                                   ? root.textColor : root.mutedColor
+                                            font.pixelSize: 12
+                                            elide: Text.ElideMiddle
+                                        }
+                                        Repeater {
+                                            model: [            { label: "打开", act: "open" },
+                                                { label: "还原", act: "back" }
+                                            ]
+                                            delegate: Rectangle {
+                                                id: archivedAct
+                                                required property var modelData
+                                                width: archivedActText.width + 18
+                                                height: 22
+                                                radius: 4
+                                                color: archivedActHit.containsMouse ? root.rowHover : "transparent"
+                                                border.width: 1
+                                                border.color: root.borderColor
+
+                                                Text {
+                                                    id: archivedActText
+                                                    anchors.centerIn: parent
+                                                    text: archivedAct.modelData.label
+                                                    color: archivedActHit.containsMouse
+                                                           ? root.textBright : root.textColor
+                                                    font.pixelSize: 11
+                                                }
+                                                MouseArea {
+                                                    id: archivedActHit
+                                                    anchors.fill: parent
+                                                    hoverEnabled: true
+                                                    cursorShape: Qt.PointingHandCursor
+                                                    onClicked: {
+                                                        var path = archivedRow.modelData.path
+                                                        if (archivedAct.modelData.act === "open")
+                                                            root.commandRequested("fileOpen:" + path)
+                                                        else
+                                                            Store.unarchiveFile(path)
+                                                    }
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                             }

@@ -111,6 +111,18 @@ struct Result {
 };
 
 /*
+ * "这一次是被取消的，不是失败" —— 那句话说在哪儿、怎么认，只放这一处。
+ *
+ * 原来两边各写一遍字面量，而认的那一边写成了
+ * `result.error != QLatin1String("已取消")`：中文走 Latin-1 是把 9 个 UTF-8
+ * 字节当成 9 个字符，和 3 个汉字的 QString 永远不相等 —— 于是取消照样被记成
+ * 一条错误，界面上多出一句"xxx.pdf：已取消"。词只留一份就再对不上一次的机会
+ * 也没了，而且这条能写成自检（见 SelfTest::runDoc）。
+ */
+inline QString cancelledError() { return QStringLiteral("已取消"); }
+inline bool isCancelledError(const QString &error) { return error == cancelledError(); }
+
+/*
  * 转换一个文件。**会阻塞**（一页几秒到几十秒，首次跑还要下模型），必须在工作
  * 线程里调 —— 见 DocConvertTask。
  *

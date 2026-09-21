@@ -454,7 +454,7 @@ DocConvert::Result runOnce(const QString &path, const QString &command, int time
         if (cancel && cancel->load()) {
             process.kill();
             process.waitForFinished(3000);
-            result.error = QStringLiteral("已取消");
+            result.error = cancelledError();
             return result;
         }
         if (clock.elapsed() > timeoutMs) {

@@ -111,6 +111,16 @@ bool hasIssue(const QVariantList &issues, const QString &kind) {
     return false;
 }
 
+/* 某一类问题的严重级（没这一类给空串） */
+QString severityOf(const QVariantList &issues, const QString &kind) {
+    for (const QVariant &i : issues) {
+        const QVariantMap map = i.toMap();
+        if (map.value(QStringLiteral("kind")).toString() == kind)
+            return map.value(QStringLiteral("severity")).toString();
+    }
+    return QString();
+}
+
 }  // namespace
 
 int SelfTest::runTools(Formatter *fmt, DiffEngine *differ, Checker *check, LlmClient *llm,
@@ -460,6 +470,24 @@ int SelfTest::runTools(Formatter *fmt, DiffEngine *differ, Checker *check, LlmCl
             check->checkLocalOnly(QStringLiteral("这是我的的书。\n"), QStringLiteral("markdown"));
             tcheck(hasIssue(check->issues(), QStringLiteral("repeat")),
                   QStringLiteral("「的的」报出来"), check->resultSummary());
+            /*
+             * 严重级也得钉：原来只钉了"报没报"，而"的 / 了 报 error"那条分支
+             * 写成了 QLatin1String("的")（中文走 Latin1 永不相等），静默地一直是
+             * warn 也没人发现。报没报和报成什么颜色是两件事。
+             */
+            tcheck(severityOf(check->issues(), QStringLiteral("repeat"))
+                       == QStringLiteral("error"),
+                  QStringLiteral("「的的」按 error 报（不是黄线）"),
+                  severityOf(check->issues(), QStringLiteral("repeat")));
+        }
+
+        /* 其它叠字仍然只是提醒：白名单外的字不等于"多打了一个"那么确定 */
+        {
+            check->checkLocalOnly(QStringLiteral("这是那那回事。\n"), QStringLiteral("markdown"));
+            tcheck(severityOf(check->issues(), QStringLiteral("repeat"))
+                       == QStringLiteral("warn"),
+                  QStringLiteral("「要要」按 warn 报"),
+                  severityOf(check->issues(), QStringLiteral("repeat")));
         }
 
         /* 行尾空白：任何语言都报，而且是 info（不吓人） */

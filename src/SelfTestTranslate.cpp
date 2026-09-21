@@ -158,6 +158,8 @@ public:
     QString trace;
     /* 回给客户端的那句译文 */
     QString replyContent = QStringLiteral("你好，世界");
+    /* 回哪个状态码（401 用来试"密钥不对"那条路：界面上得说人话） */
+    int replyStatus = 200;
 
     explicit MockLlmServer(QObject *parent = nullptr) : QTcpServer(parent) {}
 
@@ -216,10 +218,13 @@ protected:
             QJsonObject body{{QStringLiteral("choices"), QJsonArray{choice}}};
             const QByteArray payload = QJsonDocument(body).toJson(QJsonDocument::Compact);
 
-            QByteArray response = "HTTP/1.1 200 OK\r\n"
-                                  "Content-Type: application/json\r\n"
-                                  "Connection: close\r\n"
-                                  "Content-Length: ";
+            const QByteArray responseHead = replyStatus == 200
+                                                ? QByteArrayLiteral("HTTP/1.1 200 OK\r\n")
+                                                : QByteArrayLiteral("HTTP/1.1 401 Unauthorized\r\n");
+            QByteArray response = responseHead
+                                  + "Content-Type: application/json\r\n"
+                                    "Connection: close\r\n"
+                                    "Content-Length: ";
             response += QByteArray::number(payload.size());
             response += "\r\n\r\n";
             response += payload;
@@ -598,6 +603,32 @@ int SelfTest::runTranslate(TranslateCards *cards, LlmClient *llm, TrayIcon *tray
                     QStringLiteral("请求：提示词里有目标语言，正文也带上了"));
             trCheck(sent.contains(QStringLiteral("system")) && sent.contains(QStringLiteral("user")),
                     QStringLiteral("请求：是一问一答两条消息（system 定翻译规矩）"));
+
+            /*
+             * 401（密钥空着 / 不对）：Qt 原文是 "Host requires authentication"，
+             * DeepSeek 自己回的是 "Authentication Fails" —— 两句都不告诉人去哪儿改。
+             * 界面上那句必须点到"设置 → 模型 → 密钥"，不然用户只知道"坏了"。
+             */
+            mock.replyStatus = 401;
+            mock.request.clear();   /* 那个 __answered 闸是实例级的，不清第二条不会回 */
+            mock.raw.clear();
+            gotError.clear();
+            gotText.clear();
+            llm->translate(QStringLiteral("Hello again"), QStringLiteral("中文（简体）"));
+            {
+                QEventLoop loop;
+                QTimer::singleShot(5000, &loop, &QEventLoop::quit);
+                QObject::connect(llm, &LlmClient::finished, &loop, &QEventLoop::quit);
+                QObject::connect(llm, &LlmClient::failed, &loop, &QEventLoop::quit);
+                loop.exec();
+                settle();
+            }
+            mock.replyStatus = 200;
+            trCheck(!gotError.isEmpty(), QStringLiteral("401：要报出来，不能闷着说翻译好了"),
+                    gotText);
+            trCheck(gotError.contains(QStringLiteral("密钥")),
+                    QStringLiteral("401：那句错指着「密钥」这一栏，不是 Qt 那句原文"),
+                    gotError);
         }
     }
 
