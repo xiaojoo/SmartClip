@@ -3,6 +3,7 @@
 #include "Checker.h"
 #include "Diff.h"
 #include "EditorController.h"
+#include "EditorViewItem.h"
 #include "Formatter.h"
 #include "Translate.h"
 
@@ -250,6 +251,60 @@ int SelfTest::runTools(Formatter *fmt, DiffEngine *differ, Checker *check, LlmCl
             tcheck(text == QStringLiteral("第一行\n第二行\n"),
                   QStringLiteral("从磁盘读一份 UTF-8 中文文件，读回来还是那几个字"),
                   text.left(20));
+        }
+
+        /*
+         * 两个忽略开关。钉的是**开关一按就按新口径重算**，不用重新调 compare：
+         * setIgnoreCase 内部拿上次那两份正文再跑一遍（见 src/Diff.cpp）。
+         */
+        {
+            differ->setIgnoreCase(false);
+            differ->setIgnoreWhitespace(false);
+            differ->compare(QStringLiteral("abc\ndef\n"), QStringLiteral("ABC\ndef\n"));
+            const int off = differ->changes().size();
+            differ->setIgnoreCase(true);
+            const int on = differ->changes().size();
+            tout(QStringLiteral("忽略大小写：关 %1 处 -> 开 %2 处").arg(off).arg(on));
+            tcheck(off == 1 && on == 0,
+                   QStringLiteral("忽略大小写：一按就重算，那处差异没了"));
+            differ->setIgnoreCase(false);
+
+            differ->compare(QStringLiteral("  abc\n"), QStringLiteral("abc\n"));
+            const int wOff = differ->changes().size();
+            differ->setIgnoreWhitespace(true);
+            const int wOn = differ->changes().size();
+            tout(QStringLiteral("忽略首尾空白：关 %1 处 -> 开 %2 处").arg(wOff).arg(wOn));
+            tcheck(wOff == 1 && wOn == 0,
+                   QStringLiteral("忽略首尾空白：一按就重算"));
+            differ->setIgnoreWhitespace(false);
+
+            /* 只忽略大小写时，缩进不同还得算差异（两个开关不能互相带出来） */
+            differ->setIgnoreCase(true);
+            differ->compare(QStringLiteral("  abc\n"), QStringLiteral("abc\n"));
+            tcheck(differ->changes().size() == 1,
+                   QStringLiteral("只开忽略大小写时，缩进不同仍然算一处差异"));
+            differ->setIgnoreCase(false);
+        }
+
+        /*
+         * 字级差异（mod 行里到底哪几个字变了）。
+         * "alpha = 1;" -> "alpha = 2;" 只有那个数字变了，两边都该报第 9 列起 1 个字符。
+         */
+        {
+            differ->compare(QStringLiteral("alpha = 1;\n"), QStringLiteral("alpha = 2;\n"));
+            const QVariantMap row = differ->rows().value(0).toMap();
+            const QVariantList lw = row.value(QStringLiteral("leftWords")).toList();
+            const QVariantList rw = row.value(QStringLiteral("rightWords")).toList();
+            tout(QStringLiteral("字级：左 [%1,%2] 右 [%3,%4]（kind=%5）")
+                     .arg(lw.value(0).toInt()).arg(lw.value(1).toInt())
+                     .arg(rw.value(0).toInt()).arg(rw.value(1).toInt())
+                     .arg(row.value(QStringLiteral("kind")).toString()));
+            tcheck(row.value(QStringLiteral("kind")).toString() == QLatin1String("mod")
+                       && lw.size() == 2 && lw.at(0).toInt() == 8 && lw.at(1).toInt() == 1
+                       && rw.size() == 2 && rw.at(0).toInt() == 8 && rw.at(1).toInt() == 1,
+                   QStringLiteral("改一个字符：两边都只标第 9 列那一个字符"),
+                   QStringLiteral("左 %1 / 右 %2").arg(QVariant(lw).toString(),
+                                                       QVariant(rw).toString()));
         }
     }
 
@@ -736,6 +791,378 @@ int SelfTest::runTools(Formatter *fmt, DiffEngine *differ, Checker *check, LlmCl
             QCoreApplication::processEvents();
     } else {
         std::fputs("\n-- Markdown 预览的右键菜单：跳过（没传 Main.qml 根对象） --\n", stdout);
+    }
+
+    /* ------------------------------------------------------------------
+     * 6. 对比绘制层（src/EditorViewItem.h 那组 setDiff*）
+     *
+     * 这一节钉的是"BC 那种对齐空行到底走不走得通"，也就是整套设计的地基：
+     * 行注释（annotation）只许给那一行**加显示高度**，缓冲区 / 行数 / 行号 /
+     * 保存点一个都不许动 —— 动了一次，对比页里就不能直接改字了。
+     *
+     * 所以每条都带数字打出来：先看尺子量不量得出来，再谈对不对。
+     * ------------------------------------------------------------------ */
+    std::fputs("\n-- 对比绘制层（行注释撑对齐空行） --\n", stdout);
+    if (EditorViewItem *view = EditorViewItem::instance()) {
+        /* 上面那一节关标签时把文档全收了，这里得先有一份能写的 */
+        if (!view->hasDocument())
+            view->newDocument();
+        /*
+         * 九行长（120 字）+ 一行短。长行用来量"底色铺不铺得开"，
+         * 短行用来把这条**已知限度**钉在纸面上：底色只铺到文字结束，
+         * 短行右边那一截不铺（Scintilla 没有"整行通宽且铺在字底下"那一格，
+         * 见 EditorViewItem.cpp 里 beginDiff 那段实测记录）。
+         */
+        QString sample;
+        const auto longRow = [](int n) {
+            return QStringLiteral("L%1 ").arg(n, 2, 10, QLatin1Char('0'))
+                   + QStringLiteral("内容").repeated(40);
+        };
+        for (int i = 1; i <= 9; ++i)
+            sample += (i == 8 ? QStringLiteral("L08 短行\n") : longRow(i) + QLatin1Char('\n'));
+        view->setText(sample);
+        /* 把"刚写进去的这十行"定成保存点：下面那条"没弄脏"才是真在比前后 */
+        view->setModified(false);
+        for (int i = 0; i < 3; ++i)
+            QCoreApplication::processEvents();
+
+        const int h = view->textLineHeight();
+        const int y3a = view->lineTopY(3);
+        const int y4a = view->lineTopY(4);
+        const int y5a = view->lineTopY(5);
+        const int charsA = view->charCount();
+        const int linesA = view->lineCount();
+        const bool dirtyA = view->modified();
+
+        view->beginDiff();
+        /* 涂在**第 0 行**：光标开局就在那儿，这一行同时是"当前行"—— 最狠的一种叠法 */
+        view->setDiffLineKind(0, QStringLiteral("mod"));
+        view->setDiffLineKind(2, QStringLiteral("del"));
+        view->setDiffLineKind(7, QStringLiteral("del"));   // 那一行是短行
+        view->setDiffWordMarks(2, { 1, 2 });
+        view->setDiffGap(3, 3);          // 第 4 行（0 基）底下撑 3 行高
+        for (int i = 0; i < 3; ++i)
+            QCoreApplication::processEvents();
+
+        const int y3b = view->lineTopY(3);
+        const int y4b = view->lineTopY(4);
+        const int y5b = view->lineTopY(5);
+
+        tout(QStringLiteral("行高 h=%1").arg(h));
+        tout(QStringLiteral("撑带前  y3=%1  y4=%2  y5=%3   （间距 %4 / %5）")
+                 .arg(y3a).arg(y4a).arg(y5a).arg(y4a - y3a).arg(y5a - y4a));
+        tout(QStringLiteral("撑带后  y3=%1  y4=%2  y5=%3   （间距 %4 / %5）")
+                 .arg(y3b).arg(y4b).arg(y5b).arg(y4b - y3b).arg(y5b - y4b));
+
+        tcheck(h > 0, QStringLiteral("行高量得出来（后面所有像素判断的尺子）"),
+               QStringLiteral("%1 px").arg(h));
+        tcheck(y3b == y3a, QStringLiteral("带子**上面**那些行一动不动"),
+               QStringLiteral("%1 -> %2").arg(y3a).arg(y3b));
+        tcheck(y4b - y3b == 4 * h, QStringLiteral("带子正好多出 3 行高"),
+               QStringLiteral("间距 %1，应为 %2").arg(y4b - y3b).arg(4 * h));
+        tcheck(y5b - y4b == y4a - y3a, QStringLiteral("带子不改后面的行距"),
+               QStringLiteral("%1 vs %2").arg(y5b - y4b).arg(y4a - y3a));
+
+        tcheck(view->charCount() == charsA, QStringLiteral("正文缓冲区一个字节没变"),
+               QStringLiteral("%1 -> %2").arg(charsA).arg(view->charCount()));
+        tcheck(view->lineCount() == linesA, QStringLiteral("行数没变（行号还是 1..10）"),
+               QStringLiteral("%1 -> %2").arg(linesA).arg(view->lineCount()));
+        tcheck(view->modified() == dirtyA, QStringLiteral("保存点没被弄脏（不会冒出未保存的小圆点）"),
+               dirtyA ? QStringLiteral("脏") : QStringLiteral("干净"));
+        tcheck(view->diffGapAt(3) == 3, QStringLiteral("diffGapAt 读回来也是 3 行"),
+               QStringLiteral("实际 %1").arg(view->diffGapAt(3)));
+        /*
+         * 命中测试：带子下面那一行的"上沿 + 半行高"那点，Scintilla 认不认得是第 4 行。
+         * 认不出来的话，用户在对比页里点一下就会点到隔壁那行 —— 这是这条路的生死线。
+         * x 取 100：三条边距（行号 / 折叠 / 分隔线）加起来不到这个数，落在正文里。
+         */
+        tcheck(view->lineAtPoint(100, y4b + h / 2) == 4,
+               QStringLiteral("点带子下面那一行，落点还是它自己（命中测试算进了带子）"),
+               QStringLiteral("量到第 %1 行").arg(view->lineAtPoint(100, y4b + h / 2)));
+        tcheck(view->lineAtPoint(100, y3b + h / 2) == 3,
+               QStringLiteral("带子**上面**那行的落点不受影响"),
+               QStringLiteral("量到第 %1 行").arg(view->lineAtPoint(100, y3b + h / 2)));
+
+        /*
+         * 底色铺没铺开、字还看不看得见 —— 这两件事必须同时成立。
+         * 整行扫一遍数像素：band = 底色像素，glyph = 既不是底色也不是正文底色的
+         * （就是笔画）。只看一个点分不出"没铺"和"铺了但把字糊住了"。
+         */
+        const auto stats = [view](int line, const char *hex) {
+            return view->diffRowStats(line, QString::fromLatin1(hex));
+        };
+        const auto cnt = [](const QVariantMap &m, const char *key) {
+            return m.value(QLatin1String(key)).toInt();
+        };
+        const QVariantMap sDel = stats(2, "#3a2224");
+        const QVariantMap sCaret = stats(0, "#3a3320");
+        const QVariantMap sShort = stats(7, "#3a2224");
+        const QVariantMap sPlain = stats(5, "#3a2224");
+        tout(QStringLiteral("扫描区间 x %1..%2   长行 del：底色 %3 笔画 %4 底 %5")
+                 .arg(cnt(sDel, "xFrom")).arg(cnt(sDel, "xTo"))
+                 .arg(cnt(sDel, "band")).arg(cnt(sDel, "glyph")).arg(cnt(sDel, "paper")));
+        tout(QStringLiteral("             当前行 mod：底色 %1 笔画 %2   "
+                            "短行 del：底色 %3 笔画 %4   没涂那行：底色 %5")
+                 .arg(cnt(sCaret, "band")).arg(cnt(sCaret, "glyph"))
+                 .arg(cnt(sShort, "band")).arg(cnt(sShort, "glyph"))
+                 .arg(cnt(sPlain, "band")));
+
+        tcheck(cnt(sDel, "band") > 100 && cnt(sDel, "glyph") > 0,
+               QStringLiteral("长行：底色铺开了一整条，笔画还在（字没被盖住）"),
+               QStringLiteral("底色 %1 / 笔画 %2")
+                   .arg(cnt(sDel, "band")).arg(cnt(sDel, "glyph")));
+        tcheck(cnt(sCaret, "band") > 100 && cnt(sCaret, "glyph") > 0,
+               QStringLiteral("光标停着那一行的底色不被当前行色盖掉，字也还在"),
+               QStringLiteral("底色 %1 / 笔画 %2")
+                   .arg(cnt(sCaret, "band")).arg(cnt(sCaret, "glyph")));
+        tcheck(cnt(sPlain, "band") == 0,
+               QStringLiteral("没涂的那一行一个底色像素都没有"));
+        /* 这条钉的是**限度**不是缺陷：底色只铺到文字结束，短行铺不满一行。 */
+        tcheck(cnt(sShort, "band") > 0 && cnt(sShort, "band") < cnt(sDel, "band") / 3,
+               QStringLiteral("限度：短行的底色只到文字结束（远少于长行那一整条）"),
+               QStringLiteral("短行底色 %1 / 长行底色 %2")
+                   .arg(cnt(sShort, "band")).arg(cnt(sDel, "band")));
+
+        /* 退出对比要把这一层擦干净：同一份文档切回普通标签不能带着色块 */
+        view->endDiff();
+        for (int i = 0; i < 2; ++i)
+            QCoreApplication::processEvents();
+        tcheck(cnt(stats(2, "#3a2224"), "band") == 0,
+               QStringLiteral("endDiff 之后底色擦干净了"),
+               QStringLiteral("还剩 %1 个底色像素")
+                   .arg(cnt(stats(2, "#3a2224"), "band")));
+        tcheck(view->diffGapAt(3) == 0, QStringLiteral("endDiff 之后带子也撤掉了"),
+               QStringLiteral("还剩 %1 行").arg(view->diffGapAt(3)));
+    } else {
+        std::fputs("  skip  没有编辑器实例 / 没有当前文档，这一节跳过\n", stdout);
+    }
+
+    /* ------------------------------------------------------------------
+     * 7. 对比页（qml/components/DiffPane.qml + Main.qml 那一节）
+     *
+     * 钉的是"两栏真的对上了没有"。上面第 6 节量的是单个编辑器里空白带撑得起来；
+     * 这一节量的是**两份文档一起挂上去之后**，同一处差异在两栏的同一个高度上。
+     * 底色、标记位这些在"逻辑对、画出来错开"的情况下照样能全绿，只有 y 量得出来。
+     * ------------------------------------------------------------------ */
+    if (qmlRoot) {
+        std::fputs("\n-- 对比页（两栏对齐） --\n", stdout);
+
+        auto *view = qmlRoot->property("view").value<QObject *>();
+        const auto docIdOf = [view]() {
+            int id = -1;
+            if (view)
+                QMetaObject::invokeMethod(view, "currentDocId", Q_RETURN_ARG(int, id));
+            return id;
+        };
+        const auto openFile = [qmlRoot](const QString &path) {
+            QMetaObject::invokeMethod(qmlRoot, "openTreeFile", Q_ARG(QVariant, QVariant(path)));
+            for (int i = 0; i < 4; ++i)
+                QCoreApplication::processEvents();
+        };
+
+        /*
+         * 两份差"中间插一行 + 后面改一行"的文件，各 120 行。
+         *
+         * 三个讲究：
+         *   * 插在**中间**不是开头 —— 开头那种这一版撑不出空白带
+         *     （见 src/Diff.h 里 leadGap 那段），量不到对齐；
+         *   * 改的那一行只加两个字符（L118 -> L118x）—— 相似度够高才会被判成
+         *     一"处"mod、两边落在同一行上。改成完全不同的内容会退化成
+         *     "删一行 + 加一行"，那本来就是两行，量不出对齐；
+         *   * 120 行是为了让视口装不下 —— 短于二十行的文件根本滚不动，
+         *     同步那两条就会假红。
+         */
+        QTemporaryDir diffDir;
+        const QString pathA = diffDir.filePath(QStringLiteral("a.md"));
+        const QString pathB = diffDir.filePath(QStringLiteral("b.md"));
+        {
+            QString a;
+            QString b;
+            for (int i = 1; i <= 120; ++i) {
+                const QString line = QStringLiteral("L%1 content\n").arg(i);
+                a += line;
+                if (i == 10)
+                    b += QStringLiteral("INSERTED\n");
+                b += (i == 118) ? QStringLiteral("L118x content\n") : line;
+            }
+            QFile fa(pathA);
+            if (fa.open(QIODevice::WriteOnly)) {
+                fa.write(a.toUtf8());
+                fa.close();
+            }
+            QFile fb(pathB);
+            if (fb.open(QIODevice::WriteOnly)) {
+                fb.write(b.toUtf8());
+                fb.close();
+            }
+        }
+
+        openFile(pathA);
+        const int idA = docIdOf();
+        openFile(pathB);
+        const int idB = docIdOf();
+        tcheck(idA >= 0 && idB >= 0 && idA != idB,
+               QStringLiteral("两份文件各自成了一份文档"),
+               QStringLiteral("docId %1 / %2").arg(idA).arg(idB));
+
+        QMetaObject::invokeMethod(qmlRoot, "diffOpenForTest",
+                                  Q_ARG(QVariant, idA), Q_ARG(QVariant, idB),
+                                  Q_ARG(QVariant, QStringLiteral("a.md")),
+                                  Q_ARG(QVariant, QStringLiteral("b.md")));
+        for (int i = 0; i < 6; ++i)
+            QCoreApplication::processEvents();
+
+        const auto diffState = [qmlRoot]() {
+            QVariant r;
+            QMetaObject::invokeMethod(qmlRoot, "diffState", Q_RETURN_ARG(QVariant, r));
+            return r.toMap();
+        };
+        const QVariantMap st = diffState();
+        const auto num = [](const QVariant &v, const char *key) {
+            return v.toMap().value(QLatin1String(key)).toInt();
+        };
+        tout(QStringLiteral("mode=%1 tabs=%2 rows=%3 changes=%4 lead=%5/%6  左 %7 行 右 %8 行")
+                 .arg(st.value(QStringLiteral("mode")).toBool() ? 1 : 0)
+                 .arg(st.value(QStringLiteral("tabs")).toInt())
+                 .arg(st.value(QStringLiteral("rows")).toInt())
+                 .arg(st.value(QStringLiteral("changes")).toInt())
+                 .arg(st.value(QStringLiteral("leadLeft")).toInt())
+                 .arg(st.value(QStringLiteral("leadRight")).toInt())
+                 .arg(num(st.value(QStringLiteral("left")), "lines"))
+                 .arg(num(st.value(QStringLiteral("right")), "lines")));
+        tout(QStringLiteral("概况：%1").arg(st.value(QStringLiteral("summary")).toString()));
+
+        tcheck(st.value(QStringLiteral("mode")).toBool(), QStringLiteral("对比页开着"));
+        tcheck(st.value(QStringLiteral("tabs")).toInt() == 1,
+               QStringLiteral("标签栏上多了一格对比"));
+        tcheck(num(st.value(QStringLiteral("left")), "lines") == 121
+                   && num(st.value(QStringLiteral("right")), "lines") == 122,
+               QStringLiteral("两栏各看自己那份，行数没被对比层改动"),
+               QStringLiteral("左 %1 / 右 %2")
+                   .arg(num(st.value(QStringLiteral("left")), "lines"))
+                   .arg(num(st.value(QStringLiteral("right")), "lines")));
+        tcheck(!num(st.value(QStringLiteral("left")), "dirty")
+                   && !num(st.value(QStringLiteral("right")), "dirty"),
+               QStringLiteral("挂了色块和空白带之后两份文档都还不算改过"));
+        tcheck(st.value(QStringLiteral("changes")).toInt() == 2,
+               QStringLiteral("认出两处差异（中间插一行 + 后面改一行）"),
+               QStringLiteral("实际 %1").arg(st.value(QStringLiteral("changes")).toInt()));
+        tcheck(st.value(QStringLiteral("leadLeft")).toInt() == 0
+                   && st.value(QStringLiteral("leadRight")).toInt() == 0,
+               QStringLiteral("差异不在开头，两边都不欠\"首行之上\"那段空"));
+
+        /*
+         * 对齐本身：第二处差异（第 118 行改了）在左栏是第 118 行、右栏是第 119 行，
+         * 中间那次插入把左栏第 10 行下面撑了一行高，所以两边的 y 应该相等。
+         */
+        const auto changeYs = [qmlRoot](int index) {
+            QVariant r;
+            QMetaObject::invokeMethod(qmlRoot, "diffChangeYs", Q_RETURN_ARG(QVariant, r),
+                                      Q_ARG(QVariant, index));
+            return r.toMap();
+        };
+        const QVariantMap ys = changeYs(1);
+        const int yL = ys.value(QStringLiteral("left")).toInt();
+        const int yR = ys.value(QStringLiteral("right")).toInt();
+        tout(QStringLiteral("第二处差异：左栏 y=%1  右栏 y=%2").arg(yL).arg(yR));
+        tcheck(yL > 0 && yL == yR,
+               QStringLiteral("同一处差异在两栏的同一个高度上（对齐真的生效）"),
+               QStringLiteral("%1 vs %2").arg(yL).arg(yR));
+
+        /*
+         * 跳到第 2 处（两边都有行、算 mod 的那一处）：整块要涂成亮一档的同族色。
+         * 原来这里是一个描边框，实测下边框看不见（那条线正好压在行界上，
+         * 被下一行的背景糊掉了），改成亮一档的底色 —— 量的还是"底色 + 笔画"
+         * 两个都要有，别又换成一种把字盖住的画法。
+         */
+        QVariant curPixel;
+        QMetaObject::invokeMethod(qmlRoot, "diffGotoForTest", Q_RETURN_ARG(QVariant, curPixel),
+                                  Q_ARG(QVariant, 1));
+        const QVariantMap curMap = curPixel.toMap();
+        tout(QStringLiteral("跳到第 2 处：亮一档底色 %1 像素、笔画 %2 像素、底 %3 像素")
+                 .arg(num(curMap, "band")).arg(num(curMap, "glyph")).arg(num(curMap, "paper")));
+        /*
+         * 这一行是 "L118 content"，一共 12 个字符 —— 底色 + 笔画加起来就是
+         * 那一小段文字的宽度，所以门槛按这个样本给（>20 个底色像素），
+         * 不是第 6 节那种 120 字的长行。
+         */
+        tcheck(num(curMap, "band") > 20 && num(curMap, "glyph") > 0,
+               QStringLiteral("当前这一处整块亮一档，而且字还看得见"),
+               QStringLiteral("底色 %1 / 笔画 %2")
+                   .arg(num(curMap, "band")).arg(num(curMap, "glyph")));
+
+        /* 滚动同步：滚左边，右边要跟到同一显示行 */
+        const auto scrollOf = [&diffState]() {
+            return diffState().value(QStringLiteral("scroll")).toMap();
+        };
+        const int beforeRight = num(scrollOf(), "right");
+        QMetaObject::invokeMethod(qmlRoot, "diffScrollLeftForTest", Q_ARG(QVariant, 3));
+        for (int i = 0; i < 3; ++i)
+            QCoreApplication::processEvents();
+        const QVariantMap after = scrollOf();
+        tcheck(num(after, "left") == 3,
+               QStringLiteral("左栏滚到了第 3 显示行"),
+               QStringLiteral("实际 %1").arg(num(after, "left")));
+        tcheck(num(after, "right") != beforeRight,
+               QStringLiteral("右栏跟着滚了（同步开着）"),
+               QStringLiteral("%1 -> %2").arg(beforeRight).arg(num(after, "right")));
+
+        /*
+         * 合并：把第 0 处（右边多出来的那一行）用左边的内容换掉 = 删掉它。
+         * 钉三件事：差异少了一处、右边那份**真的被改了**（未保存标记亮）、
+         * 右边少一行。第二件最要紧 —— 改的是文档本身，不是只把色块抹掉。
+         */
+        const int changesBefore = st.value(QStringLiteral("changes")).toInt();
+        QMetaObject::invokeMethod(qmlRoot, "diffMergeForTest", Q_ARG(QVariant, 1));
+        for (int i = 0; i < 6; ++i)
+            QCoreApplication::processEvents();
+        const QVariantMap m1 = diffState();
+        tout(QStringLiteral("合并 左->右 之后：差异 %1 -> %2  右边 %3 行  未保存标记 %4")
+                 .arg(changesBefore)
+                 .arg(m1.value(QStringLiteral("changes")).toInt())
+                 .arg(num(m1.value(QStringLiteral("right")), "lines"))
+                 .arg(m1.value(QStringLiteral("right")).toMap()
+                          .value(QStringLiteral("dirty")).toBool() ? 1 : 0));
+        tcheck(m1.value(QStringLiteral("changes")).toInt() == changesBefore - 1,
+               QStringLiteral("左 → 右：合并掉一处差异"),
+               QStringLiteral("%1 -> %2").arg(changesBefore)
+                   .arg(m1.value(QStringLiteral("changes")).toInt()));
+        tcheck(num(m1.value(QStringLiteral("right")), "lines") == 121,
+               QStringLiteral("右边那份真的少了一行（不是只把色块抹掉）"),
+               QStringLiteral("现在 %1 行").arg(num(m1.value(QStringLiteral("right")), "lines")));
+        tcheck(m1.value(QStringLiteral("right")).toMap()
+                   .value(QStringLiteral("dirty")).toBool(),
+               QStringLiteral("被改过的那份文档冒出未保存标记"));
+
+        /* 再来一次（这回两边都有行）：改过的那一行搬回左边，两栏就该完全一样 */
+        QMetaObject::invokeMethod(qmlRoot, "diffMergeForTest", Q_ARG(QVariant, -1));
+        for (int i = 0; i < 6; ++i)
+            QCoreApplication::processEvents();
+        const QVariantMap m2 = diffState();
+        tcheck(m2.value(QStringLiteral("changes")).toInt() == 0,
+               QStringLiteral("右 → 左：再合并一次，两处都清完"),
+               m2.value(QStringLiteral("summary")).toString());
+
+        /* 关掉会话：对比页收起，两栏身上那层画的东西要还干净 */
+        QMetaObject::invokeMethod(qmlRoot, "closeDiffSession", Q_ARG(QVariant, 0));
+        for (int i = 0; i < 4; ++i)
+            QCoreApplication::processEvents();
+        const QVariantMap closed = diffState();
+        tcheck(!closed.value(QStringLiteral("mode")).toBool(),
+               QStringLiteral("关掉会话之后退出对比页"));
+        tcheck(closed.value(QStringLiteral("tabs")).toInt() == 0,
+               QStringLiteral("对比标签跟着没了"));
+        const QVariantMap cl = closed.value(QStringLiteral("left")).toMap();
+        tcheck(num(cl, "gap") == 0,
+               QStringLiteral("退出之后左栏第 1 行下面的空白带撤掉了"),
+               QStringLiteral("还剩 %1 行").arg(num(cl, "gap")));
+        tcheck(num(closed.value(QStringLiteral("left")), "lines") == 121,
+               QStringLiteral("退出之后左栏还是那 121 行（文档没被动过）"));
+
+        QMetaObject::invokeMethod(qmlRoot, "saveAll");
+        QMetaObject::invokeMethod(qmlRoot, "closeAllTabs", Q_ARG(QVariant, QVariant()));
+        for (int i = 0; i < 3; ++i)
+            QCoreApplication::processEvents();
     }
 
     /* 自检改过的设置按原样放回去 */

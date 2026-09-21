@@ -59,6 +59,74 @@ Rectangle {
     signal newTabRequested()
     signal clipboardRefreshRequested()
 
+    /* ------------------------------------------------------------------
+     * 文件对比（见 qml/components/DiffPane.qml + src/Diff.h）
+     *
+     * 一个对比会话 = 标签栏上多出来的一格 + 正文区整块换成 DiffPane。
+     * 会话本身（两边各看哪份文档）由 Main.qml 记着，这里只拿它摆界面：
+     *   * diffTabs   每个会话的标签文字，顺序就是 diffIndex
+     *   * diffSession 当前打开的那一个（{leftDocId, rightDocId, leftTitle, rightTitle}）
+     *
+     * 为什么只有一份 DiffPane 而不是每个会话一份：DiffPane 里是两个**原生
+     * 子窗口**（QScintilla），开 N 个会话就 2N 个原生控件要摆、要跟着窗口缩放，
+     * 而同一时刻只看一个会话 —— 换会话时把这一份重新绑到那两份文档上就够了。
+     * ---------------------------------------------------------------- */
+
+    property var diffTabs: []
+    property var diffSession: null
+    property bool diffMode: false
+    property int diffIndex: -1
+
+    /* 点 / 关对比标签（交给 Main.qml 切会话） */
+    signal diffTabRequested(int diffIndex)
+    signal diffTabClosed(int diffIndex)
+    /* 点回一个文档标签（Main.qml 接住：退出对比页、把那一层画的东西擦干净） */
+    signal docTabActivated(var pane, int index)
+    /* 对比页上那个"复制补丁"（补丁文字在 C++ 那侧，Main.qml 负责写剪贴板） */
+    signal diffCopyPatchRequested()
+
+    /* Main.qml 拿它做"换会话 / 关掉时收尾"（applyDiff / unbindPanes） */
+    readonly property alias diffPage: diffPage
+
+    /*
+     * 这一条标签栏要画的那一串。
+     *
+     * 文档那些格子原样从 C++ 拿（title / index / modified / active 都在里面），
+     * 对比的格子是这里拼出来的。进了对比页就把所有文档格子的 active 抹掉 ——
+     * 不然会出现"两个格子同时高亮"，看着像点了没反应。
+     */
+    function tabModelFor(pane, withDiffs) {
+        var out = []
+        var docs = pane ? pane.documents : []
+        for (var i = 0; i < docs.length; ++i) {
+            var d = docs[i]
+            if (withDiffs && root.diffMode) {
+                var copy = ({})
+                for (var k in d)
+                    copy[k] = d[k]
+                copy.active = false
+                out.push(copy)
+            } else {
+                out.push(d)
+            }
+        }
+        if (withDiffs) {
+            for (var j = 0; j < root.diffTabs.length; ++j) {
+                out.push({
+                    kind: "diff",
+                    diffIndex: j,
+                    index: -1,
+                    title: root.diffTabs[j],
+                    modified: false,
+                    active: root.diffMode && root.diffIndex === j
+                })
+            }
+        }
+        return out
+    }
+
+    readonly property var mainTabModel: tabModelFor(root.view, true)
+
     /*
      * tab 上的右键菜单（由 Main.qml 的 openTabMenu 弹出）。
      *
@@ -99,6 +167,7 @@ Rectangle {
     property int editorFontSize: 12
     readonly property bool hasDocument: root.view.hasDocument
     readonly property bool hasTabs: root.hasDocument || root.previewItem !== null
+                                    || root.diffTabs.length > 0
 
     /* ---- Markdown 预览（见 qml/components/MarkdownView.qml） ---- */
 
@@ -390,6 +459,7 @@ Rectangle {
                     id: mainTabStrip
 
                     pane: editorView
+                    tabModel: root.mainTabModel
                     iconProvider: icons
                     /*
                      * "源码 / 预览"开关在这一条上（分栏时只出现一次）。
@@ -421,6 +491,9 @@ Rectangle {
                     onTabContextMenuRequested: (pane, index, anchor, x, y) =>
                         root.tabContextMenuRequested(pane, index, anchor, x, y)
                     onMarkdownToggleRequested: root.markdownToggleRequested()
+                    onDiffTabClicked: (diffIndex) => root.diffTabRequested(diffIndex)
+                    onDiffTabCloseRequested: (diffIndex) => root.diffTabClosed(diffIndex)
+                    onTabActivated: (pane, index) => root.docTabActivated(pane, index)
                 }
 
                 /* 第二栏的标签：**只有左右分栏**在这一行（上下分栏见 mirrorTabStripDown） */
@@ -429,6 +502,7 @@ Rectangle {
 
                     visible: tabBars.sideBySide
                     pane: mirrorPane
+                    tabModel: root.tabModelFor(mirrorPane, false)
                     iconProvider: icons
                     /* 左右分栏时开关在这条（它在 paneHolder 外面，预览时也在） */
                     paneActions: root.splitMode === "right"
@@ -548,6 +622,7 @@ Rectangle {
                 visible: root.previewItem !== null
                          && root.previewItem !== undefined
                          && root.previewItem.type === "image"
+                         && !root.diffMode
 
                 anchors.fill: parent
                 anchors.margins: 20
@@ -644,7 +719,11 @@ Rectangle {
                 id: paneHolder
 
                 anchors.fill: parent
-                visible: !root.markdownPreview
+                /*
+                 * 对比页开着的时候这一整块要**真的隐藏**：里面是两个原生子窗口，
+                 * 只要 show 着就会盖在 DiffPane 上面（和预览那条同一个理由）。
+                 */
+                visible: !root.markdownPreview && !root.diffMode
 
                 /*
                  * 主栏**只是一个占位壳**：它的几何就是"这块正文区"（不分栏时是
@@ -809,6 +888,7 @@ Rectangle {
 
                         visible: root.splitting && mirrorPaneHolder.stacked
                         pane: mirrorPane
+                        tabModel: root.tabModelFor(mirrorPane, false)
                         iconProvider: icons
                         /*
                          * 开关不放这一条：它在 paneHolder 里，预览一开就跟着
@@ -968,6 +1048,18 @@ Rectangle {
                         }
                     }
                 }
+            }
+
+            /* ---- 文件对比页（见 qml/components/DiffPane.qml） ---- */
+            DiffPane {
+                id: diffPage
+
+                anchors.fill: parent
+                anchors.margins: 2
+                visible: root.diffMode
+                styleSource: editorView
+                session: root.diffSession
+                onCopyPatchRequested: root.diffCopyPatchRequested()
             }
 
             /* ---- Markdown 预览（只读渲染，见 MarkdownView.qml） ---- */

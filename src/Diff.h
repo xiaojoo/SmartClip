@@ -29,7 +29,15 @@
  *     rightNo,      右侧原始行号（0 = 这一侧是补的）
  *     kind,         "same" / "del" / "add" / "mod"
  *     desc          （只有 mod 有）"第 N 行" 之类的简短说明
+ *     leftGap,      这一行**下面**要空几行才和右侧对齐（只有真那一侧有行时才有值）
+ *     rightGap,     同上，右侧
+ *     leftWords,    （只有 mod 有）[起列, 长度, …] —— 这一行里到底哪几个字变了
+ *     rightWords,   同上，右侧
  *   }
+ *
+ * 为什么 gap 挂在**上一行下面**而不是"这一行上面"：Scintilla 的行注释只能挂在
+ * 行下面，没有"首行之上留空"那个口子。所以一段空行要挂到它上面那条真行去，
+ * 挂不上的（整段就在文件最开头）只能记进 leadGapLeft / leadGapRight。
  *
  * kind 用两个字符的记号给界面画色块：del = 左边多出来的（右边是空行）、
  * add = 右边多出来的、mod = 两边都有但内容不同。
@@ -83,8 +91,43 @@ public:
      */
     Q_INVOKABLE QString readFile(const QString &path);
 
-    /* 清空（关掉卡片时用） */
+    /* 清空（关掉对比页时用） */
     Q_INVOKABLE void clear();
+
+    /*
+     * 忽略大小写 / 忽略每行首尾空白。
+     *
+     * 改了**立刻拿上一次那两份正文重算一遍**（BC 里这两个开关就是即时生效的，
+     * 让用户再点一次"对比"很怪）。存的是正文，所以重算不用重新读文件。
+     */
+    Q_PROPERTY(bool ignoreCase READ ignoreCase WRITE setIgnoreCase NOTIFY compared)
+    Q_PROPERTY(bool ignoreWhitespace READ ignoreWhitespace WRITE setIgnoreWhitespace NOTIFY compared)
+    bool ignoreCase() const { return m_ignoreCase; }
+    bool ignoreWhitespace() const { return m_ignoreWhitespace; }
+    void setIgnoreCase(bool on);
+    void setIgnoreWhitespace(bool on);
+
+    /*
+     * 差异块（给"上一个 / 下一个差异"和右边那条导航条用）：
+     *   { row, kind, leftStart, leftCount, rightStart, rightCount }
+     * row = 这一处在行表里的第一行（0 基）；kind = "del" / "add" / "mod"
+     * （一块里既有删又有加时算 mod）。start 是**文档里的行号**（0 基）。
+     */
+    Q_PROPERTY(QVariantList changes READ changes NOTIFY compared)
+    QVariantList changes() const { return m_changes; }
+
+    /*
+     * 开头那一段有一边**一行都没有**的行数（左 / 右各一个）。
+     *
+     * 这是这套画法的死角：Scintilla 没有"首行之上留空"这个口子（这一版连
+     * topMargin 都没有 —— 查过 Scintilla.h，SCI_SETMARGINTYPEN 那一组全是横向的），
+     * 所以纯开头插入的那几行没法在两栏里对齐，只能由界面写一句"这一侧开头少 N 行"。
+     * 中间的增删不受影响：那些挂在上一行下面，行注释撑得住。
+     */
+    Q_PROPERTY(int leadGapLeft READ leadGapLeft NOTIFY compared)
+    Q_PROPERTY(int leadGapRight READ leadGapRight NOTIFY compared)
+    int leadGapLeft() const { return m_leadGapLeft; }
+    int leadGapRight() const { return m_leadGapRight; }
 
     /*
      * 把差异导出成**统一格式**的补丁文字（--- / +++ / @@ …）。
@@ -96,14 +139,28 @@ signals:
     void compared();
 
 private:
+    /* 行表建好之后补 gap / 差异块 / 概况那一句（见 .cpp 里那段的说明） */
+    void finishRows();
+
     /* 两侧不同的行数统计（summary 用） */
     int m_delCount = 0;
     int m_addCount = 0;
     int m_modCount = 0;
     int m_leftLines = 0;
     int m_rightLines = 0;
+    int m_leadGapLeft = 0;
+    int m_leadGapRight = 0;
+    bool m_ignoreCase = false;
+    bool m_ignoreWhitespace = false;
+
+    /* 上一次那两份正文（两个忽略开关改了要按新口径重算，见 setIgnoreCase） */
+    QString m_leftText;
+    QString m_rightText;
+    QString m_leftPath;
+    QString m_rightPath;
 
     QVariantList m_rows;
+    QVariantList m_changes;
     QString m_lastError;
     QString m_summary;
     QString m_leftTitle;

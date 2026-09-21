@@ -144,6 +144,8 @@ function fileMenu(ov) {
          * （见下面 editMenu 里那一条）。
          */
         { label: "与另一个文件对比…", act: "compareWithFile", icon: "diff" },
+        /* 右边给一份空白的未命名文档：想从零贴一段东西进来比 */
+        { label: "与空白文件对比", act: "compareWithBlank", icon: "diff" },
         { separator: true },
         { label: "关闭标签", act: "closeTab", shortcut: "Ctrl+W", icon: "close" },
         { label: "关闭其他标签", act: "closeOtherTabs", icon: "close" },

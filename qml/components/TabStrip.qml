@@ -23,6 +23,16 @@ Rectangle {
     /* 这一条标签栏属于哪一栏（EditorViewItem） */
     required property var pane
 
+    /*
+     * 要画的那一串标签。
+     *
+     * 默认就是这一栏自己开着的文档；文件对比之后 EditorArea 会换成一份
+     * "文档 + 对比会话"合起来的表（对比会话不是文档，池子里没有它，
+     * 但它得有自己的一个标签）。每一项要么带 kind === "diff"，要么就是
+     * C++ 那边那份文档记录原样。
+     */
+    property var tabModel: pane ? pane.documents : []
+
     /* 分栏时两条是并排的，靠 paneActions 决定"最右边那个开关"只画一次 */
     property bool paneActions: true
     /* "源码 / 预览"开关（只有最右边那一条须要） */
@@ -49,6 +59,17 @@ Rectangle {
     signal tabCloseRequested(var pane, int index)
     signal tabContextMenuRequested(var pane, int index, var menuAnchor, real x, real y)
     signal markdownToggleRequested()
+    /* 点中 / 关掉一个"文件对比"标签（对比会话不在文档池里，走单独这两条） */
+    signal diffTabClicked(int diffIndex)
+    signal diffTabCloseRequested(int diffIndex)
+    /*
+     * 左键点中一个文档标签。
+     *
+     * 切文档是标签栏自己调 activateDocument 就办完了，但"点了哪一格"这件事
+     * 外面也得知道 —— 对比页开着的时候，点回文档就是要退出对比页，
+     * 而点的正好是当前那一份时 currentChanged 根本不会发，没有这条信号就收不到。
+     */
+    signal tabActivated(var pane, int index)
 
     color: "#1e1f22"
     topLeftRadius: roundTopLeft ? cornerRadius : 0
@@ -83,7 +104,7 @@ Rectangle {
             scrollRight: tabScrollBar.x + tabScrollBar.width,
             scrollTop: tabScrollBar.y,
             scrollBottom: tabScrollBar.y + tabScrollBar.height,
-            tabs: root.pane ? root.pane.documents.length : 0,
+            tabs: root.tabModel.length,
             /* 选中那一格在内容坐标里的位置 + 当前视口（自检据此卡"选中格没滚出屏"） */
             activeLeft: t ? t.x : -1,
             activeWidth: t ? t.width : 0,
@@ -212,13 +233,14 @@ Rectangle {
                 onWidthChanged: root.scrollActiveIntoView()
 
                 Repeater {
-                    model: root.pane.documents
+                    model: root.tabModel
 
                     delegate: Rectangle {
                         id: tabItem
 
                         required property var modelData
 
+                        readonly property bool isDiff: modelData.kind === "diff"
                         readonly property bool active: modelData.active === true
                         readonly property bool hot: tabHit.containsMouse
 
@@ -238,7 +260,8 @@ Rectangle {
 
                             AppIcon {
                                 provider: root.iconProvider
-                                kind: tabItem.modelData.clipboard ? "paste" : "file"
+                                kind: tabItem.isDiff ? "diff"
+                                      : (tabItem.modelData.clipboard ? "paste" : "file")
                                 size: 14
                                 tint: tabItem.active ? root.accentColor : root.textMuted
                                 Layout.alignment: Qt.AlignVCenter
@@ -254,14 +277,15 @@ Rectangle {
                                 verticalAlignment: Text.AlignVCenter
                             }
 
-                            /* 未保存：一个点；鼠标移上来变成关闭键 */
+                            /* 未保存：一个点；鼠标移上来变成关闭键。对比标签自己从不脏 */
                             Rectangle {
                                 Layout.preferredWidth: 7
                                 Layout.preferredHeight: 7
                                 Layout.alignment: Qt.AlignVCenter
                                 radius: 4
                                 color: root.accentColor
-                                visible: tabItem.modelData.modified === true
+                                visible: !tabItem.isDiff
+                                         && tabItem.modelData.modified === true
                                          && !tabItem.hot
                             }
 
@@ -278,8 +302,11 @@ Rectangle {
                                     anchors.fill: parent
                                     anchors.margins: -4
                                     cursorShape: Qt.PointingHandCursor
-                                    onClicked: root.tabCloseRequested(
-                                                   root.pane, tabItem.modelData.index)
+                                    onClicked: tabItem.isDiff
+                                               ? root.diffTabCloseRequested(
+                                                     tabItem.modelData.diffIndex)
+                                               : root.tabCloseRequested(
+                                                     root.pane, tabItem.modelData.index)
                                 }
                             }
                         }
@@ -292,6 +319,18 @@ Rectangle {
                                              | Qt.RightButton
                             cursorShape: Qt.PointingHandCursor
                             onClicked: (mouse) => {
+                                if (tabItem.isDiff) {
+                                    /*
+                                     * 对比会话不是文档：点它就是把正文区换成那一页，
+                                     * 中键关掉，右键那套文档菜单（关闭其他 / 拆分 …）
+                                     * 对它没有意义，所以不弹。
+                                     */
+                                    if (mouse.button === Qt.MiddleButton)
+                                        root.diffTabCloseRequested(tabItem.modelData.diffIndex)
+                                    else if (mouse.button === Qt.LeftButton)
+                                        root.diffTabClicked(tabItem.modelData.diffIndex)
+                                    return
+                                }
                                 if (mouse.button === Qt.MiddleButton)
                                     root.tabCloseRequested(root.pane,
                                                            tabItem.modelData.index)
@@ -299,9 +338,11 @@ Rectangle {
                                     root.tabContextMenuRequested(root.pane,
                                                                  tabItem.modelData.index,
                                                                  tabItem, mouse.x, mouse.y)
-                                else
+                                else {
+                                    root.tabActivated(root.pane, tabItem.modelData.index)
                                     /* 只切**这一栏**：另一栏看的是它自己那一份 */
                                     root.pane.activateDocument(tabItem.modelData.index)
+                                }
                             }
                         }
                     }

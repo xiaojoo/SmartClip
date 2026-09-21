@@ -8,6 +8,7 @@
 #include <QQuickItem>
 #include <QString>
 #include <QVariantList>
+#include <QVariantMap>
 #include <QVector>
 
 #include <memory>
@@ -541,6 +542,85 @@ public:
      */
     Q_INVOKABLE QString checkTipAtPoint(int x, int y) const;
 
+    /* ------------------------------------------------------------------
+     * 文件对比的绘制层（见 src/Diff.h + qml/components/DiffPane.qml）
+     *
+     * BC 那种"两栏一行对一行"要的是**空白带**，而往正文里插真空行会把缓冲区、
+     * 撤销栈、行号、保存点全弄脏（用户就是要在对比页里直接改字）。所以走
+     * Scintilla 的行注释（annotation）：它只给那一行**加显示高度**，
+     * Document::AnnotationSetText 既不写撤销栈也不动保存点，正文一个字没变。
+     *
+     * 整行底色走 INDIC_FULLBOX 指示器：它压在字底下，语法高亮那套颜色一个不丢。
+     * （SC_MARK_BACKGROUND 那个"理论上铺满整行"的走法试过、量不出来，
+     *   理由记在 .cpp 的 beginDiff 里。）
+     *
+     * 这些**都是画在文档上的**（指示器、行注释都存在 QsciDocument 里，
+     * 不是存在视图里）：所以对比页退出时必须 endDiff() 清干净，不然同一份文档
+     * 在普通标签页里会带着这些色块。
+     * ---------------------------------------------------------------- */
+
+    /* 开始一轮对比：配好用的样式 / 指示器，并把上一轮的痕迹清掉 */
+    Q_INVOKABLE void beginDiff();
+    /* 退出对比：清空行底色、字级高亮、空白带 */
+    Q_INVOKABLE void endDiff();
+
+    /* 在第 line 行**下面**撑出 lines 行高的空白带（0 = 撤掉） */
+    Q_INVOKABLE void setDiffGap(int line, int lines);
+    /* 第 line 行下面现在撑着几行空白（自检量对齐用） */
+    Q_INVOKABLE int diffGapAt(int line) const;
+
+    /* 整行涂一种差异底色：kind = "del" / "add" / "mod" / "same" */
+    Q_INVOKABLE void setDiffLineKind(int line, const QString &kind);
+    /*
+     * 当前选中的那一处差异：把这一行涂成**更亮一档**的同族色。
+     * kind 传 "same" 或空串 = 把这一行的"当前"标记撤掉。
+     */
+    Q_INVOKABLE void setDiffCurrent(int line, const QString &kind);
+
+    /*
+     * 一行里的**字级**差异区间：cols 是 [起列, 长度, 起列, 长度, …]。
+     * 列按**字符**数（不是字节 —— 中文一个字三个字节，换算只在这里做）。
+     */
+    Q_INVOKABLE void setDiffWordMarks(int line, const QVariantList &cols);
+
+    /* 第 line 行在正文坐标里的上沿 y（自检量"两栏对没对上"量的就是它） */
+    Q_INVOKABLE int lineTopY(int line) const;
+    /* 控件坐标 (x, y) 落在文档的第几行（点右侧导航条 / 拖动定位用；-1 = 不在正文里） */
+    Q_INVOKABLE int lineAtPoint(int x, int y) const;
+
+    /* 自检用：第 line 行、x 那一处的颜色（ARGB 整数；x < 0 = 从右边数过去） */
+    Q_INVOKABLE int diffPixelAt(int line, int x) const;
+
+    /*
+     * 自检用：把第 line 行**整行扫一遍**，报 { band, paper, glyph } 三个像素数
+     * （band = 和底色 bandHex 相同的像素数，glyph = 既不是底色也不是正文底色的）。
+     *
+     * 为什么不是量一个点：单点会正好撞到字形笔画上，量出来是字的颜色，说明不了
+     * 底色在不在；而"底色铺开了"和"字还看得见"这两件事必须**同时**成立
+     * （SC_MARK_BACKGROUND 并进边距掩码那一版就是铺开了但把字糊掉了，单点量不出来）。
+     */
+    Q_INVOKABLE QVariantMap diffRowStats(int line, const QString &bandHex) const;
+
+    /*
+     * 两栏滚动同步用的四个口子。
+     *
+     * 口径是**显示行**（SCI_GETFIRSTVISIBLELINE）不是文档行：差异挂成行注释之后，
+     * 两栏的第 k 个显示行就是同一逻辑行，所以"同步行号"本身就是对齐，
+     * 不需要再查一遍映射表。
+     */
+    Q_INVOKABLE int firstVisibleLine() const;
+    Q_INVOKABLE void setFirstVisibleLine(int line);
+    Q_INVOKABLE int viewXOffset() const;
+    Q_INVOKABLE void setViewXOffset(int x);
+
+    /*
+     * 用给定内容换掉第 startLine 行起的 count 行（count = 0 就是插进去）。
+     * 对比页上"左 → 右 / ← 右"那两个合并键走它。
+     *
+     * 整段走 BEGINUNDOACTION / ENDUNDOACTION 包成**一步**撤销：用户按一次
+     * Ctrl+Z 就该把这一处合并整个收回，而不是收到半截。
+     */
+    Q_INVOKABLE void replaceLines(int startLine, int count, const QVariantList &lines);
 
     /*
      * 整份替换（格式化 / 批量改写用），**可撤销的一步**（见 .cpp 里的说明）。
@@ -829,6 +909,11 @@ signals:
     void boundChanged();
     /* 这个栏被点了（Main.qml 接住：把"当前编辑器"切到它） */
     void paneFocused();
+    /*
+     * 这一栏的滚动位置变了（滚轮 / 键盘 / 拖滚动条 / 程序设行号都算，见 .cpp）。
+     * 文件对比页拿它做两栏同步。
+     */
+    void viewScrolled();
     /* 这一栏的"最后被点的是我"标记变了 */
     void paneFocusChanged();
     /*
@@ -839,6 +924,14 @@ signals:
      * 这里走的是"界面上的账目"，所以用队列连接、允许晚一拍。
      */
     void tabsChanged();
+
+    /*
+     * 正文被**用户**改了（灌正文进去的那一段不算，见 .cpp 里 m_bulkLoading 那道闸）。
+     *
+     * 原来外面只能听 statsChanged，那个连光标移动都发；对比页要"改一个字就
+     * 重算一次差异"，得有一条只认真改动的。
+     */
+    void textChanged();
 
     void paddingChanged();
     void fontChanged();
@@ -1253,6 +1346,41 @@ private:
     /* 校验结果的波浪线：9 = 错误、10 = 警告（理由同上，8 已经被查找占了） */
     static constexpr int kCheckErrorIndicator = 9;
     static constexpr int kCheckWarnIndicator = 10;
+    /*
+     * 文件对比那八条指示器：11 / 12 / 13 = 删 / 增 / 改 的整行底色，
+     * 14 = 行内字级差异，15 / 16 / 17 = 当前那一处的删 / 增 / 改（更亮一档）。
+     *
+     * 三种底色要占三个编号是因为 Scintilla 的颜色挂在**指示器编号**上
+     * （SCI_INDICSETFORE 按编号设，不按区间），一档一个才分得开。
+     * 编号从 11 起：8 被查找占了、9 / 10 被校验波浪线占了。
+     * Scintilla 按编号从小到大画，所以"当前"压在整行底色上、字级压在两者之间。
+     *
+     * 为什么不是 SC_MARK_BACKGROUND 标记（那个理论上能铺满整行）：
+     * 见 .cpp 里 beginDiff 那段实测记录。
+     *
+     * "当前这一处"为什么是"更亮一档的底色"而不是一个描边框：
+     * 试过 INDIC_STRAIGHTBOX 只描边（fillAlpha=0 / outlineAlpha=255），
+     * 实测**下边框看不见** —— 那个矩形的底边正好落在行界上
+     * （Indicator.cpp 里 rcBox.bottom = rcLine.bottom，只有 top 往里收一格），
+     * 而指示器画在文字之前，下一行铺自己那行背景时正好把那条线糊掉。
+     */
+    static constexpr int kDiffDelIndicator = 11;
+    static constexpr int kDiffAddIndicator = 12;
+    static constexpr int kDiffModIndicator = 13;
+    static constexpr int kDiffWordIndicator = 14;
+    static constexpr int kDiffCurDelIndicator = 15;
+    static constexpr int kDiffCurAddIndicator = 16;
+    static constexpr int kDiffCurModIndicator = 17;
+    /*
+     * 空白带（行注释）用的那个扩展样式号：向 Scintilla 要一个 256 起的
+     * 扩展样式，不撞 lexer 的样式表。-1 = 还没要过（beginDiff 里要）。
+     */
+    int m_diffGapStyle = -1;
+
+    /* 本行那一段的字节区间 [行首, 下一行行首)：含换行符，字级框才画得满 */
+    QPair<long, long> diffLineRange(int line) const;
+    /* 抹掉画在文档上的那一层（标记 / 指示器 / 行注释），不动视图设置 */
+    void clearDiffPaint();
     /*
      * 上一次校验推过来的问题（悬浮时按它拼说明框），以及每一处在文档里的
      * **字节**区间（悬浮定位用）—— 两个表一一对应，clearCheckIssues 一起清。

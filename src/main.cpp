@@ -1023,6 +1023,45 @@ int main(int argc, char *argv[]) {
         });
     }
 
+    /*
+     * 看一眼"文件对比页"长什么样（`SMARTCLIP_DIFF_DEMO=1`）。
+     *
+     * 造两份只差"中间插一行 + 后面改一行"的临时文件，直接开成一个对比会话摆在那儿。
+     * 和 SMARTCLIP_NOTES_DEMO 同一个用意：正常走这条路要点菜单、要在文件框里挑，
+     * 调观感的时候每次都得复现一遍，这条给你摆好。
+     */
+    if (qEnvironmentVariableIsSet("SMARTCLIP_DIFF_DEMO")) {
+        const QString dir = QDir::tempPath() + QStringLiteral("/smartclip-diff-demo");
+        QDir().mkpath(dir);
+        QString a;
+        QString b;
+        for (int i = 1; i <= 60; ++i) {
+            const QString line = QStringLiteral("第 %1 行：这里是一段用来看对齐的正文。\n").arg(i);
+            a += line;
+            if (i == 12)
+                b += QStringLiteral("  ↑ 这一行只有右边有（左边在这儿撑一行空白带）\n");
+            b += (i == 40)
+                     ? QStringLiteral("第 40 行：这里是一段用来看对齐的正文，右边把尾巴改了。\n")
+                     : line;
+        }
+        const QString pathA = dir + QStringLiteral("/a.md");
+        const QString pathB = dir + QStringLiteral("/b.md");
+        QFile fa(pathA);
+        if (fa.open(QIODevice::WriteOnly)) {
+            fa.write(a.toUtf8());
+            fa.close();
+        }
+        QFile fb(pathB);
+        if (fb.open(QIODevice::WriteOnly)) {
+            fb.write(b.toUtf8());
+            fb.close();
+        }
+        QTimer::singleShot(500, quick, [qmlRoot = quick->rootObject(), pathA, pathB]() {
+            QMetaObject::invokeMethod(qmlRoot, "diffDemo", Q_ARG(QVariant, pathA),
+                                      Q_ARG(QVariant, pathB));
+        });
+    }
+
     const int code = app.exec();
     notes.shutdown();
     cards.shutdown();

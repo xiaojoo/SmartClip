@@ -114,6 +114,14 @@ constexpr long kScFindRegexp = 0x00200000;
 constexpr long kIndicRoundBox = 7;
 /* INDIC_SQUIGGLE：波浪线（IDE 里标问题那种下划线），值取自 Scintilla 5.x */
 constexpr long kIndicSquiggle = 1;
+/* INDIC_STRAIGHTBOX：方框（对比的字级差异、当前那一处的描边用它） */
+constexpr long kIndicStraightBox = 8;
+/*
+ * INDIC_FULLBOX = 16（值取自 Scintilla 的 include/Scintilla.h）。
+ * 整行底色用这个而不是 ROUNDBOX / STRAIGHTBOX：Indicator.cpp 里只有它不把
+ * top 往内收一格，铺出来是满满的一条，看着才是"这一行变了"。
+ */
+constexpr long kIndicFullBox = 16;
 
 constexpr int kMaxFileBytes = 64 * 1024 * 1024;
 
@@ -134,6 +142,29 @@ const QColor kAccent(0x4c, 0x96, 0xd8);         // 强调蓝
 /* 校验波浪线的两档色（错误 / 警告），和界面里那两档严重度一个色 */
 const QColor kCheckError(0xff, 0x6b, 0x68);
 const QColor kCheckWarn(0xd7, 0xa8, 0x5b);
+/*
+ * 文件对比的三档底色（删 / 增 / 改）和空白带、字级、当前框那三条。
+ *
+ * 前三个和原来那张对比卡片是同一套值（qml/components/DiffCard.qml 里
+ * delBg / addBg / modBg）—— 功能从弹窗搬进 tab 时不改观感，只改摆法。
+ */
+const QColor kDiffDel(0x3a, 0x22, 0x24);
+const QColor kDiffAdd(0x1e, 0x35, 0x24);
+const QColor kDiffMod(0x3a, 0x33, 0x20);
+/*
+ * "当前这一处"的三档：同族、比上面那三档亮一档。
+ *
+ * 不用描边框（INDIC_STRAIGHTBOX 那个底边会被下一行的背景糊掉，
+ * 见头文件里那组编号的注释），改成整行换个更亮的底 —— 一眼能看出
+ * "上一处 / 下一处"跳到了哪儿，而且不依赖任何一条边界线。
+ */
+const QColor kDiffCurDel(0x63, 0x35, 0x38);
+const QColor kDiffCurAdd(0x2c, 0x55, 0x36);
+const QColor kDiffCurMod(0x63, 0x57, 0x2c);
+/* 空白带：和行号栏同色系，比正文底色亮一档（BC 那条灰带的位置） */
+const QColor kDiffGapBand(0x26, 0x28, 0x2c);
+/* 字级差异：比整行底色扎眼一档，"到底哪几个字变了"靠它 */
+const QColor kDiffWord(0x6b, 0x3f, 0x44);
 /*
  * 编辑器里所有竖线的颜色：行号右边那条分隔线、字数参考线、缩进参考线，**同一个色**。
  *
@@ -521,6 +552,19 @@ void EditorViewItem::ensureWrapped() {
         emit tabsChanged();
     });
 
+    /*
+     * 文件对比那两栏的滚动同步：谁滚了一下就喊一嗓子，由 QML 决定另一栏跟到哪。
+     *
+     * 接**滚动条的值**而不是 Scintilla 的通知：QsciScintillaBase 没有把 SCN_UPDATEUI
+     * 在滚轮那条路上稳定地透出来，而滚动条是 Scintilla 自己每帧校准的，
+     * 滚轮 / 拖动 / 跳行 / 键盘翻页全都会动它，一个口子就够。
+     */
+    const auto shout = [this]() { emit viewScrolled(); };
+    if (auto *vb = m_sci->verticalScrollBar())
+        connect(vb, &QScrollBar::valueChanged, this, shout);
+    if (auto *hb = m_sci->horizontalScrollBar())
+        connect(hb, &QScrollBar::valueChanged, this, shout);
+
     connect(m_sci, &QsciScintilla::textChanged, this, [this]() {
         /*
          * 正文一改（哪怕是我们自己灌进去的），上一次校验画的那几条波浪线就
@@ -532,6 +576,7 @@ void EditorViewItem::ensureWrapped() {
             return;
         applyMargins();
         emit statsChanged();
+        emit textChanged();
         /*
          * 另一栏如果正看着**同一份文档**，它的画面也得重画（两栏是同一个
          * 底层文档，Scintilla 不会自己通知另一个视图 —— 不通知就是"在左边
@@ -2150,6 +2195,22 @@ bool EditorViewItem::eventFilter(QObject *watched, QEvent *event) {
     if (event->type() == QEvent::MouseButtonPress && watched == m_sci && m_sci
         && isVisible())
         emit paneFocused();
+
+    /*
+     * 文件对比那两栏的滚动同步：滚轮 / 键盘翻页之后喊一嗓子。
+     *
+     * 为什么不能只接滚动条的 valueChanged：ScintillaQt 往滚动条里**写**值是
+     * 关着信号写的（ScintillaQt.cpp:227 那句 blockSignals(true)），所以滚轮、
+     * 键盘翻页、程序设行号这几条路一条都不会发信号 —— 只有用户自己拖滚动条
+     * 才发。那几条得按事件接。
+     *
+     * 而且必须排到这一帧之后（singleShot(0)）：topLine 是 Scintilla 在处理这个
+     * 事件的过程里改的，抢在它前面读到的是上一帧的旧值。
+     */
+    if ((event->type() == QEvent::Wheel || event->type() == QEvent::KeyPress)
+        && (watched == m_sci || watched == m_sci->viewport()) && m_sci && isVisible()) {
+        QTimer::singleShot(0, this, [this]() { emit viewScrolled(); });
+    }
 
     /*
      * 鼠标停在**校验波浪线**上：弹一个说明框（和 IDE 里把鼠标移到出错的地方一样）。
@@ -4275,6 +4336,399 @@ void EditorViewItem::clearCheckIssues() {
         m_sci->SendScintilla(QsciScintillaBase::SCI_INDICATORCLEARRANGE, 0L, docLen);
     }
     m_sci->viewport()->update();
+}
+
+/* ----------------------------------------------------------------------
+ * 文件对比的绘制层（见头文件里那组 setDiff* 的说明）
+ * ------------------------------------------------------------------- */
+
+void EditorViewItem::beginDiff() {
+    if (!m_sci)
+        return;
+
+    /*
+     * 空白带（行注释）那一整条的底色：向 Scintilla 要一个 256 起的**扩展样式**，
+     * 不撞 lexer 的样式表。只问一次 —— 每问一次样式表就往上撑一格。
+     */
+    if (m_diffGapStyle < 0) {
+        m_diffGapStyle = int(m_sci->SendScintilla(
+            QsciScintillaBase::SCI_ALLOCATEEXTENDEDSTYLES, 1L));
+    }
+    /* 换主题 / 换底色之后要重写一遍，所以这两条不在上面那个 if 里 */
+    m_sci->SendScintilla(QsciScintillaBase::SCI_STYLESETFORE, long(m_diffGapStyle),
+                         scColor(kDiffGapBand));
+    m_sci->SendScintilla(QsciScintillaBase::SCI_STYLESETBACK, long(m_diffGapStyle),
+                         scColor(kDiffGapBand));
+    /*
+     * 行注释整体按这一个样式画：SCI_ANNOTATIONSETSTYLEOFFSET 的口径是
+     * "每行自己那个样式号 + 这个偏移"，我们每行都留 0，于是全落到上面配好的那条。
+     */
+    m_sci->SendScintilla(QsciScintillaBase::SCI_ANNOTATIONSETSTYLEOFFSET, long(m_diffGapStyle));
+    /*
+     * ANNOTATION_BOXED = 2。不能选 STANDARD = 1：EditView.cpp 的 DrawAnnotation
+     * 里"铺底色"那一步判的是 AnnotationBoxedOrIndented()，STANDARD 走不进去，
+     * 带子会是透明的（撑高了但看不见，等于没有）。
+     */
+    m_sci->SendScintilla(QsciScintillaBase::SCI_ANNOTATIONSETVISIBLE, 2L);
+
+    /*
+     * 五条指示器：11 / 12 / 13 = 删 / 增 / 改 的整行底色，14 = 行内字级差异，
+     * 15 = 当前那一处的描边。都是容器指示器（8 起），Scintilla 要求配
+     * INDICSETUNDER 才认自定义样式（和查找 / 校验那两段的同一个坑）。
+     *
+     * 整行底色用 FULLBOX 而不是 ROUNDBOX / STRAIGHTBOX：只有它不往内收
+     * （Indicator.cpp 里 `if (sacDraw.style != INDIC_FULLBOX) rcBox.top =
+     * rcLine.top + 1;`），铺出来是一整条、上下不留白。
+     *
+     * 【为什么不是 SC_MARK_BACKGROUND 标记】试过一整轮：标记定义、这一行挂了
+     * 哪个标记、alpha、markType 全都对（diffDiagnostics 报回来 22 / 1 / 255），
+     * 但整行扫下来底色像素是 0 —— ViewStyle::Background() 那一格在这套配置下
+     * 就是不生效；把标记位并进边距掩码能让它画，可那条画在**字上面**
+     * （drawLineTranslucent 是最后一个相位），改过的行一个字都看不见。
+     * 指示器这一条是实测画得出来、而且压在字底下（自检"对比绘制层"那一段）。
+     */
+    struct Band { long num; long style; QColor fore; long alpha; long outline; };
+    for (const Band &b : {
+             Band{ long(kDiffDelIndicator), kIndicFullBox, kDiffDel, 255L, 0L },
+             Band{ long(kDiffAddIndicator), kIndicFullBox, kDiffAdd, 255L, 0L },
+             Band{ long(kDiffModIndicator), kIndicFullBox, kDiffMod, 255L, 0L },
+             Band{ long(kDiffWordIndicator), kIndicStraightBox, kDiffWord, 255L, 0L },
+             /* 当前那一处：同族亮一档，压在整行底色上面（编号大 → 后画） */
+             Band{ long(kDiffCurDelIndicator), kIndicFullBox, kDiffCurDel, 255L, 0L },
+             Band{ long(kDiffCurAddIndicator), kIndicFullBox, kDiffCurAdd, 255L, 0L },
+             Band{ long(kDiffCurModIndicator), kIndicFullBox, kDiffCurMod, 255L, 0L } }) {
+        m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETSTYLE, b.num, b.style);
+        m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETUNDER, b.num, 1L);
+        m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETFORE, b.num, scColor(b.fore));
+        m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETALPHA, b.num, b.alpha);
+        m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETOUTLINEALPHA, b.num, b.outline);
+    }
+
+    /* 一轮对比 = 一层干净的画：上一轮的痕迹全抹掉再让调用方往上涂 */
+    clearDiffPaint();
+}
+
+/* 抹掉这一层画在**文档**上的东西（指示器 / 行注释），不动视图设置 */
+void EditorViewItem::clearDiffPaint() {
+    if (!m_sci || !hasDocument())
+        return;
+    const long docLen = m_sci->SendScintilla(QsciScintillaBase::SCI_GETLENGTH);
+    for (const int ind : { kDiffDelIndicator, kDiffAddIndicator, kDiffModIndicator,
+                           kDiffWordIndicator, kDiffCurDelIndicator, kDiffCurAddIndicator,
+                           kDiffCurModIndicator }) {
+        m_sci->SendScintilla(QsciScintillaBase::SCI_SETINDICATORCURRENT, long(ind));
+        if (docLen > 0)
+            m_sci->SendScintilla(QsciScintillaBase::SCI_INDICATORCLEARRANGE, 0L, docLen);
+    }
+    m_sci->SendScintilla(QsciScintillaBase::SCI_ANNOTATIONCLEARALL);
+}
+
+void EditorViewItem::endDiff() {
+    if (!m_sci)
+        return;
+
+    /*
+     * 指示器 / 行注释都存在**文档**上（不是视图上），所以这份文档回到普通
+     * 标签页时不能带着这些色块 —— 这里不干净退，用户切回去就是满屏假高亮。
+     */
+    clearDiffPaint();
+    m_sci->viewport()->update();
+}
+
+void EditorViewItem::setDiffGap(int line, int lines) {
+    if (!m_sci || !hasDocument() || line < 0 || line >= lineCount())
+        return;
+
+    /*
+     * 传 N-1 个换行撑出 N 行高的带子：Scintilla 数的是 NumberLines(text)
+     * = 换行数 + 1（PerLine.cpp 里那个函数）。实测对得上 —— 传 2 个换行，
+     * 第 4 行和第 5 行之间的间距从 15px 变成 60px，正好多出 3 行。
+     */
+    if (lines <= 0) {
+        m_sci->SendScintilla(QsciScintillaBase::SCI_ANNOTATIONSETTEXT, uintptr_t(line),
+                             static_cast<const char *>(nullptr));
+    } else {
+        const QByteArray band(QString(lines - 1, QLatin1Char('\n')).toUtf8());
+        m_sci->SendScintilla(QsciScintillaBase::SCI_ANNOTATIONSETTEXT, uintptr_t(line),
+                             band.constData());
+    }
+    m_sci->viewport()->update();
+}
+
+int EditorViewItem::diffGapAt(int line) const {
+    if (!m_sci || !hasDocument() || line < 0 || line >= lineCount())
+        return 0;
+    /*
+     * 直接就是多出来的行数：setDiffGap 传的是 N-1 个换行，而 Scintilla 存进去的
+     * lines = 换行数 + 1 = N，所以读回来不用再加减（实测传 3 读回 3）。
+     */
+    return int(m_sci->SendScintilla(QsciScintillaBase::SCI_ANNOTATIONGETLINES, long(line)));
+}
+
+/* 本行那一段的字节区间：到**下一行行首**为止（含本行换行符，框才画得满） */
+QPair<long, long> EditorViewItem::diffLineRange(int line) const {
+    const long start = m_sci->SendScintilla(QsciScintillaBase::SCI_POSITIONFROMLINE, long(line));
+    const long end = line + 1 < lineCount()
+        ? m_sci->SendScintilla(QsciScintillaBase::SCI_POSITIONFROMLINE, long(line + 1))
+        : m_sci->SendScintilla(QsciScintillaBase::SCI_GETLENGTH);
+    return qMakePair(start, end);
+}
+
+void EditorViewItem::setDiffLineKind(int line, const QString &kind) {
+    if (!m_sci || !hasDocument() || line < 0 || line >= lineCount())
+        return;
+
+    int indicator = -1;
+    if (kind == QLatin1String("del"))
+        indicator = kDiffDelIndicator;
+    else if (kind == QLatin1String("add"))
+        indicator = kDiffAddIndicator;
+    else if (kind == QLatin1String("mod"))
+        indicator = kDiffModIndicator;
+    if (indicator < 0)   // "same" 和认不出来的不涂
+        return;
+
+    const auto [start, end] = diffLineRange(line);
+    if (end <= start)
+        return;
+    m_sci->SendScintilla(QsciScintillaBase::SCI_SETINDICATORCURRENT, long(indicator));
+    m_sci->SendScintilla(QsciScintillaBase::SCI_INDICATORFILLRANGE, (unsigned long)start,
+                         (unsigned long)(end - start));
+}
+
+void EditorViewItem::setDiffCurrent(int line, const QString &kind) {
+    if (!m_sci || !hasDocument() || line < 0 || line >= lineCount())
+        return;
+    const auto [start, end] = diffLineRange(line);
+    if (end <= start)
+        return;
+
+    /* 先按这一行原来挂的"当前"色清一遍（kind 换了、或者干脆不标了都要清） */
+    for (const int ind : { kDiffCurDelIndicator, kDiffCurAddIndicator, kDiffCurModIndicator }) {
+        m_sci->SendScintilla(QsciScintillaBase::SCI_SETINDICATORCURRENT, long(ind));
+        m_sci->SendScintilla(QsciScintillaBase::SCI_INDICATORCLEARRANGE, (unsigned long)start,
+                             (unsigned long)(end - start));
+    }
+
+    int indicator = -1;
+    if (kind == QLatin1String("del"))
+        indicator = kDiffCurDelIndicator;
+    else if (kind == QLatin1String("add"))
+        indicator = kDiffCurAddIndicator;
+    else if (kind == QLatin1String("mod"))
+        indicator = kDiffCurModIndicator;
+    if (indicator < 0) {   // "same" / 空串 = 只撤标记
+        m_sci->viewport()->update();
+        return;
+    }
+    m_sci->SendScintilla(QsciScintillaBase::SCI_SETINDICATORCURRENT, long(indicator));
+    m_sci->SendScintilla(QsciScintillaBase::SCI_INDICATORFILLRANGE, (unsigned long)start,
+                         (unsigned long)(end - start));
+    m_sci->viewport()->update();
+}
+
+void EditorViewItem::setDiffWordMarks(int line, const QVariantList &cols) {
+    if (!m_sci || !hasDocument() || line < 0 || line >= lineCount())
+        return;
+
+    const auto [start, end] = diffLineRange(line);
+    m_sci->SendScintilla(QsciScintillaBase::SCI_SETINDICATORCURRENT, long(kDiffWordIndicator));
+    /* 先抹这一行旧的：重算 / 换当前差异时同一行会被涂好几遍 */
+    if (end > start)
+        m_sci->SendScintilla(QsciScintillaBase::SCI_INDICATORCLEARRANGE, (unsigned long)start,
+                             (unsigned long)(end - start));
+
+    const QString text = m_sci->text(line);
+    for (int i = 0; i + 1 < cols.size(); i += 2) {
+        const int col = qMax(0, cols.at(i).toInt());
+        const int len = cols.at(i + 1).toInt();
+        if (col >= text.size() || len <= 0)
+            continue;
+        /*
+         * 字符下标 -> 字节位置走 QScintilla 自己的 positionFromLineIndex，
+         * 不在这里手搓 UTF-8 换算（中文一个字三字节，搓错一位高亮就偏到旁边的字上）。
+         */
+        long from = m_sci->positionFromLineIndex(line, col);
+        long to = m_sci->positionFromLineIndex(line, qMin(text.size(), col + len));
+        if (to <= from)
+            to = m_sci->SendScintilla(QsciScintillaBase::SCI_POSITIONAFTER, from);
+        m_sci->SendScintilla(QsciScintillaBase::SCI_INDICATORFILLRANGE, (unsigned long)from,
+                             (unsigned long)(to - from));
+    }
+    m_sci->viewport()->update();
+}
+
+int EditorViewItem::lineTopY(int line) const {
+    if (!m_sci || !hasDocument() || line < 0 || line >= lineCount())
+        return -1;
+    const long pos = m_sci->SendScintilla(QsciScintillaBase::SCI_POSITIONFROMLINE, long(line));
+    /* which = 0 要的是那一行的**上沿**（1 = 中间，2 = 下沿） */
+    return int(m_sci->SendScintilla(QsciScintillaBase::SCI_POINTYFROMPOSITION, 0L, pos));
+}
+
+int EditorViewItem::lineAtPoint(int x, int y) const {
+    if (!m_sci || !hasDocument())
+        return -1;
+    /*
+     * 这一版 Scintilla 没有"按 y 找行"那条消息（老版的 SCI_LINEFROMPOINT 已经没了），
+     * 所以走 位置 -> 行 那一条：先按点取位置，再取它所在行。
+     * 严格版取不到就退到"最近的那个字符"—— 两行之间那条缝也要给个答案，
+     * 不然用户点导航条落在缝里会拿到 -1，界面就"点了没反应"。
+     */
+    long pos = m_sci->SendScintilla(QsciScintillaBase::SCI_POSITIONFROMPOINT,
+                                    (unsigned long)x, long(y));
+    if (pos < 0)
+        pos = m_sci->SendScintilla(QsciScintillaBase::SCI_POSITIONFROMPOINTCLOSE,
+                                   (unsigned long)x, long(y));
+    if (pos < 0)
+        return -1;
+    return int(m_sci->SendScintilla(QsciScintillaBase::SCI_LINEFROMPOSITION,
+                                    (unsigned long)pos));
+}
+
+/* 自检用：那一行的 x 处现在是什么颜色（x < 0 = 从右边数过去多少像素） */
+int EditorViewItem::diffPixelAt(int line, int x) const {
+    if (!m_sci || !m_sciWidget || !hasDocument() || line < 0 || line >= lineCount())
+        return 0;
+    const QImage img = m_sciWidget->grab().toImage();
+    if (img.isNull())
+        return 0;
+    const qreal scale = m_sciWidget->width() > 0
+                            ? qreal(img.width()) / qreal(m_sciWidget->width()) : 1.0;
+    const int wx = x < 0 ? m_sciWidget->width() + x : x;
+    const int h = m_sci->textHeight(line);
+    const int px = int(wx * scale);
+    const int py = int((lineTopY(line) + h / 2) * scale);
+    if (px < 0 || py < 0 || px >= img.width() || py >= img.height())
+        return 0;
+    return int(img.pixelColor(px, py).rgba());
+}
+
+QVariantMap EditorViewItem::diffRowStats(int line, const QString &bandHex) const {
+    QVariantMap out;
+    out.insert(QStringLiteral("band"), 0);
+    out.insert(QStringLiteral("paper"), 0);
+    out.insert(QStringLiteral("glyph"), 0);
+    if (!m_sci || !m_sciWidget || !hasDocument() || line < 0 || line >= lineCount())
+        return out;
+
+    const QImage img = m_sciWidget->grab().toImage();
+    if (img.isNull())
+        return out;
+    const qreal scale = m_sciWidget->width() > 0
+                            ? qreal(img.width()) / qreal(m_sciWidget->width()) : 1.0;
+    const int h = m_sci->textHeight(line);
+    const int y = int((lineTopY(line) + h / 2) * scale);
+
+    /* 只扫正文那一段：左边避开三条边距（行号 / 折叠 / 分隔线），右边避开滚动条 */
+    long marginWidth = 0;
+    for (long m = 0; m <= 2; ++m)
+        marginWidth += m_sci->SendScintilla(QsciScintillaBase::SCI_GETMARGINWIDTHN, m);
+    const int xFrom = int((marginWidth + m_paddingLeft + 2) * scale);
+    const int xTo = img.width() - int(8 * scale);
+    out.insert(QStringLiteral("xFrom"), xFrom);
+    out.insert(QStringLiteral("xTo"), xTo);
+    out.insert(QStringLiteral("y"), y);
+    if (y < 0 || y >= img.height() || xTo <= xFrom)
+        return out;
+
+    const QColor band(bandHex);
+    const QColor paper = m_paperColor;
+    const auto near = [](const QColor &a, const QColor &b) {
+        return qAbs(a.red() - b.red()) <= 4 && qAbs(a.green() - b.green()) <= 4
+               && qAbs(a.blue() - b.blue()) <= 4;
+    };
+    int nBand = 0;
+    int nPaper = 0;
+    int nGlyph = 0;
+    for (int x = xFrom; x < xTo; ++x) {
+        const QColor c = img.pixelColor(x, y);
+        if (near(c, band))
+            ++nBand;
+        else if (near(c, paper))
+            ++nPaper;
+        else
+            ++nGlyph;
+    }
+    out.insert(QStringLiteral("band"), nBand);
+    out.insert(QStringLiteral("paper"), nPaper);
+    out.insert(QStringLiteral("glyph"), nGlyph);
+    return out;
+}
+
+void EditorViewItem::replaceLines(int startLine, int count, const QVariantList &lines) {
+    if (!m_sci || !hasDocument() || startLine < 0 || startLine > lineCount())
+        return;
+
+    const int total = lineCount();
+    const long docLen = m_sci->SendScintilla(QsciScintillaBase::SCI_GETLENGTH);
+    const long start = m_sci->SendScintilla(QsciScintillaBase::SCI_POSITIONFROMLINE,
+                                            long(startLine));
+    /* 到下一行的行首为止（含本行换行符）；换到最后一段就取到文档末尾 */
+    const long stop = startLine + count < total
+        ? m_sci->SendScintilla(QsciScintillaBase::SCI_POSITIONFROMLINE, long(startLine + count))
+        : docLen;
+    if (stop < start)
+        return;
+
+    QString text;
+    for (const QVariant &v : lines)
+        text += v.toString() + QLatin1Char('\n');
+
+    /*
+     * 换到文件最后一行时把多出来的那个换行掐掉：原文件末尾没有换行，
+     * 补一个进去就凭空多出一行空行（行号从 1..N 变成 1..N+1，用户回头一看就懵）。
+     */
+    if (count > 0 && stop == docLen && !text.isEmpty() && docLen > 0
+        && int(m_sci->SendScintilla(QsciScintillaBase::SCI_GETCHARAT,
+                                    (unsigned long)(docLen - 1))) != '\n')
+        text.chop(1);
+
+    m_sci->SendScintilla(QsciScintillaBase::SCI_SETSEL, (unsigned long)start, long(stop));
+    /* 整段包成一步撤销：一次 Ctrl+Z 就该把这一处合并整个收回 */
+    m_sci->SendScintilla(QsciScintillaBase::SCI_BEGINUNDOACTION);
+    m_sci->replaceSelectedText(text);
+    m_sci->SendScintilla(QsciScintillaBase::SCI_ENDUNDOACTION);
+}
+
+int EditorViewItem::firstVisibleLine() const {
+    if (!m_sci || !hasDocument())
+        return 0;
+    return int(m_sci->SendScintilla(QsciScintillaBase::SCI_GETFIRSTVISIBLELINE));
+}
+
+void EditorViewItem::setFirstVisibleLine(int line) {
+    if (!m_sci || !hasDocument())
+        return;
+    /*
+     * 已经是这个值就直接返回 —— 两栏互相跟随时这就是刹车：
+     * 左栏动 → 喊一声 → 设右栏 → 右栏又喊一声回来 → 要设的值和现在一样，
+     * 到这里就停。QML 那侧另外还有一个 echoing 标志挡同帧的来回弹。
+     */
+    if (int(m_sci->SendScintilla(QsciScintillaBase::SCI_GETFIRSTVISIBLELINE)) == line)
+        return;
+    m_sci->SendScintilla(QsciScintillaBase::SCI_SETFIRSTVISIBLELINE, long(qMax(0, line)));
+    /*
+     * 程序设的这条路也要喊一嗓子：ScintillaQt 往滚动条里写值是关着信号写的，
+     * 不补这一下，"跳到某一处差异"就只有动的这一栏会动，另一栏留在原地。
+     *
+     * 回声不会打转：另一栏收到之后设的是同一个值，进来第一句就 return 了。
+     */
+    emit viewScrolled();
+}
+
+int EditorViewItem::viewXOffset() const {
+    if (!m_sci || !hasDocument())
+        return 0;
+    return int(m_sci->SendScintilla(QsciScintillaBase::SCI_GETXOFFSET));
+}
+
+void EditorViewItem::setViewXOffset(int x) {
+    if (!m_sci || !hasDocument())
+        return;
+    if (int(m_sci->SendScintilla(QsciScintillaBase::SCI_GETXOFFSET)) == x)
+        return;
+    m_sci->SendScintilla(QsciScintillaBase::SCI_SETXOFFSET, long(qMax(0, x)));
 }
 
 /* 自检用：波浪线的字节区间（见头文件里的说明） */

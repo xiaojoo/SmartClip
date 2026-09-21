@@ -1638,8 +1638,25 @@ Rectangle {
     }
 
     /* ------------------------------------------------------------------
-     * 文件对比（见 src/Diff.h）
+     * 文件对比（见 src/Diff.h + qml/components/DiffPane.qml）
+     *
+     * 一个会话 = 标签栏上多出来的一格 + 正文区那一份 DiffPane。
+     * 两边记的都是**文档号**（池子里的稳定身份证，见 EditorViewItem.h 那段），
+     * 不是标签下标：对比页里改字就是改那份文档，切回普通标签看到的也是它。
+     *
+     * 同一时刻只把一份会话显示出来（diffIndex 指着它），其余的留在列表里，
+     * 点标签再换上去 —— DiffPane 只有一份，换的是它绑的那两个文档。
      * ---------------------------------------------------------------- */
+
+    property var diffSessions: []
+    property bool diffMode: false
+    property int diffIndex: -1
+
+    readonly property var diffTabTitles: diffSessions.map(function (s) { return s.title })
+
+    function diffSessionOf(index) {
+        return (index >= 0 && index < diffSessions.length) ? diffSessions[index] : null
+    }
 
     function compareCurrentWithFile() {
         var v = activeView()
@@ -1647,12 +1664,10 @@ Rectangle {
     }
 
     /*
-     * 拿第 index 个标签去和用户挑的另一个文件比。
+     * 拿第 index 个标签去和另一个文件比。
      *
-     * 这一份用**编辑器里的正文**（可能有未保存的改动，用户想看的正是"我现在
-     * 这份和那个文件差在哪"）；另一份从磁盘读（它没开在编辑器里，看不到内存）。
-     *
-     * pane 不给就是当前那一栏（分栏时两栏各有各的标签下标）。
+     * 左边用**编辑器里那份文档**（可能有没存盘的改动，用户想看的正是这个）；
+     * 右边是选中的那个文件 —— 文件框里按取消就退化成一份空白文档。
      */
     function compareTabWithFile(index, pane) {
         var v = pane ? pane : activeView()
@@ -1665,26 +1680,171 @@ Rectangle {
             return
         }
         var other = Cmd.chooseFileDialog(
-            "选择要比对的文件",
+            "选择要比对的文件（按取消 = 右边用一份空白文件）",
             "文本文件 (*.txt *.md *.cpp *.h *.py *.js *.json);;所有文件 (*.*)")
-        if (other === "")
-            return
-        var otherText = Differ.readFile(other)
-        if (Differ.lastError !== "") {
-            notify("文件对比", Differ.lastError)
+        openDiffSession(doc.docId, doc.title, other)
+    }
+
+    /* 新开一份对比：左边用当前文件，右边给一份空白文档（BC 里的 "New comparison"） */
+    function compareWithBlank() {
+        var v = activeView()
+        var doc = v ? v.documents[v.currentIndex] : null
+        if (!doc) {
+            notify("文件对比", "先打开一份文件。")
             return
         }
-        /* 第 index 个标签的正文：先切到它读一份，再切回来 */
-        var wasIndex = v.currentIndex
-        v.activateDocument(index)
-        var thisText = v.currentText()
-        if (wasIndex !== index && wasIndex >= 0)
-            v.activateDocument(wasIndex)
+        openDiffSession(doc.docId, doc.title, "")
+    }
 
-        Differ.compare(thisText, otherText, doc.filePath, other)
-        diffCard.parentTransient = window
-        diffCard.placeInParent()
-        diffCard.show()
+    function openDiffSession(leftDocId, leftTitle, rightPath) {
+        var right = editor.diffPage.prepareRight(rightPath)
+        var s = {
+            leftDocId: leftDocId,
+            rightDocId: right.docId,
+            leftTitle: leftTitle,
+            rightTitle: right.title,
+            /* 右边是这次会话自己打开的那份文件时，关会话要把它从右栏收回去 */
+            rightOwned: true,
+            title: leftTitle + " ↔ " + right.title
+        }
+        var list = diffSessions.slice()
+        list.push(s)
+        diffSessions = list
+        showDiffSession(diffSessions.length - 1)
+    }
+
+    function showDiffSession(index) {
+        if (index < 0 || index >= diffSessions.length)
+            return
+        /* 换会话之前把上一对文档身上那层画的东西还回去 */
+        if (diffMode)
+            editor.diffPage.unbindPanes()
+        diffIndex = index
+        diffMode = true
+        /* 预览和分栏抢这块正文区，进对比页先把它们让开 */
+        if (markdownPreview)
+            markdownPreview = false
+        editor.diffPage.rebind()
+    }
+
+    function exitDiffMode() {
+        if (!diffMode)
+            return
+        editor.diffPage.unbindPanes()
+        diffMode = false
+    }
+
+    function closeDiffSession(index) {
+        if (index < 0 || index >= diffSessions.length)
+            return
+        var wasCurrent = (index === diffIndex)
+        var list = diffSessions.slice()
+        var s = list.splice(index, 1)[0]
+        diffSessions = list
+        if (diffIndex > index)
+            diffIndex -= 1
+        if (diffSessions.length === 0) {
+            exitDiffMode()
+            diffIndex = -1
+        } else if (wasCurrent) {
+            diffIndex = Math.min(index, diffSessions.length - 1)
+            editor.diffPage.rebind()
+        }
+        /* 右边那份是会话自己打开的：把标签从右栏收回去（文档本身留在池子里） */
+        if (s && s.rightOwned)
+            editor.diffPage.releaseRight()
+    }
+
+    /* 关掉所有对比会话（自检 / 关标签时用） */
+    function closeAllDiffSessions() {
+        exitDiffMode()
+        diffSessions = []
+        diffIndex = -1
+    }
+
+    /*
+     * 自检用：对比页现在是个什么状态（见 src/SelfTestTools.cpp 的"对比页"那一节）。
+     *
+     * 单独一个函数不塞进 uiState()：那边是"界面摆没摆对"的一大堆量，
+     * 这一节要的是两栏各自的行数和同一处差异的 y，凑在一起读不出重点。
+     */
+    function diffState() {
+        var page = editor.diffPage
+        return {
+            mode: diffMode,
+            index: diffIndex,
+            tabs: diffSessions.length,
+            titles: diffTabTitles,
+            rows: Differ.rows.length,
+            changes: Differ.changes.length,
+            summary: Differ.summary,
+            error: Differ.lastError,
+            leadLeft: Differ.leadGapLeft,
+            leadRight: Differ.leadGapRight,
+            left: page.paneInfo(0),
+            right: page.paneInfo(1),
+            scroll: page.scrollState()
+        }
+    }
+
+    /* 自检用：第 index 处差异在两栏各落在哪个 y（两个数相等才算对齐） */
+    function diffChangeYs(index) {
+        return editor.diffPage.changeYs(index)
+    }
+
+    /* 自检用：直接开一个会话（不弹文件框），两边都是已经开着的文档号 */
+    function diffOpenForTest(leftDocId, rightDocId, leftTitle, rightTitle) {
+        var list = diffSessions.slice()
+        list.push({
+            leftDocId: leftDocId, rightDocId: rightDocId,
+            leftTitle: leftTitle, rightTitle: rightTitle,
+            rightOwned: false,
+            title: leftTitle + " ↔ " + rightTitle
+        })
+        diffSessions = list
+        showDiffSession(diffSessions.length - 1)
+    }
+
+    /* 自检用：把左栏滚到第 line 显示行（验两栏同步） */
+    function diffScrollLeftForTest(line) {
+        editor.diffPage.pane(0).setFirstVisibleLine(line)
+    }
+
+    /* 自检用：跳到第 index 处差异，并回报"当前那一处亮不亮"的像素数 */
+    function diffGotoForTest(index) {
+        editor.diffPage.gotoChangeForTest(index)
+        return editor.diffPage.currentBandStats()
+    }
+
+    /* 自检用：把第 0 处差异从一侧搬到另一侧（dir=1 左->右，-1 右->左） */
+    function diffMergeForTest(dir) {
+        editor.diffPage.showChange(0)
+        editor.diffPage.mergeCurrent(dir)
+    }
+
+    /* 演示口子（SMARTCLIP_DIFF_DEMO=1，见 src/main.cpp）：两份现成的文件开成一页 */
+    function diffDemo(pathA, pathB) {
+        openTreeFile(pathA)
+        var idA = view.currentDocId()
+        openTreeFile(pathB)
+        var idB = view.currentDocId()
+        diffOpenForTest(idA, idB,
+                        pathA.substring(pathA.lastIndexOf("/") + 1),
+                        pathB.substring(pathB.lastIndexOf("/") + 1))
+        /*
+         * 把右边改一个脏：演示要能看见题头那个"保存"（它只在改过之后才出现）。
+         * 顺带也多一处差异，正好看看三处的时候导航条长什么样。
+         */
+        editor.diffPage.pane(1).replaceLines(4, 1, ["第 5 行：演示用，这一行被改过。"])
+        /* 摆位要等布局落定，晚一拍再打（只在演示这条路上跑） */
+        Qt.createQmlObject('import QtQuick
+            Timer { interval: 500; repeat: false; running: true
+              onTriggered: {
+                  console.log("DIFFDEMO " + JSON.stringify(window.diffState()))
+                  /* 跳到第 2 处：演示要能看见"当前这一处亮一档"长什么样 */
+                  window.diffGotoForTest(1)
+              } }',
+            window)
     }
 
     /*
@@ -2137,6 +2297,7 @@ Rectangle {
 
         /* ---- 文件对比 ---- */
         if (act === "compareWithFile") { compareCurrentWithFile(); return }
+        if (act === "compareWithBlank") { compareWithBlank(); return }
         if (act.indexOf("compareTab:") === 0) {
             var cmpView = activeView()
             compareTabWithFile(parseInt(act.substring(11)), cmpView)
@@ -2884,14 +3045,10 @@ Rectangle {
      * runCheck 那段和 EditorViewItem::setCheckIssues。
      */
 
-    /* 文件对比卡片（见 qml/components/DiffCard.qml） */
-    DiffCard {
-        id: diffCard
-        /* 自检按名字找它那块原生窗（同上） */
-        objectName: "diffCard"
-        parentTransient: window
-        onCopyPatchRequested: Cmd.copyText(Differ.unifiedDiff())
-    }
+    /*
+     * 文件对比的正文页在 editor 里面（qml/components/DiffPane.qml）；
+     * 它只负责摆两栏和画差异，会话列表在上面的"文件对比"那一节。
+     */
 
     /*
      * 文档识别要打开某份新笔记（卡片上那个"打开笔记"按钮，见 DocImport::openLast）。
@@ -3604,6 +3761,17 @@ Rectangle {
 
                 /* ---- 分栏（见 setSplit / notePaneFocus） ---- */
                 onPaneFocusRequested: (pane) => window.notePaneFocus(pane)
+
+                /* ---- 文件对比（见 qml/components/DiffPane.qml） ---- */
+                diffTabs: window.diffTabTitles
+                diffSession: window.diffSessionOf(window.diffIndex)
+                diffMode: window.diffMode
+                diffIndex: window.diffIndex
+                onDiffTabRequested: (diffIndex) => window.showDiffSession(diffIndex)
+                onDiffTabClosed: (diffIndex) => window.closeDiffSession(diffIndex)
+                /* 点回文档标签 = 退出对比页（点的是当前那份时 currentChanged 不会发） */
+                onDocTabActivated: window.exitDiffMode()
+                onDiffCopyPatchRequested: Cmd.copyText(Differ.unifiedDiff())
             }
         }
 
