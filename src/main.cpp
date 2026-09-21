@@ -97,6 +97,12 @@ int main(int argc, char *argv[]) {
     QApplication app(argc, argv);
     app.setOrganizationName("SmartClip");
     app.setApplicationName("SmartClip");
+    /*
+     * 窗口 / 任务栏图标用 app.ico 而不是 SVG：ico 里 16..256 七个条目都是按该尺寸
+     * 真实光栅化烘进去的，走 QIcon 就不依赖 svg 图标引擎插件。QIcon 会按当前 DPR
+     * 自己挑最接近的条目（形的来历见 CMakeLists.txt 里「应用图标」那段）。
+     */
+    app.setWindowIcon(QIcon(QStringLiteral(":/brand/app.ico")));
     QQuickStyle::setStyle("Fusion");
 
     /*

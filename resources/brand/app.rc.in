@@ -1,0 +1,3 @@
+// 由 CMake 的 configure_file 生成（见 CMakeLists.txt 里「应用图标」那段）。
+// rc.exe 不认相对 .rc 自身的路径，所以 @SMARTCLIP_APP_ICO@ 会被填成绝对路径。
+IDI_ICON1 ICON "@SMARTCLIP_APP_ICO@"

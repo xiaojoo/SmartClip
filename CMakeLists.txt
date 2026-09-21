@@ -224,6 +224,50 @@ qt_add_resources(SmartClip "app_icons"
 )
 
 # ---------------------------------------------------------------------------
+# 应用图标（resources/brand/）
+#
+# 形是"折带 S"：块状 S 中心线 + 45° 斜接分面，每个折面一档蓝。
+# 色阶是从强调色 #4c96d8 拉出来的四档，且**同时**扛得住深底和浅底：
+#     #25547a  #3a7cb0  #4c96d8  #8fc7ef
+# 对瓦片 #313335 依次 1.59 / 2.83 / 4.02 / 7.00:1，对浅底 #f2f3f5 依次
+# 7.20 / 4.03 / 2.84 / 1.63:1 —— 再深一档（#1e4a6b，1.36:1）在深底上会没，
+# 再亮一档（#a9d6f5，1.39:1）在浅底上会没，所以两头都出不了这个窗口。
+#
+# 只有一档图形（16..256 通吃），不再像早先那样分"全档 / 紧凑档"两张：
+# 分档是因为那张三卡图的卡间错位只有 8/128（16px 时 1px），必然并团。
+# 这里改成单档的前提是把 S 的"口"留到 16/128 —— 实测 16px 上还剩 1px 缝
+# （设计值 2px，抗锯齿吃掉一半），够读出四段横竖。口一旦关掉（比如把带宽
+# 加回 26），16px 就是一个实心块，所以 SelfTest.cpp 里那条断言量的就是这个
+# 缝还剩几格，不是量"图标有没有加载"。
+#
+# app.ico 里 16/24/32/48/64/128/256 七个条目都是**按该尺寸真实矢量光栅化**
+# 的（不是高清图缩放下来的），重烘脚本见仓库外的 build/logo-proposals/mkico.py。
+# ---------------------------------------------------------------------------
+qt_add_resources(SmartClip "app_brand"
+    PREFIX "/brand"
+    BASE "resources/brand"
+    FILES
+        resources/brand/smartclip.svg
+        resources/brand/smartclip-bare.svg
+        resources/brand/app.ico
+)
+
+if (WIN32)
+    # exe 本身的图标（资源管理器 / 固定到任务栏 / 属性页那一栏）。
+    # 窗口和托盘的图标是另一回事，走上面 qrc 里那份（见 main.cpp、TrayIcon.cpp）。
+    set(SMARTCLIP_APP_ICO "${CMAKE_CURRENT_SOURCE_DIR}/resources/brand/app.ico")
+    configure_file(resources/brand/app.rc.in
+                   "${CMAKE_CURRENT_BINARY_DIR}/smartclip_app.rc" @ONLY)
+    # 必须显式挂这条依赖：rc.exe 只盯着 .rc 的**文本**，而 .rc 的内容跟 app.ico
+    # 的字节无关（里面就一行绝对路径）。实测只换 app.ico 不碰 .rc 时，
+    # smartclip_app.rc.res 根本不重编，exe 里带的还是上一版图标 —— 换图标没生效
+    # 但构建全绿，只有把 exe 里的图标抠出来逐像素比才发现（见 build 目录的验法）。
+    set_source_files_properties("${CMAKE_CURRENT_BINARY_DIR}/smartclip_app.rc"
+                                PROPERTIES OBJECT_DEPENDS "${SMARTCLIP_APP_ICO}")
+    target_sources(SmartClip PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/smartclip_app.rc")
+endif()
+
+# ---------------------------------------------------------------------------
 # 图上选字那条路要调的小脚本（PP-OCR 那条）。
 #
 # 只放**模板**在 qrc 里，第一次用到时由 PinOcr::runnerScriptPath() 落到

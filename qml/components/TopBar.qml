@@ -159,13 +159,18 @@ Rectangle {
             spacing: 8
 
             // ---- 左：应用图标 / 标题 ----
-            Rectangle { id: appBadge
-                Layout.preferredWidth: 20; Layout.preferredHeight: 20; radius: 4
-                gradient: Gradient {
-                    GradientStop { position: 0.0; color: "#f7971e" }
-                    GradientStop { position: 1.0; color: "#ff6b6b" }
-                }
-                Text { anchors.centerIn: parent; text: "S"; color: "#ffffff"; font.pixelSize: 12; font.bold: true }
+            /*
+             * 原来这里是一块橙色渐变圆角方块 + 白色 "S"（应用还没有图标时的占位）。
+             * 换成随包的折带 S 裸图版：顶栏底色本来就是 #313335，再套一层深色瓦片
+             * 等于白画一笔，所以用不带底的那一份。
+             * sourceSize 取 2x 和 AppIcon 一个规矩（顶栏这一格 20 逻辑 px）。
+             */
+            Image { id: appBadge
+                Layout.preferredWidth: 20; Layout.preferredHeight: 20
+                source: "qrc:/brand/smartclip-bare.svg"
+                sourceSize.width: 40; sourceSize.height: 40
+                fillMode: Image.PreserveAspectFit
+                antialiasing: true
             }
 
             Label { text: "SmartClip"; color: root.textBright; font.pixelSize: 12; font.bold: true }

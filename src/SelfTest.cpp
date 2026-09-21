@@ -27,6 +27,7 @@
 #include <QClipboard>
 #include <QAction>
 #include <QIcon>
+#include <QPixmap>
 #include <QColor>
 #include <QMenu>
 #include <QDate>
@@ -3448,6 +3449,82 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
          * 打开它等于把这些绑定真算一遍 —— QML 侧的绑定错误只有算过才暴露
          * （"Sequence length out of range" 就是这么抓出来的）。
          */
+        /*
+         * 临时探针（答"首次打开设置面板为什么会卡一下"，以及哪种预热真的管用）。
+         *
+         * 基线已经量过了：首次 = 场景图初始化 311~407ms，第二三次 6~30ms。
+         * 这里比两条主流预热路子，各自预热完立刻量"用户那一下真打开"还要多久：
+         *   A) 不露面：QQuickWindow::grabWindow() —— 把场景图逼起来一次，屏幕上什么都不出
+         *   B) 露面但看不见：摆到屏幕外 visible=true，等一帧，再 visible=false
+         */
+        {
+            QObject *p = qmlRoot->findChild<QObject *>("settingsPanel");
+            auto *pw = qobject_cast<QQuickWindow *>(p);
+
+            auto measureOpen = [&](const char *tag) {
+                QElapsedTimer c;
+                c.start();
+                qint64 syncMs = -1;
+                qint64 frameMs = -1;
+                qint64 graphMs = -1;
+                QObject probe;
+                if (pw) {
+                    QObject::connect(pw, &QQuickWindow::frameSwapped, &probe,
+                                     [&] { if (frameMs < 0) frameMs = c.elapsed(); });
+                    QObject::connect(pw, &QQuickWindow::sceneGraphInitialized, &probe,
+                                     [&] { if (graphMs < 0) graphMs = c.elapsed(); });
+                }
+                dispatch(QStringLiteral("storage"));
+                syncMs = c.elapsed();
+                for (int i = 0; i < 100 && frameMs < 0; ++i) {
+                    QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
+                    QThread::msleep(5);
+                }
+                out() << QStringLiteral("        [卡顿探针] %1  同步%2ms 建图%3ms 第一帧%4ms")
+                             .arg(QString::fromUtf8(tag)).arg(syncMs).arg(graphMs).arg(frameMs)
+                      << Qt::endl;
+                QMetaObject::invokeMethod(qmlRoot, "closeSettings");
+                for (int i = 0; i < 20; ++i) {
+                    QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
+                    QThread::msleep(5);
+                }
+            };
+
+            if (pw) {
+                QElapsedTimer g;
+                g.start();
+                const QImage img = pw->grabWindow();
+                out() << QStringLiteral("        [预热A grabWindow] 花 %1ms，抓到 %2x%3，"
+                                        "窗口此刻可见=%4")
+                             .arg(g.elapsed()).arg(img.width()).arg(img.height())
+                             .arg(pw->isVisible())
+                      << Qt::endl;
+            }
+            measureOpen("A 之后，用户那一下真打开");
+
+            if (pw) {
+                QElapsedTimer g;
+                g.start();
+                pw->setX(-4000);
+                pw->setY(-4000);
+                pw->setVisible(true);
+                qint64 frameMs = -1;
+                QObject probe;
+                QObject::connect(pw, &QQuickWindow::frameSwapped, &probe,
+                                 [&] { if (frameMs < 0) frameMs = g.elapsed(); });
+                for (int i = 0; i < 100 && frameMs < 0; ++i) {
+                    QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
+                    QThread::msleep(5);
+                }
+                pw->setVisible(false);
+                out() << QStringLiteral("        [预热B 离屏露面] 花 %1ms（第一帧 %2ms）")
+                             .arg(g.elapsed()).arg(frameMs)
+                      << Qt::endl;
+            }
+            measureOpen("B 之后，用户那一下真打开");
+            measureOpen("再来一次（对照）");
+        }
+
         dispatch(QStringLiteral("storage"));
         settle();
         {
@@ -6465,11 +6542,37 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
 
         /*
          * 图标资源。原来用的是 QIcon::fromTheme("edit-paste")，Windows 上没有
-         * 图标主题、返回空图标，托盘上是一块空白；现在指向随包的 SVG，
-         * 这条把资源路径钉住（前缀被改过就会红）。
+         * 图标主题、返回空图标，托盘上是一块空白；现在指向随包的折带 S
+         * （见 TrayIcon.cpp），这条把资源路径钉住（前缀被改过就会红）。
+         *
+         * 但"能加载、不是空白"这条尺子分不出好坏 —— 图标带整块瓦片底，
+         * 实心占比永远 95% 上下，图形糊成一团照样绿。所以这里量的是**真正的
+         * 判据**：S 的两个"口"在 16px 上还剩几格底色。带宽加回 26（口只有
+         * 8/128）时实测是 0 格，交付这版是 10 格，所以门槛压在 6。
          */
-        check(!QIcon(QStringLiteral(":/icons/image.svg")).isNull(),
-              QStringLiteral("托盘：图标资源 :/icons/image.svg 能加载（不是空白图标）"));
+        {
+            const QIcon trayIcon(QStringLiteral(":/brand/smartclip.svg"));
+            const QPixmap pm = trayIcon.pixmap(16, 16);
+            int seam = 0, ink = 0;
+            if (!pm.isNull()) {
+                const QImage img = pm.toImage().convertToFormat(QImage::Format_ARGB32);
+                for (int y = 2; y <= 13; ++y) {
+                    const QRgb *line = reinterpret_cast<const QRgb *>(img.constScanLine(y));
+                    for (int x = 4; x <= 11; ++x) {
+                        const QRgb c = line[x];
+                        if (qAlpha(c) <= 200)
+                            continue;
+                        ++ink;
+                        if (qAbs(qRed(c) - 0x31) <= 16 && qAbs(qGreen(c) - 0x33) <= 16
+                            && qAbs(qBlue(c) - 0x35) <= 16)
+                            ++seam;   // 瓦片底色 = 口还没关死
+                    }
+                }
+            }
+            check(!trayIcon.isNull() && seam >= 6,
+                  QStringLiteral("托盘：图标 :/brand/smartclip.svg 的 S「口」在 16px 上没关死"
+                                 "（底色缝 %1 格，交付实测 10；染色 %2 格）").arg(seam).arg(ink));
+        }
 
         /*
          * 白底。全局调色板是深色的，QMenu 默认跟着走 —— 但用户要白底，

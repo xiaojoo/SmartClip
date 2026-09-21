@@ -20,8 +20,12 @@ TrayIcon::TrayIcon(QWidget *host, Screenshot *shot, EditorController *cmd, Stick
      * 图标用随包的 SVG，不走 QIcon::fromTheme()：Windows 上没有图标主题，
      * fromTheme() 返回的是空图标，托盘上就是一块空白（原来就是这样）。
      * 万一资源没进来（前缀被改过之类），退回主题图标，至少有东西显示。
+     *
+     * 用主图标 smartclip.svg（折带 S）：托盘那一格在 100% 缩放下就是 16px，
+     * 而这个形把 S 的"口"留到了 16/128，16px 上还剩下约 1px 缝、读得出四段横竖，
+     * 所以不再需要单独的紧凑档（分档的理由见 CMakeLists.txt 里「应用图标」那段）。
      */
-    QIcon icon(QStringLiteral(":/icons/image.svg"));
+    QIcon icon(QStringLiteral(":/brand/smartclip.svg"));
     if (icon.isNull())
         icon = QIcon::fromTheme(QStringLiteral("edit-paste"));
 
