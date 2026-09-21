@@ -84,6 +84,43 @@ Popup {
 
     signal selected(string act)
 
+    /*
+     * 命令离开这块菜单的那一刻，菜单自己还可见吗（自检读，见 src/SelfTest.cpp
+     * "命令开始跑之前菜单已经收掉了"）。
+     *
+     * 为什么记在菜单这一侧而不是 Main.qml：要判的就是"收菜单"和"发命令"谁在前，
+     * 那两件事都发生在这里；绕到外面再回头看，量的就不是同一个时间点了。
+     */
+    property bool visibleWhenCommand: false
+
+    /* 把命令交出去（唯一出口，见下面 delegate 的 onClicked） */
+    function runCommand(act) {
+        root.visibleWhenCommand = root.visible
+        root.selected(act)
+    }
+
+    /*
+     * 收菜单和发命令之间隔一拍。
+     *
+     * 用户报的"打开… / 保存 / 打开文件夹 这些要弹系统对话框的，菜单要等对话框
+     * 出来才慢慢收"：onClicked 里 `close()` 紧跟 `selected(act)` 两句挨着写，
+     * 顺序看着对，其实 close() 只是**开始**上面那段 32ms 的淡出 —— 那一帧一帧
+     * 要事件循环来推。而 QFileDialog 是同步的，一进函数就把 GUI 线程占住
+     * （建 shell 对话框那一两百 ms 里 Qt 一帧都轮不到），淡出就整个卡在那儿：
+     * 屏幕上对话框已经出来了，菜单还挂着，等对话框关掉它才收。
+     * （自检量到的原话：命令开始时菜单还可见=1。）
+     *
+     * 所以把命令挪到**下一个事件循环回合**：40ms = 淡出 8 + 按住 24（那段是为了
+     * 不让 DWM 重放旧画面，见上面 exit 的说明）+ 一帧余量。点下去到对话框出现
+     * 多等 40ms，换来的是"菜单先没了，对话框再来"。
+     */
+    Timer {
+        id: commandTimer
+        interval: 40
+        property string act: ""
+        onTriggered: root.runCommand(act)
+    }
+
     readonly property color bgColor:     "#3c3f41"
     readonly property color borderColor: "#4b4d4f"
     readonly property color textColor:   "#bbbbbb"
@@ -942,7 +979,8 @@ Popup {
                      * 上面（用户截图报的就是这个）。
                      */
                     root.close()
-                    root.selected(entry.modelData.act)
+                    commandTimer.act = entry.modelData.act
+                    commandTimer.start()
                 }
             }
         }

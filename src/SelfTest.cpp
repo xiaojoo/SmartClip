@@ -3580,6 +3580,59 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
         }
 
         /*
+         * 点了条目之后，"收菜单"要**排在**"发命令"前面 —— 用户报的是
+         * "打开… / 保存 / 打开文件夹 这些要弹系统对话框的，菜单要等对话框出来才慢慢收"。
+         *
+         * 为什么挨着写两句会不成立：`root.close()` 只是**开始**一段 32ms 的淡出过渡，
+         * 那一帧一帧要事件循环来推；而下一句 `selected(act)` 里那些 QFileDialog 是
+         * 同步的，一进函数就把 GUI 线程占住（建 shell 对话框那一两百 ms 里 Qt 根本
+         * 轮不到），于是过渡一帧都没走 —— 屏幕上就是对话框已经出来了、菜单还挂着。
+         *
+         * 判据取的是**顺序**而不是时长：命令开始跑的那一刻，菜单还可见吗。
+         * 可见 = 后面无论堵多久都白堵；不可见 = 该收的已经收干净了。
+         *
+         * 点的是「设置 → 存储与保存位置…」那一条（act=storage）：走的是**同一份
+         * 委托、同一句 onClicked**（这一段代码不分菜单），但它的命令不会去建原生
+         * 对话框 —— 不然自检就挂在那儿了。
+         */
+        {
+            QMetaObject::invokeMethod(qmlRoot, "clickMenuTab",
+                                      Q_ARG(QVariant, QVariant(QStringLiteral("设置"))));
+            settle();
+            check(uiState().value(QStringLiteral("menuOpened")).toBool(),
+                  QStringLiteral("量的这一条：菜单开出来了"));
+            QObject *menu = qmlRoot->findChild<QObject *>("dropdownMenu");
+            QQuickItem *item = nullptr;
+            if (menu) {
+                /*
+                 * 返回值先接成 QVariant 再转：QML 那个函数没有写返回类型（`var`），
+                 * 直接 Q_RETURN_ARG(QQuickItem *) 实测转不过来、拿到空指针 ——
+                 * 空指针在这儿和"菜单里没有这一条"长得一模一样，会误判。
+                 */
+                QVariant found;
+                QMetaObject::invokeMethod(menu, "entryItemFor", Q_RETURN_ARG(QVariant, found),
+                                          Q_ARG(QVariant, QVariant(QStringLiteral("storage"))));
+                item = found.value<QQuickItem *>();
+            }
+            check(item != nullptr, QStringLiteral("量的这一条：找得到那条菜单项的委托"));
+            if (item) {
+                clickScene(item->window(),
+                           item->mapToScene(QPointF(item->width() / 2.0,
+                                                    item->height() / 2.0)).toPoint());
+                settle();
+                const bool sawVisible = menu->property("visibleWhenCommand").toBool();
+                check(!sawVisible,
+                      QStringLiteral("菜单：命令开始跑之前菜单已经收掉了（不是等对话框）"),
+                      QStringLiteral("命令开始时菜单还可见=%1").arg(sawVisible));
+                /* 顺带确认这一发真把命令送到了（不然上面那条是空转的绿） */
+                check(uiState().value(QStringLiteral("settingsOpened")).toBool(),
+                      QStringLiteral("菜单：这一条确实把命令发出去了（设置面板开了）"));
+            }
+            QMetaObject::invokeMethod(qmlRoot, "closeSettings");
+            settle();
+        }
+
+        /*
          * 设置面板这块窗口本身的两条要求。
          *
          *  1) 点面板外面的空白处不许自己收起来 —— 面板里那几个按钮弹的是
