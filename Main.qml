@@ -742,10 +742,10 @@ Rectangle {
         var wasOpen = settingsPanel.opened
         var section = settingsPanel.section
         if (wasOpen)
-            settingsPanel.close()
+            settingsPanel.hide()
         var result = fn()
         if (wasOpen)
-            settingsPanel.show(section)
+            settingsPanel.openSection(section)
         return result
     }
 
@@ -1932,12 +1932,12 @@ Rectangle {
     }
 
     function showShortcuts() {
-        settingsPanel.show("shortcuts")
+        settingsPanel.openSection("shortcuts")
     }
 
     /* 设置面板的"存储"那一栏（保存位置 / 导入的文件夹，见 SettingsPanel.qml） */
     function showStorage() {
-        settingsPanel.show("storage")
+        settingsPanel.openSection("storage")
     }
 
     /*
@@ -1976,11 +1976,11 @@ Rectangle {
 
     /* 自检收尾用：关掉设置面板，别让它挂到进程退出那一刻再拆 */
     function closeSettings() {
-        settingsPanel.close()
+        settingsPanel.hide()
     }
 
     function showAbout() {
-        settingsPanel.show("about")
+        settingsPanel.openSection("about")
     }
 
     /* ------------------------------------------------------------------
@@ -2018,7 +2018,7 @@ Rectangle {
             Cmd.alert("识别程序还没配好",
                       problem + "\n\n设置 → 识别 里可以换一条命令；\n"
                       + "默认那条要装：pip install rapid-doc")
-            settingsPanel.show("document")
+            settingsPanel.openSection("document")
             return
         }
 
@@ -2373,14 +2373,22 @@ Rectangle {
         /* 设置面板的"存储"栏：保存位置 / 导入的文件夹 */
         if (act === "storage") { showStorage(); return }
         /* 设置面板的"翻译"栏：模型怎么配（翻译卡片上的提示会指到这儿） */
-        if (act === "settingsTranslate") { settingsPanel.show("translate"); return }
+        if (act === "settingsTranslate") { settingsPanel.openSection("translate"); return }
         /* 设置 → 模型里那两个「选择…」（面板先让开，再开系统文件框） */
         if (act === "translateChooseExe") { chooseTranslateLocalFile("exe"); return }
         if (act === "translateChooseModel") { chooseTranslateLocalFile("model"); return }
         if (act === "translateChooseMmproj") { chooseTranslateLocalFile("mmproj"); return }
         if (act === "about") { showAbout(); return }
         /* 设置面板的"识别"栏：文档识别用哪条命令 */
-        if (act === "settingsDocument") { settingsPanel.show("document"); return }
+        if (act === "settingsDocument") { settingsPanel.openSection("document"); return }
+        /*
+         * 设置 → 识别 里那个「选择…」（挑 venv 里的 python.exe）。
+         *
+         * 这条以前没有：面板那个按钮写的是 Cmd.chooseDocPython()，而
+         * EditorController 上没这个函数 —— 点一次抛一次 TypeError，按钮是死的。
+         * 函数一直在窗口根上躺着（见上面 chooseDocPython），只是没人接。
+         */
+        if (act === "docChoosePython") { chooseDocPython(); return }
         /*
          * 识别文档（文件菜单那一条）。文件框由 Main.qml 开、不由设置面板开 ——
          * 面板是置顶原生窗口，会把系统文件框整个盖住（见 withSettingsPanelAway）。
@@ -3082,7 +3090,7 @@ Rectangle {
         id: settingsPanel
         /* 自检按名字找它那块原生窗（同上） */
         objectName: "settingsPanel"
-        parent: window
+        /* 它现在是一块顶层 Window，不能再当子项挂 parent；居中用的宿主矩形现读 Win.hostScreenGeometry() */
         view: window.view
         entries: window.shortcutItems
         onCommandRequested: (act) => window.dispatch(act)

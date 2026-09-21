@@ -9,14 +9,25 @@ import SmartClip.Globals 1.0
  * 设置 / 帮助面板（左侧操作步骤，右侧具体内容）。
  *
  * ===========================================================================
- * 为什么又是 popupType: Popup.Window
+ * 为什么它是一块自己的原生窗口，而不是场景里的浮层
  * ===========================================================================
  * 和 DropdownMenu 同一个原因：编辑区是**原生 QScintilla 子窗口**
  * （QWidget::createWindowContainer，见 src/EditorViewItem.h），
  * 原生子窗口永远画在 QQuickWidget 内容之上，场景内的浮层压不住它。
- * 所以这个面板必须自己是一个同级原生窗口。
  *
- * 面板跟着宿主窗口移动/缩放：openFor() 里按宿主几何摆位置，
+ * 但它以前是 `Popup { popupType: Popup.Window }`，那个壳有个副作用：Qt 给
+ * Popup.Window 建的是 **Qt::Popup** 窗（实测 flags 0x40000809），Windows 上
+ * 这种窗一点到外面 —— 包括点到桌面、点别的应用 —— 系统就把它关掉，
+ * 用户那边就是"设置面板碰一下就没了"。而 closePolicy 去掉 CloseOnPressOutside
+ * 改不了窗口类型，建好之后再 setFlags 更糟（销毁重建 HWND，实测会把面板压到
+ * 最大化主窗口后面去，那轮已撤）。
+ *
+ * 现在它是一块**从一开始就是** Qt::Tool 的顶层 Window：不进任务栏、不置顶
+ * （系统文件对话框照样盖得住它）、点外面不会再关掉它。transientParent 由
+ * WindowHelper::attachAsToolWindow 接（宿主是 QWidget，QML 拿不到那块 HWND），
+ * 所以它照样浮在主窗口上面。
+ *
+ * 面板跟着宿主窗口移动/缩放：openSection() 里按宿主几何摆位置，
  * 之后每次打开都重新摆一次（用户拖走的位置不持久化 —— 下次还是居中）。
  *
  * ===========================================================================
@@ -32,7 +43,7 @@ import SmartClip.Globals 1.0
  * 所以能放心把 Ctrl+N 这类组合原样抓下来。
  */
 
-Popup {
+Window {
     id: root
 
     /* 外边（Main.qml）传进来的"可改键清单"，每项见 EditorController.h */
@@ -137,10 +148,6 @@ Popup {
         function onRunFinished(count) { root.reloadSummarize() }
     }
 
-    /* 顶部标题栏文案（"=" 栏目名），以及它在拖拽时的偏移 */
-    property real dragDeltaX: 0
-    property real dragDeltaY: 0
-
     readonly property color bgColor:      "#2b2d30"
     readonly property color sidebarColor: "#26282b"
     readonly property color headerColor:  "#33363a"
@@ -201,12 +208,29 @@ Popup {
         refreshFormatTools()
         /*
          * 汇总区间先给"今天"：不然第一次点「开始汇总」传的是空串，
-         * 只能回一句"区间不对"。（清单不在这里取 —— show() 打开面板时取。）
+         * 只能回一句"区间不对"。（清单不在这里取 —— openSection() 打开时取。）
          */
         if (root.sumFrom === "" || root.sumTo === "") {
             root.sumFrom = root.dayText(0)
             root.sumTo = root.dayText(0)
         }
+    }
+
+    /*
+     * Esc 关面板。
+     *
+     * Popup 时代这条是 closePolicy: CloseOnEscape 白送的，换成顶层 Window 就得
+     * 自己给 —— 放在面板这一侧（不是 Main.qml）是因为它现在是独立的一块活动窗，
+     * 按键先到它这儿。
+     *
+     * 用 sequences 而不是 sequence：Qt 6 里 Shortcut 的 sequence 是"多绑定"的
+     * 那个属性（QML 会警告 "Only binding to one of multiple key bindings"，
+     * 而且官方说以后会去掉），sequences 才是现在那一条。
+     */
+    Shortcut {
+        sequences: ["Escape"]
+        enabled: root.visible
+        onActivated: root.hide()
     }
 
     Connections {
@@ -358,28 +382,64 @@ Popup {
         return key
     }
 
-    /* 打开面板并定位到某一栏 */
-    function show(sectionKey) {
+    /*
+     * 打开面板并定位到某一栏。
+     *
+     * 名字从 show() 改成 openSection()：顶层 Window 自己就有一个不带参数的
+     * show()，同名函数会跟它打架（到底调的是哪个，读代码的人看不出来）。
+     */
+    function openSection(sectionKey) {
         if (sectionKey)
             section = sectionKey
         capturing = ""
         hint = ""
         /* 上一次的"收进归档 3 份"不该跟着面板一直开着还在 */
         sumHint = ""
+        /*
+         * 挂成宿主的工具窗，**得赶在第一次 visible 之前**，而且要每次打开都调：
+         *
+         * 原来只在这块组件 Component.onCompleted 里调一次，那一次必定打不上 ——
+         * main.cpp 是先 setSource(QML) 再 host.show()，QML 跑完时宿主 QWidget
+         * 还没有原生窗口（windowHandle() 为空），transientParent 根本没接上。
+         * 后果就是用户报的"点自己程序的界面，设置面板照样收起来"。
+         * 这条是幂等的（挂上了直接返回 true），所以放在打开这一步里最稳。
+         */
+        Win.attachAsToolWindow(root)
         placeOverHost()
-        open()
+        visible = true
+        raise()
+        requestActivate()
         /* 开完了再取清单：reloadSummarize 只在面板开着的时候干活（见它的说明） */
         reloadSummarize()
-        forceActiveFocus()
     }
 
-    /* 居中到宿主窗口（DropdownMenu 里说的坐标系问题同样适用：用内容区坐标） */
+    /*
+     * 摆到宿主窗口的正中（高度也按宿主钳一次）。
+     *
+     * 这块窗的 x / y 现在是**屏幕坐标**（Popup 时代是宿主内容区坐标，两者差一个
+     * 宿主窗自己的位置）—— 不加那一段，面板会摆到屏幕左上角那一块。
+     *
+     * 几何**现读**、不存成属性：`Win.hostScreenGeometry()` 是个函数，QML 没有
+     * 任何东西可绑，写成 `readonly property` 就只会在创建时算一次（那时宿主还没
+     * 建窗口，读到的是空矩形），之后主窗口怎么挪、怎么最大化它都是旧值。
+     *
+     * 原来那两处 `Math.max(8, …)` 加在**偏移量**上：宿主比面板窄（实测宿主 705、
+     * 面板 820）时居中偏移是 -57，被它夹成 +8 → 面板整个贴到宿主左边线上，
+     * 中心差 65 像素 —— 就是"没有在屏幕中央"。现在夹的是**绝对坐标**：
+     * 能居中就居中，只在会掉出屏幕左 / 上沿时才顶到 8 像素那一条。
+     *
+     * 别用 `Screen.virtualGeometry` 来夹屏幕边：这块窗是 QQuickWidget 里造出来的
+     * 顶层 Window，`Screen` 那个 attached 属性在 show 之前属性全是 undefined
+     * （最小样实测：`Screen.virtualGeometry.x` 直接 TypeError，openSection 从那一行
+     * 就断了，面板连 visible 都没轮到设 —— 而 QML 的报错**不会**进自检日志）。
+     */
     function placeOverHost() {
-        var host = root.parent
-        if (!host)
+        var hw = Win.hostScreenGeometry()
+        if (hw.width <= 0 || hw.height <= 0)
             return
-        root.x = Math.max(8, Math.round((host.width - root.width) / 2))
-        root.y = Math.max(8, Math.round((host.height - root.height) / 2))
+        root.height = Math.min(560, Math.max(360, hw.height - 60))
+        root.x = Math.max(8, hw.x + Math.round((hw.width - root.width) / 2))
+        root.y = Math.max(8, hw.y + Math.round((hw.height - root.height) / 2))
     }
 
     /*
@@ -456,35 +516,30 @@ Popup {
     }
 
     width: 820
-    height: Math.min(560, (root.parent ? root.parent.height : 640) - 60)
-    padding: 0
-    margins: 0
-    modal: false
-    focus: true
-    popupType: Popup.Window
+    /* 真实高度在 openSection() 里按宿主钳（见 placeOverHost）；这里只是没打开时的默认值 */
+    height: 560
+    /* 圆角靠下面那块背景 Rectangle 画，窗口本身要透明 */
+    color: "transparent"
     /*
-     * 只认"主动关"：标题栏那个 ✕，还有 Esc。
+     * 工具窗：不进任务栏、不置顶（系统文件对话框照样盖得住它）。
      *
-     * 原来带着 CloseOnPressOutside —— 点面板外面的空白处就收起来了。而面板里
-     * 那几个按钮（选择保存位置… / 导入文件夹…）弹的是**系统文件对话框**，
-     * 用户去点那个对话框，就是在点面板外面，面板先一步自己收掉，看着像
-     * "打开文件夹选择框把设置面板弄没了"。
+     * 以前这块窗是 Popup（popupType: Popup.Window），Qt 给它建的是 **Qt::Popup**
+     * —— Windows 上这类窗一点外面（含点到别的应用）系统就自己关掉，就是用户报的
+     * "点一下桌面设置就没了"。而 closePolicy 去掉 CloseOnPressOutside 改不了
+     * 窗口类型；建好之后再 setFlags 更不行（销毁重建 HWND，实测会把面板压到
+     * 最大化主窗口后面 —— 那轮已撤，见 git 历史 / 下面的 attach 注释）。
+     * 所以让它**从一开始**就是普通工具窗。
      *
-     * 另一件事也靠这个改：CloseOnPressOutside 会让 Qt 把这块窗口建成
-     * Qt::Popup（Windows 上位这类窗口是**置顶**的），所以那个系统文件对话框
-     * 一出来就被压在面板下面（用户截图报的正是这个）。去掉之后它是普通
-     * Qt::Tool 窗口，对话框正常盖在它上面。
+     * transientParent 得由 C++ 接（宿主是 QWidget，QML 这边拿不到那块 HWND）：
+     * 见 WindowHelper::attachAsToolWindow，在 openSection() 里每次打开都调一次
+     * （组件完成那一刻宿主还没 show，调了也接不上 —— 那边的注释写着为什么）。
      */
-    closePolicy: Popup.CloseOnEscape
+    flags: Qt.Tool | Qt.FramelessWindowHint | Qt.NoDropShadowWindowHint
 
-    /*
-     * 自检用：这条策略里还带着"点外面就收"没有。
-     *
-     * 在 QML 这侧按 Popup 自己的枚举判，不拿到 C++ 去手写那个位掩码 ——
-     * 同一个枚举两边各记一份，迟早对不上。
-     */
-    readonly property bool closesOnOutsidePress:
-        (closePolicy & Popup.CloseOnPressOutside) !== 0
+    /* Popup 时代的接口，Main.qml 和自检都在读：留着，别再改调用方 */
+    readonly property bool opened: visible
+    /* 现在根本没有"点外面关"这条路径（不是关掉了策略，是这块窗不是 Popup 了） */
+    readonly property bool closesOnOutsidePress: false
 
     /*
      * 密钥那一栏这会儿是不是"显示全文"。
@@ -494,7 +549,12 @@ Popup {
      */
     property bool showKey: false
 
-    onClosed: {
+    /*
+     * 收起来要清的那几样（Popup 时代是 onClosed，这块窗现在只有可见性）。
+     */
+    onVisibleChanged: {
+        if (visible)
+            return
         capturing = ""
         hint = ""
         showKey = false
@@ -530,7 +590,12 @@ Popup {
         ContextMenu.onRequested: (position) => { }
     }
 
-    background: Rectangle {
+    /*
+     * 背景：窗口本身透明（color: "transparent"），圆角和边框由这块画。
+     * Popup 时代它是 background 属性，换成顶层 Window 之后就是第一个子项。
+     */
+    Rectangle {
+        anchors.fill: parent
         color: root.bgColor
         radius: 6
         border.color: root.frameColor
@@ -538,15 +603,15 @@ Popup {
     }
 
     /*
-     * contentItem 套一层 Item 并显式给宽高。
+     * 内容层（原来是 Popup 的 contentItem）。
      *
-     * Popup 默认会按 contentItem 的 implicitWidth/Height 反过来定自己的尺寸，
-     * 这里宽高已经由我们自己定死（面板是固定大小的），显式铺满可以避免
-     * Popup 的 contentWidth/contentHeight 绑定循环。
+     * Popup 会按 contentItem 的 implicitWidth/Height 反推自己的尺寸，所以那时候
+     * 要显式给 implicit*；现在宽高由 Window 自己定死，直接 anchors.fill 铺满，
+     * 里面那几层照旧读 parent.width/height。
      */
-    contentItem: Item {
-        implicitWidth: root.width
-        implicitHeight: root.height
+    Item {
+        id: panelRoot
+        anchors.fill: parent
 
         Column {
             /*
@@ -612,33 +677,43 @@ Popup {
                         anchors.fill: parent
                         hoverEnabled: true
                         cursorShape: Qt.PointingHandCursor
-                        onClicked: root.close()
+                        onClicked: root.hide()
                     }
                 }
     
-                /* 拖标题栏移动面板 */
+                /*
+                 * 拖标题栏移动面板：交给窗口管理器，不在 QML 里算增量。
+                 *
+                 * 原来那版是"按下时记一下 mapToItem(null, ...) 的场景坐标，
+                 * 移动时 root.x += 现在 - 按下"。问题是这块窗**就在自己那个场景
+                 * 里被搬走**：窗一动，光标的场景坐标就反向变一份，于是每次增量里
+                 * 都含着上一次的位移 —— 他报的"点标题栏拖动就乱跑"就是那个。
+                 * （主窗口那块早就用 Win.startSystemMove() 了，见 TopBar.qml。）
+                 */
                 MouseArea {
                     anchors.left: parent.left
                     anchors.right: closeCell.left
                     anchors.top: parent.top
                     anchors.bottom: parent.bottom
                     cursorShape: Qt.SizeAllCursor
-                    property real pressSceneX: 0
-                    property real pressSceneY: 0
-    
+                    property bool started: false
+
                     onPressed: (mouse) => {
-                        pressSceneX = mapToItem(null, mouse.x, mouse.y).x
-                        pressSceneY = mapToItem(null, mouse.x, mouse.y).y
+                        /*
+                         * 先 accepted 再发起：startSystemMoveFor() 是阻塞的，
+                         * 进去之后要等这一次拖动结束才回来。
+                         */
                         mouse.accepted = true
+                        started = true
+                        try {
+                            if (!Win.startSystemMoveFor(panelRoot))
+                                started = false
+                        } catch (e) {
+                            console.warn("SettingsPanel: startSystemMoveFor 不可用：", e)
+                            started = false
+                        }
                     }
-                    onPositionChanged: (mouse) => {
-                        if (!(mouse.buttons & Qt.LeftButton))
-                            return
-                        var p = mapToItem(null, mouse.x, mouse.y)
-                        root.x = root.x + (p.x - pressSceneX)
-                        root.y = root.y + (p.y - pressSceneY)
-                        mouse.accepted = true
-                    }
+                    onReleased: (mouse) => { started = false }
                 }
             }
     
@@ -1108,7 +1183,7 @@ Popup {
                                         anchors.fill: parent
                                         hoverEnabled: true
                                         cursorShape: Qt.PointingHandCursor
-                                        onClicked: root.close()
+                                        onClicked: root.hide()
                                     }
                                 }
                             }
@@ -2171,8 +2246,14 @@ Popup {
                                     anchors.fill: parent
                                     hoverEnabled: true
                                     cursorShape: Qt.PointingHandCursor
-                                    /* 文件框由 Main.qml 开（面板是置顶窗口，会盖住它） */
-                                    onClicked: Cmd.chooseDocPython()
+                                    /*
+                                     * 走 commandRequested 转 Main.qml 的 dispatch ——
+                                     * 文件框必须由主窗口开（这个面板是置顶窗，会盖住它），
+                                     * 而 chooseDocPython() 就长在 Main.qml 的窗口根上。
+                                     * 原来这里写的是 Cmd.chooseDocPython()：EditorController
+                                     * 没这个函数，点一次抛一次 TypeError，按钮什么都不做。
+                                     */
+                                    onClicked: root.commandRequested("docChoosePython")
                                 }
                             }
                         }

@@ -16,6 +16,8 @@
 #include <QJsonObject>
 #include <QQuickItem>
 #include <QQuickWindow>
+#include <QGuiApplication>
+#include <QScreen>
 #include <QTcpServer>
 #include <QTcpSocket>
 #include <QTemporaryDir>
@@ -96,17 +98,35 @@ void settle(int ms) {
 bool grabSurface(QObject *popup, const QString &file) {
     if (!popup)
         return false;
-    QQuickItem *item = nullptr;
-    for (const char *prop : {"popupItem", "contentItem"}) {
-        item = popup->property(prop).value<QQuickItem *>();
-        if (item)
-            break;
+    /* 设置面板现在自己就是一块顶层 Window（不再是 Popup）—— 先按窗口认 */
+    QQuickWindow *window = qobject_cast<QQuickWindow *>(popup);
+    if (!window) {
+        QQuickItem *item = nullptr;
+        for (const char *prop : {"popupItem", "contentItem"}) {
+            item = popup->property(prop).value<QQuickItem *>();
+            if (item)
+                break;
+        }
+        window = item ? item->window() : nullptr;
     }
-    QQuickWindow *window = item ? item->window() : nullptr;
     if (!window)
         return false;
     const QImage image = window->grabWindow();
     return !image.isNull() && image.save(file);
+}
+
+/*
+ * 整张屏幕抓一张。
+ *
+ * 上面那张是**面板自己的表面**：它能证明两栏画没画出来，证明不了"摆在哪" ——
+ * 居中那件事的 ground truth 是屏幕（面板 x/y 现在是屏幕坐标，见 placeOverHost）。
+ */
+bool grabDesktop(const QString &file) {
+    QScreen *screen = QGuiApplication::primaryScreen();
+    if (!screen)
+        return false;
+    const QPixmap shot = screen->grabWindow(0);
+    return !shot.isNull() && shot.save(file);
 }
 
 QString readIt(const QString &path) {
@@ -757,16 +777,24 @@ int SelfTest::runSummarize(ClipboardStore *store, Summarizer *sum, QObject *qmlR
         QObject *panel = qmlRoot->findChild<QObject *>("settingsPanel");
         sumcheck(panel != nullptr, "按 objectName 找到了设置面板");
         if (panel) {
-            sumout(QStringLiteral("探针：show 之前 section=%1 opened=%2")
-                       .arg(panel->property("section").toString())
-                       .arg(panel->property("opened").toBool()));
-            QMetaObject::invokeMethod(panel, "show", Q_ARG(QVariant, QStringLiteral("summarize")));
-            sumout(QStringLiteral("探针：show 之后 section=%1")
-                       .arg(panel->property("section").toString()));
+            sumcheck(!panel->property("opened").toBool(), "开之前面板是收着的",
+                     QString::number(panel->property("opened").toBool()));
+            const bool called = QMetaObject::invokeMethod(
+                panel, "openSection", Q_ARG(QVariant, QStringLiteral("summarize")));
             settle(260);
-            sumout(QStringLiteral("探针：settle 之后 section=%1 opened=%2")
-                       .arg(panel->property("section").toString())
-                       .arg(panel->property("opened").toBool()));
+            sumcheck(called, "openSection(QVariant) 这一枪真的打到了");
+            /*
+             * 这一条是这一节里唯一"面板确实摆在屏幕上"的凭据，别省。
+             *
+             * 踩过的那次：placeOverHost() 里用了 `Screen.virtualGeometry`（那块窗是
+             * QQuickWidget 里造的顶层 Window，show 之前 attached Screen 的属性全是
+             * undefined）→ openSection 从那一行就抛了，visible / reloadSummarize
+             * 都没轮到执行，而**QML 的报错不进自检日志**（grep 什么都 grep 不到）。
+             * 当时只有"草稿清单 1 行"那条间接红了一下 —— 判 section 的那条照样绿
+             * （section 在抛错之前就赋值了）。所以要直接判 visible，不要靠副作用。
+             */
+            sumcheck(panel->property("opened").toBool(), "面板真的开出来了（visible）",
+                     panel->property("section").toString());
             sumcheck(panel->property("section").toString() == QLatin1String("summarize"),
                      "开到了「汇总」那一栏", panel->property("section").toString());
 
@@ -783,14 +811,16 @@ int SelfTest::runSummarize(ClipboardStore *store, Summarizer *sum, QObject *qmlR
             const QString shot = qEnvironmentVariable("SMARTCLIP_SUM_SHOT");
             if (!shot.isEmpty()) {
                 grabSurface(panel, shot + QStringLiteral("-summarize.png"));
-                QMetaObject::invokeMethod(panel, "show",
+                grabDesktop(shot + QStringLiteral("-desktop.png"));
+                QMetaObject::invokeMethod(panel, "openSection",
                                           Q_ARG(QVariant, QStringLiteral("archive")));
                 settle(260);
                 grabSurface(panel, shot + QStringLiteral("-archive.png"));
-                sumout(QStringLiteral("面板已抓图：%1-summarize.png / -archive.png").arg(shot));
+                sumout(QStringLiteral("面板已抓图：%1-summarize.png / -archive.png / -desktop.png")
+                           .arg(shot));
             }
 
-            QMetaObject::invokeMethod(panel, "show", Q_ARG(QVariant, QStringLiteral("archive")));
+            QMetaObject::invokeMethod(panel, "openSection", Q_ARG(QVariant, QStringLiteral("archive")));
             settle(260);
             sumcheck(panel->property("section").toString() == QLatin1String("archive"),
                      "开到了「归档」那一栏");

@@ -3600,9 +3600,260 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
             }
             check(panelWin != nullptr, QStringLiteral("设置面板：那块窗口开出来了"));
             if (panelWin) {
-                /* 只报一声不断言：这是 Qt 建窗口的规矩，不是我们的设定 */
+                /*
+                 * 死控件扫一遍：面板里调 `单例.方法(...)`，那个方法必须真的存在。
+                 *
+                 * 踩过的那次是「选择 Python」按钮写 `Cmd.chooseDocPython()` —— 函数
+                 * 其实长在 Main.qml 的窗口根上，点一次抛一次 TypeError、界面一动不动。
+                 * 这种"不点永远不知道"的东西看代码是看不住的，扫一遍：
+                 *   * 整份文件扫（不是只扫 onClicked 那一行 —— handler 是多行的，
+                 *     第一版那么写扫到 0 处调用，等于一条空转的绿）；
+                 *   * 跳过块注释那几行（这个仓库的注释都以 " * " 开头，里面满是
+                 *     "见 Store.drafts()" 这种句子，不跳就是假阳性）；
+                 *   * `//` 只有前面不是冒号才当行注释（不然 https:// 会被砍一刀）；
+                 *   * 只查这次传进来的三个单例（Cmd / Store / Llm）。Doc、Win、Sum
+                 *     这些 run() 手里没有对象，跳过不查 —— 宁可少查，不要假红。
+                 * 扫到 0 处算失败：那条路要是哪天把判据写坏了，得当场知道。
+                 */
+                {
+                    QFile ui(QStringLiteral(":/qt/qml/SmartClip/qml/components/SettingsPanel.qml"));
+                    if (ui.open(QIODevice::ReadOnly)) {
+                        const QStringList names = { QStringLiteral("Cmd"), QStringLiteral("Store"),
+                                                    QStringLiteral("Llm") };
+                        QList<QObject *> targets;
+                        targets << cmd << store << llm;
+                        static const QRegularExpression call(
+                            QStringLiteral("\\b(Cmd|Store|Llm)\\.([A-Za-z_][A-Za-z0-9_]*)\\s*\\("));
+                        const QStringList lines =
+                            QString::fromUtf8(ui.readAll()).split(QLatin1Char('\n'));
+                        int scanned = 0;
+                        QStringList dead;
+                        for (QString line : lines) {
+                            if (line.trimmed().startsWith(QLatin1Char('*')))
+                                continue;                       /* 块注释里的一句 */
+                            const int slash = line.indexOf(QStringLiteral("//"));
+                            if (slash > 0 && line.at(slash - 1) != QLatin1Char(':'))
+                                line = line.left(slash);
+                            QRegularExpressionMatchIterator it = call.globalMatch(line);
+                            while (it.hasNext()) {
+                                const QRegularExpressionMatch m = it.next();
+                                QObject *object = targets.value(names.indexOf(m.captured(1)));
+                                if (!object)
+                                    continue;
+                                ++scanned;
+                                const QString method = m.captured(2);
+                                bool found = false;
+                                const QMetaObject *mo = object->metaObject();
+                                for (int i = 0; i < mo->methodCount() && !found; ++i) {
+                                    if (QLatin1String(mo->method(i).name()) == method)
+                                        found = true;
+                                }
+                                if (!found)
+                                    dead << QStringLiteral("%1.%2(").arg(m.captured(1), method);
+                            }
+                        }
+                        check(scanned > 0 && dead.isEmpty(),
+                              QStringLiteral("设置面板：没有调不到的单例方法（死控件）"),
+                              dead.isEmpty() ? QStringLiteral("扫了 %1 处调用").arg(scanned)
+                                             : dead.join(QStringLiteral("、")));
+                    } else {
+                        check(false, QStringLiteral("设置面板：读不到自己的 QML 源码（扫不了）"));
+                    }
+                }
                 out() << "        （设置面板窗口 flags = 0x"
                       << QString::number(int(panelWin->flags()), 16) << "）" << Qt::endl;
+
+                /*
+                 * "开出来了"不能只判 isVisible。
+                 *
+                 * 换窗口类型那一次，面板其实开了，只是落到主窗口**后面** ——
+                 * 用户看到的就是"点设置没反应"。所以拿那块 HWND 的中心像素问
+                 * 一次 Windows：这个点上最上面的是不是别窗口的根。
+                 * 坐标用 GetWindowRect（物理像素），不用 QWindow::geometry() ——
+                 * 那是逻辑像素，4K + 缩放下和 WindowFromPoint 要的差一档。
+                 */
+                HWND hostHwnd = nullptr;
+                QWindow *hostWin = nullptr;
+                for (QWindow *w : QGuiApplication::topLevelWindows()) {
+                    if (w == panelWin || !w->isVisible() || w->width() < 1000)
+                        continue;
+                    hostWin = w;
+                    hostHwnd = reinterpret_cast<HWND>(w->winId());
+                    break;
+                }
+
+                /*
+                 * 面板中心那一点被**主窗口**盖住了没有 —— 下面四条 z-order 断言共用这把尺子。
+                 *
+                 * 为什么判"是不是被主窗口盖住"，而不是"命中的是不是面板自己"：跑自检时
+                 * 屏幕上还有别的应用（实测有一次命中 Chrome_WidgetWin_1，连着翻红三条），
+                 * 那种第三方窗压过来和要查的事一点关系都没有，却会让这条常红 ——
+                 * 常红的尺子最后被当成噪音，真正的"面板压在铺满的主窗口底下"反倒没人看。
+                 * 所以第三方挡路只在 detail 里点名（算过），命中主窗口才算红。
+                 */
+                auto coveredByHost = [&](QWindow *panel, QString *who) -> bool {
+                    HWND mine = reinterpret_cast<HWND>(panel->winId());
+                    RECT r{};
+                    if (!mine || !GetWindowRect(mine, &r)) {
+                        *who = QStringLiteral("量不到面板的矩形");
+                        return false;
+                    }
+                    POINT at{ (r.left + r.right) / 2, (r.top + r.bottom) / 2 };
+                    const HWND hit = GetAncestor(WindowFromPoint(at), GA_ROOT);
+                    if (hit == mine) {
+                        *who = QStringLiteral("面板自己在最上面");
+                        return false;
+                    }
+                    if (hit == hostHwnd) {
+                        *who = QStringLiteral("中心命中主窗口 0x%1，面板 0x%2")
+                                   .arg(QString::number(quintptr(hit), 16),
+                                        QString::number(quintptr(mine), 16));
+                        return true;
+                    }
+                    wchar_t cls[128] = {};
+                    ::GetClassNameW(hit, cls, 128);
+                    *who = QStringLiteral("中心命中外部窗口 0x%1（类=%2），这一条今天没量到")
+                               .arg(QString::number(quintptr(hit), 16),
+                                    QString::fromWCharArray(cls));
+                    return false;
+                };
+                {
+                    QString who;
+                    check(!coveredByHost(panelWin, &who),
+                          QStringLiteral("设置面板：开出来在主窗口上面（没被它盖住）"), who);
+                }
+
+                /*
+                 * 它是主窗口的**工具窗**：窗口类型是 Qt::Tool（不是 Qt::Popup，
+                 * 那种一点外面系统就自己关掉），而且 transientParent 真的指着主窗。
+                 *
+                 * 这条为什么单独断言：QML 是在 main.cpp 里 `host.show()` **之前**
+                 * 加载的，组件完成那一刻宿主 QWidget 还没有原生窗口，
+                 * attachAsToolWindow 里 `windowHandle()` 是空的 —— 挂不上，而
+                 * isVisible、类型、位置全都对，屏幕上唯一露出来的症状就是
+                 * "点一下自己程序的界面，面板没了"（它没主，主窗口一激活就盖上来）。
+                 * 那是这层关系**本身**，不是它的症状：判根不判症状。
+                 */
+                check((panelWin->flags() & Qt::WindowType_Mask) == Qt::Tool,
+                      QStringLiteral("设置面板：那块窗是 Qt::Tool（不是点外面就关的 Popup）"),
+                      QStringLiteral("0x") + QString::number(int(panelWin->flags()), 16));
+                check(panelWin->transientParent() == hostWin,
+                      QStringLiteral("设置面板：挂上了宿主的 transientParent"),
+                      QStringLiteral("transientParent=0x%1，主窗口=0x%2")
+                          .arg(QString::number(quintptr(panelWin->transientParent()), 16),
+                               QString::number(quintptr(hostWin), 16)));
+
+                /*
+                 * 摆在主窗口正中间（用户报的"显示界面没有在屏幕中央"）。
+                 *
+                 * 两边的矩形都问系统（物理像素），容差给 2*dpr：居中值是按逻辑像素
+                 * 四舍五入算的，缩放 1.5 时最多差 1 逻辑像素。
+                 */
+                {
+                    HWND mine = reinterpret_cast<HWND>(panelWin->winId());
+                    RECT pr{}, hr{};
+                    if (mine && hostHwnd && GetWindowRect(mine, &pr) && GetWindowRect(hostHwnd, &hr)) {
+                        const qreal dpr = panelWin->devicePixelRatio();
+                        const int dx = qAbs((pr.left + pr.right) - (hr.left + hr.right)) / 2;
+                        const int dy = qAbs((pr.top + pr.bottom) - (hr.top + hr.bottom)) / 2;
+                        check(dx <= qRound(2 * dpr) && dy <= qRound(2 * dpr),
+                              QStringLiteral("设置面板：开出来居中在主窗口"),
+                              QStringLiteral("中心偏 %1x%2 物理像素（dpr=%3）"
+                                             " 面板 %4x%5@%6,%7  宿主 %8x%9@%10,%11")
+                                  .arg(dx).arg(dy).arg(dpr)
+                                  .arg(pr.right - pr.left).arg(pr.bottom - pr.top).arg(pr.left).arg(pr.top)
+                                  .arg(hr.right - hr.left).arg(hr.bottom - hr.top).arg(hr.left).arg(hr.top));
+                    } else {
+                        check(false, QStringLiteral("设置面板：量不到居中要用的两个矩形"));
+                    }
+                }
+
+                /*
+                 * 点**自己程序**的界面，面板不许消失 —— 用户报的这一条。
+                 *
+                 * 这里不模拟鼠标（合成点击打不进原生编辑区），直接把前景窗换给主窗口：
+                 * transientParent 没挂上时，那一下就是"面板被主窗口盖住"（A/B 量过：
+                 * 拔掉 attach 之后这一条必红，中心命中的就是主窗口那块 HWND）。
+                 *
+                 * 换完前景要把面板 raise() 回来 —— 不能只 SetForegroundWindow(面板)：
+                 * 系统的ForegroundLock 会挡（实测挡过一次，后面三条全跟着红）。
+                 */
+                if (hostHwnd) {
+                    SetForegroundWindow(hostHwnd);
+                    settle();
+                    QString who;
+                    check(!coveredByHost(panelWin, &who),
+                          QStringLiteral("设置面板：主窗口被点到（换前景）之后它还在最上面"), who);
+                    panelWin->raise();
+                    panelWin->requestActivate();
+                    settle();
+                }
+
+                /*
+                 * 主窗口**最大化**时再开一次：他那台机器上主窗口常年是铺满的。
+                 *
+                 * 换窗口类型是销毁重建 HWND，Qt 的 transientParent（"浮在自己
+                 * 宿主窗上面"那层关系）会跟着丢 —— 主窗口没最大化时看不出来
+                 * （面板本来就在它上面那块区域），铺满之后面板就被压在底下，
+                 * 用户那边是"点设置没反应"。上面那两次开都过、只有这里翻车。
+                 */
+                QMetaObject::invokeMethod(qmlRoot, "closeSettings");
+                QMetaObject::invokeMethod(qmlRoot, "toggleMaximize");
+                settle();
+                dispatch(QStringLiteral("storage"));
+                settle();
+                {
+                    QWindow *maxed = nullptr;
+                    for (QWindow *w : QGuiApplication::topLevelWindows()) {
+                        if (w->isVisible() && w->width() > 700 && w->width() < 900
+                            && w->height() > 400)
+                            maxed = w;
+                    }
+                    check(maxed != nullptr,
+                          QStringLiteral("设置面板：主窗口最大化时第二次开也出得来"),
+                          QStringLiteral("opened=%1")
+                              .arg(uiState().value(QStringLiteral("settingsOpened")).toBool()));
+                    if (maxed) {
+                        QString who;
+                        check(!coveredByHost(maxed, &who),
+                              QStringLiteral("设置面板：最大化时它压在铺满的主窗口上面"
+                                             "（不是被盖住）"),
+                              who);
+                    }
+                }
+                QMetaObject::invokeMethod(qmlRoot, "closeSettings");
+                QMetaObject::invokeMethod(qmlRoot, "toggleMaximize");   /* 还原，别影响后面那几节 */
+                settle();
+
+                /*
+                 * 关掉再开一次，第二次也要正常。
+                 *
+                 * 换窗口类型是在 onOpened 里做的，而这块窗是"建一次、之后
+                 * hide/show 复用" —— 第一次开改了类型，第二次开走的是已经改过的
+                 * 那条路。只测第一次开，就会漏掉"第二次点不出来"这种只在他手上
+                 * 复现的事（他报的正是这个）。
+                 */
+                QMetaObject::invokeMethod(qmlRoot, "closeSettings");
+                settle();
+                dispatch(QStringLiteral("storage"));
+                settle();
+                {
+                    QWindow *again = nullptr;
+                    for (QWindow *w : QGuiApplication::topLevelWindows()) {
+                        if (w->isVisible() && w->width() > 700 && w->width() < 900
+                            && w->height() > 400)
+                            again = w;
+                    }
+                    check(again != nullptr,
+                          QStringLiteral("设置面板：关掉再开第二次，那块窗又出来了"),
+                          QStringLiteral("opened=%1")
+                              .arg(uiState().value(QStringLiteral("settingsOpened")).toBool()));
+                    if (again) {
+                        QString who;
+                        check(!coveredByHost(again, &who),
+                              QStringLiteral("设置面板：第二次开出来也点得到（在最上面）"), who);
+                    }
+                }
             }
             check(!uiState().value(QStringLiteral("settingsClosesOnOutside")).toBool(),
                   QStringLiteral("设置面板：点面板外面的空白处不会自己收起来"));
@@ -3622,6 +3873,24 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
                              == QLatin1String("storage"),
                   QStringLiteral("设置面板：对话框关掉之后原栏目放回来"),
                   uiState().value(QStringLiteral("settingsSection")).toString());
+
+            /*
+             * Esc 关得掉 —— 放在这一节**最后**：它把面板关掉，后面那几条
+             * （"弹系统对话框之前自己让开了"那一组）要的是开着的状态。
+             *
+             * 顶层 Window 没有 Popup 白送的那条 closePolicy: CloseOnEscape，
+             * 是面板里那个 Shortcut 自己办的（换成 sequences: ["Escape"] 之后
+             * 这条才有落点可测）。
+             */
+            if (panelWin) {
+                QKeyEvent esc(QEvent::KeyPress, Qt::Key_Escape, Qt::NoModifier);
+                QCoreApplication::sendEvent(panelWin, &esc);
+                QKeyEvent up(QEvent::KeyRelease, Qt::Key_Escape, Qt::NoModifier);
+                QCoreApplication::sendEvent(panelWin, &up);
+                settle();
+                check(!panelWin->isVisible(), QStringLiteral("设置面板：Esc 关得掉"),
+                      QStringLiteral("可见=%1").arg(panelWin->isVisible()));
+            }
         }
         QMetaObject::invokeMethod(qmlRoot, "closeSettings");
         settle();

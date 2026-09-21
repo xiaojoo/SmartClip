@@ -16,6 +16,7 @@
 #include <QLayout>
 #include <QPainter>
 #include <QPainterPath>
+#include <QQuickItem>
 #include <QQuickWidget>
 #include <QRegion>
 #include <QScreen>
@@ -348,6 +349,73 @@ bool WindowHelper::startSystemMove()
         }
     }
     return wh->startSystemMove();
+}
+
+/*
+ * 拖"这一块窗"，不是主窗口。
+ *
+ * 设置面板原来是在 QML 里自己算增量改 root.x：那是拿 mapToItem(null, ...) 的
+ * 场景坐标当参照，而这块窗**就在自己场景里被搬走** —— 窗一动，光标的场景坐标
+ * 就反向跟着变，于是下一次增量里含了上一次的量，手感就是"拖一下跳一下、还跑偏"。
+ * 交给窗口管理器就没有这笔账要算（和 TopBar 拖主窗口同一条路）。
+ */
+bool WindowHelper::startSystemMoveFor(QQuickItem *inside)
+{
+    if (!inside)
+        return false;
+    QWindow *wh = inside->window();
+    if (!wh)
+        return false;
+    return wh->startSystemMove();
+}
+
+bool WindowHelper::attachAsToolWindow(QWindow *window)
+{
+    if (!window)
+        return false;
+    /*
+     * 宿主取 window()（顶层那块 QWidget）而不是 m_widget 自己：这里要的是"主窗口
+     * 的 HWND"，而 m_widget 已经是顶层了 —— 多这一层是防以后有人把宿主套进布局。
+     */
+    QWidget *top = m_widget ? m_widget->window() : nullptr;
+    QWindow *host = top ? top->windowHandle() : nullptr;
+    if (!host || host == window)
+        return false;   /* 宿主还没建原生窗口：调用方下次打开面板时再试（见 .h） */
+
+    /*
+     * 顺序要紧：transientParent 和 flags 都得在**这块窗还没显示之前**定下来。
+     * 显示之后再 setFlags 就是销毁重建 HWND —— 上一轮就是那么改的，结果面板
+     * 落到最大化主窗口的后面（isVisible 还是真的，但点不到）。
+     */
+    if (window->transientParent() != host)
+        window->setTransientParent(host);
+
+    /*
+     * 标志位**只改我们要的那三位**，别整份替换。
+     *
+     * 原来比的是"flags() 等不等 0x…800a"：QML 的 `Window` 建出来的 flags 里还
+     * 带着 Qt::Window 那一位（0x…800b），于是这一比永远不等 → 每次都 setFlags
+     * → 每次都销毁重建 HWND。按位改完之后第二次进来就是"已经是对的"，一次都不动。
+     */
+    const Qt::WindowFlags keep = Qt::WindowType_Mask | Qt::FramelessWindowHint
+                               | Qt::NoDropShadowWindowHint;
+    Qt::WindowFlags f = window->flags();
+    f = (f & ~keep) | Qt::Tool | Qt::FramelessWindowHint | Qt::NoDropShadowWindowHint;
+    if (f != window->flags() && !window->isVisible())
+        window->setFlags(f);
+    return true;
+}
+
+/*
+ * 宿主顶层窗在屏幕上的矩形（逻辑像素）—— 见 WindowHelper.h 里那句"QML 拿不到"。
+ *
+ * 用 geometry() 不用 frameGeometry()：这块窗是 Qt::FramelessWindowHint，两者本来就
+ * 一样，而弹窗的 x/y 是相对客户区给的（和 publishHostGeometry 报给菜单的同一个基准）。
+ */
+QRect WindowHelper::hostScreenGeometry() const
+{
+    QWidget *top = m_widget ? m_widget->window() : nullptr;
+    return top ? top->geometry() : QRect();
 }
 
 void WindowHelper::refreshMask()

@@ -8,6 +8,7 @@
 #include <QString>
 #include <QTimer>
 
+class QQuickItem;
 class QQuickWindow;
 
 /*
@@ -182,6 +183,43 @@ public:
      */
     Q_INVOKABLE bool startSystemResize(int edges);
     Q_INVOKABLE bool startSystemMove();
+
+    /*
+     * 上面那两个只管**主窗口**（它们是宿主 widget 的 windowHandle）。
+     * 程序里还有几块自己一块原生窗的东西（设置面板那种 Popup.Window），
+     * 它们要的是"对这一块窗"做同样的事 —— 所以传进来的是那块窗里的一个 item，
+     * 由它去找到自己在 QQuickWindow 那一层的身。
+     */
+    /* 拖这块窗（和拖主窗口同一条路：窗口管理器搬，不在 QML 里算增量） */
+    Q_INVOKABLE bool startSystemMoveFor(QQuickItem *inside);
+    /*
+     * 把一块 QML 顶层 Window 挂成宿主窗的"工具窗"：Qt::Tool + 无边框 +
+     * transientParent 指向主窗口那块 HWND。
+     *
+     * 为什么要绕这一层：设置面板以前是 Popup（popupType: Window），Qt 给它建的是
+     * **Qt::Popup** 窗 —— Windows 上这种窗一点外面就自己关掉。想改成普通窗又不在
+     * 建好之后动类型（改类型 = 销毁重建 HWND，那次实测把面板压到最大化主窗口后面，
+     * 见 SettingsPanel.qml 里撤掉的那段），就只能让它**从一开始**就是 Tool 窗。
+     * 而 transientParent 必须是宿主那个 QWidget 的 windowHandle() —— QML 里
+     * `host.Window.window` 拿到的是 QQuickWidget 里面那块没有 HWND 的窗，
+     * 挂上去等于没挂，所以这层关系只能在这儿接。
+     *
+     * **返回 false 表示这一枪没打上**：宿主 QWidget 还没建原生窗口
+     * （`windowHandle()` 为空 —— main.cpp 里 QML 是在 `host.show()` **之前**
+     * 加载的，Component.onCompleted 那一刻必然走到这条）。所以调用方要在
+     * "每次打开面板"时都调一次，而不是只在组件完成时调一次；这条是幂等的，
+     * 挂上了就直接返回 true。
+     */
+    Q_INVOKABLE bool attachAsToolWindow(QWindow *window);
+    /*
+     * 宿主顶层窗在屏幕上的矩形（逻辑像素）。
+     *
+     * 面板要居中于主窗口，但 QML 那边拿不到：`host.Window.window` 给的是
+     * QQuickWidget 里面那块 **QQuickWidgetOffscreenWindow**（没有屏幕位置，
+     * 而且把它赋给 `Window` 类型的属性还会报 "Unable to assign"）。
+     * 真实位置只有这边知道 —— 宿主是 QWidget。
+     */
+    Q_INVOKABLE QRect hostScreenGeometry() const;
 
     /*
      * 自检用：把宿主窗口挪一段（屏幕坐标）。
