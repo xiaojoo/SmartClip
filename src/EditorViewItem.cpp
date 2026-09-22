@@ -25,6 +25,7 @@
 #include <QQuickWidget>
 #include <QQuickWindow>
 #include <QScrollBar>
+#include <QScreen>
 #include <QStringConverter>
 #include <QStyle>
 #include <QTimer>
@@ -440,9 +441,22 @@ public:
      */
     QVector<QPair<int, QColor>> lines;
 
+    /*
+     * 横条让开序号栏之后，左边那一条（[0, fillRight)）归谁画。
+     *
+     * 横条是用样式表的 margin-left 内缩的（见 scrollBarStyleSheet）：控件本身
+     * 还是整条铺满，只是轨道往里挪了。挪出来那一条轨道不画，露出什么由平台
+     * 说了算（当初轨道写 transparent 就是这么露出一条白带的）。所以这里直接
+     * 把它填成正文底色 —— 序号栏那一条带子从顶到底不断开，也不指望别人。
+     */
+    QColor paper;
+    int fillRight = 0;
+
 protected:
     void paintEvent(QPaintEvent *) override {
         QPainter painter(this);
+        if (fillRight > 0 && paper.isValid())
+            painter.fillRect(QRect(0, 0, fillRight, height()), paper);
         for (int i = 0; i < lines.size(); ++i) {
             const QPair<int, QColor> &line = lines.at(i);
             painter.fillRect(QRect(line.first, 0, 1, height()), line.second);
@@ -1278,12 +1292,12 @@ QVariantList EditorViewItem::marginPixelStats() const {
 
 /*
  * 自检用：编辑区底边那块补线控件的状态（见 BottomLines / updateBottomLines）。
- *   [0] 可见   [1] 鼠标穿透（横条还能拖）   [2] 不画背景（滚动条还看得见）
- *   [3] 自动填背景   [4] 补了几条线   [5] 控件高度
+ *   [0] 可见   [1] 鼠标穿透（横条还能拖）   [2] 不画系统背景   [3] 自动填背景
+ *   [4] 补了几条线   [5] 控件高度
  *
- * 为什么量属性而不是量像素：横条那一行是滚动条控件自己画的（stylesheet 里背景是
- * transparent，靠"父控件已经画过的内容"透出来），控件 grab() 出来的图里那一条
- * 本来就是没画过的底色，量它是量不准的。
+ * 量的是属性不是像素：那一行是滚动条控件自己画的，补线控件叠在它上面，
+ * 只填序号栏让出来的那一条 + 画那两条竖线。像素层面"滑块有没有压到行号栏"
+ * 另有 horizontalBarRowStats() 去数。
  */
 QVariantList EditorViewItem::bottomLinesState() const {
     QVariantList out{false, false, false, true, 0, 0};
@@ -1300,33 +1314,166 @@ QVariantList EditorViewItem::bottomLinesState() const {
     return out;
 }
 
-void EditorViewItem::styleChrome() {
-    if (!m_sci)
-        return;
+namespace {
 
-    /* ---- 1) 去掉边框 ---- */
-    m_sci->setFrameShape(QFrame::NoFrame);
-    m_sci->setFrameShadow(QFrame::Plain);
-    m_sci->setLineWidth(0);
-    m_sci->setMidLineWidth(0);
+/* 横条那一行的墨迹分布（见 EditorViewItem::horizontalBarRowStats） */
+struct BarRowInk {
+    int inGutter = 0;     // 序号栏那一条带子里的墨迹 —— 要 0
+    int handleRight = 0;  // 内缩右边的滑块 —— 要 > 0，不然上面那个 0 是空转
+};
 
-    /* ---- 2) 滚动条：深色、细、带圆角，轨道不见白 ---- */
+/*
+ * 只扫 img 里 y >= yTopLogical × scale 那一条（横条占的那一行）。
+ *
+ * 为什么必须限定这一行：往上是正文，行号栏里全是数字的墨迹，
+ * 不限定行就把"序号本身"当成"滑块压上来了"。
+ *
+ * bandRight = 序号栏那一条带子的右边界（分界线）；line = 分隔线那一列，
+ * 它本来就有墨，单独排掉。
+ */
+BarRowInk scanBarRow(const QImage &img, qreal scale, int yTopLogical, int bandRightLogical,
+                     int lineLogical, const QColor &paper) {
+    const QColor handle(0x4b, 0x4d, 0x4f);
+    const int bandRight = qRound(bandRightLogical * scale);
+    const int linePx = qRound(lineLogical * scale);
+    const int yTop = qMin(qRound(yTopLogical * scale), img.height() - 1);
+
+    BarRowInk r;
+    for (int y = yTop; y < img.height(); ++y) {
+        for (int x = 0; x < img.width(); ++x) {
+            const QColor c = img.pixelColor(x, y);
+            if (x < bandRight) {
+                if (x == linePx || c == paper)
+                    continue;
+                if (qAbs(c.red() - paper.red()) + qAbs(c.green() - paper.green())
+                        + qAbs(c.blue() - paper.blue())
+                    > 30)
+                    ++r.inGutter;
+            } else if (qAbs(c.red() - handle.red()) + qAbs(c.green() - handle.green())
+                           + qAbs(c.blue() - handle.blue())
+                       < 60) {
+                ++r.handleRight;
+            }
+        }
+    }
+    return r;
+}
+
+}  // namespace
+
+/* 横条占的那一行有多高（viewport 底边到控件底边）；-1 = 这一行不存在 */
+int EditorViewItem::barRowHeight() const {
+    if (!m_sci || !m_sci->viewport())
+        return -1;
+    const QRect vp = m_sci->viewport()->geometry();
+    const int h = m_sci->height() - (vp.bottom() + 1);
+    return h > 0 ? h : -1;
+}
+
+/*
+ * 自检用：横向滚动条那一行的墨迹分布（声明见头文件）。
+ *
+ * 返回 { 内缩(实际生效的), 序号栏宽(该内缩多少), 行高, 序号栏带子里的墨迹,
+ *        内缩右侧的滑块墨迹, 缩放(×1000), 抓图宽 }。
+ *
+ * 分界线用的是 gutterRightEdge()（从 Scintilla 现读的边距宽），**不是** m_hBarInset：
+ * 拿实际生效的那个值当界，旧行为（内缩 0）扫出来也是"界左边什么都没有"，
+ * 那条 0 就是空的 —— 尺子必须先能分辨对错，才谈得上钉住对。
+ */
+QVariantList EditorViewItem::horizontalBarRowStats() const {
+    QVariantList out{ -1, -1, -1, 0, 0, 1000, 0 };
+    if (!m_sci || !m_sciWidget)
+        return out;
+
+    /* 这一行就是 viewport 底下那一条；横条没出现时 viewport 铺到底 = 没得量 */
+    const int rowHeight = barRowHeight();
+    if (rowHeight < 0)
+        return out;
+
+    const QImage img = m_sciWidget->grab().toImage();
+    if (img.isNull() || img.width() <= 0)
+        return out;
+
+    const qreal scale =
+        m_sciWidget->width() > 0 ? qreal(img.width()) / qreal(m_sciWidget->width()) : 1.0;
+    const int top = m_sci->viewport()->geometry().bottom() + 1;
+    const int gutter = gutterRightEdge();
+    const BarRowInk ink = scanBarRow(img, scale, top, gutter,
+                                     marginWidth(0) + marginWidth(1), m_paperColor);
+
+    return QVariantList{ m_hBarInset, gutter, rowHeight, ink.inGutter, ink.handleRight,
+                         int(scale * 1000), img.width() };
+}
+
+/*
+ * 自检用：同一件事在**真桌面**上量一遍（声明见头文件）。
+ *
+ * 为什么要多这一遍：上面那条抓的是控件自己重画的图。样式表里那个 margin-left
+ * 到底有没有把轨道挪开、挪出来的那一条屏幕上是什么颜色，只有从显卡合成完的
+ * 那一帧上数像素才算数（这个工程里"属性都对、画出来不对"栽过好几次）。
+ */
+QVariantList EditorViewItem::horizontalBarRowScreenStats() const {
+    /* { 量到了吗, 内缩, 序号栏宽, 行高, 带子里的墨迹, 右侧滑块墨迹, 屏 DPR(×1000) } */
+    QVariantList out{ false, -1, -1, -1, 0, 0, 1000 };
+    if (!m_sci || !m_sciWidget || !m_sciWidget->isVisible())
+        return out;
+
+    const int rowHeight = barRowHeight();
+    if (rowHeight < 0)
+        return out;
+
+    QScreen *screen = m_sciWidget->screen();
+    const QPoint tl = m_sciWidget->mapToGlobal(QPoint(0, 0));
+    const QRect g(tl, m_sciWidget->size());
+    if (!screen || g.width() < 2 || g.height() < 2)
+        return out;
+
+    const QImage shot =
+        screen->grabWindow(0, g.x(), g.y(), g.width(), g.height()).toImage();
+    if (shot.isNull() || shot.width() <= 0)
+        return out;
+
+    const qreal scale = qreal(shot.width()) / qreal(g.width());
+    const int top = m_sci->viewport()->geometry().bottom() + 1;
+    const int gutter = gutterRightEdge();
+    const BarRowInk ink = scanBarRow(shot, scale, top, gutter,
+                                     marginWidth(0) + marginWidth(1), m_paperColor);
+
     /*
-     * 规则之间必须有换行（写成 \n 转义）。
-     *
-     * 最早把所有规则拼成一整行、选择器之间只隔一个空格，Qt 的 CSS 解析器
-     * 会整段判为无效 —— 滚动条保持系统默认样式（实测右边一条 12px 宽的
-     * #f3f3f3 浅色竖带）。加了换行才会生效。
-     *
-     * 轨道（groove）的颜色也要**写死**，不能写 transparent。
-     *
-     * transparent 是"这一层不画"，露出来的是底下那一层 —— 而滚动条是
-     * QAbstractScrollArea 的子控件，它那块底由谁画、画成什么色是平台/样式
-     * 说了算。滑块一直是深色的（样式表确实生效了），轨道却在有的机器上露出
-     * 一条 12px 的 #f2f2f2 白带（用户报的"这个滚动条白色背景去掉"就是它）。
-     * 所以 %3 直接把底色刷上去，不再指望别人。
+     * 滑块那一栏同时当"这一帧真的拍到的是编辑控件"的证人：窗口被别的窗盖住、
+     * 或者根本没在前台，拍到的就是别的东西，滑块数不出来 —— 那时给"没量到"，
+     * 不给假绿，也不给假红。
      */
-    const QString bar = QStringLiteral(
+    return QVariantList{ ink.handleRight > 0, m_hBarInset, gutter, rowHeight, ink.inGutter,
+                         ink.handleRight, int(scale * 1000) };
+}
+
+/*
+ * 两条滚动条的样式表（滑块深灰、轨道刷成正文底色）。
+ *
+ * 规则之间必须有换行（写成 \n 转义）。
+ *
+ * 最早把所有规则拼成一整行、选择器之间只隔一个空格，Qt 的 CSS 解析器
+ * 会整段判为无效 —— 滚动条保持系统默认样式（实测右边一条 12px 宽的
+ * #f3f3f3 浅色竖带）。加了换行才会生效。
+ *
+ * 轨道（groove）的颜色也要**写死**，不能写 transparent。
+ *
+ * transparent 是"这一层不画"，露出来的是底下那一层 —— 而滚动条是
+ * QAbstractScrollArea 的子控件，它那块底由谁画、画成什么色是平台/样式
+ * 说了算。滑块一直是深色的（样式表确实生效了），轨道却在有的机器上露出
+ * 一条 12px 的 #f2f2f2 白带（用户报的"这个滚动条白色背景去掉"就是它）。
+ * 所以 %3 直接把底色刷上去，不再指望别人。
+ *
+ * 横条那条 margin-left（%4 = m_hBarInset）是"让开序号栏"：
+ * QAbstractScrollArea 把横条整条铺满控件宽度，也就是从最左边（行号栏底下）
+ * 就开始 —— 长行一滚，滑块会爬到行号栏下面。这里按序号栏的右边缘
+ * （见 gutterRightEdge）把轨道整体右移；控件本身还是整条宽，只是让出来的
+ * 那一段既不画轨道、也点不着（样式表的 margin 会同时缩掉命中区），
+ * 底色由补线控件补上（见 BottomLines::fillRight）。
+ */
+QString EditorViewItem::scrollBarStyleSheet() const {
+    return QStringLiteral(
         "QScrollBar:vertical {\n"
         "    background: %3;\n"
         "    width: 12px;\n"
@@ -1357,7 +1504,7 @@ void EditorViewItem::styleChrome() {
         "QScrollBar:horizontal {\n"
         "    background: %3;\n"
         "    height: 12px;\n"
-        "    margin: 0px;\n"
+        "    margin: 0px 0px 0px %4px;\n"
         "    border: none;\n"
         "}\n"
         "QScrollBar::handle:horizontal {\n"
@@ -1379,7 +1526,62 @@ void EditorViewItem::styleChrome() {
         "}\n")
         .arg(QStringLiteral("#4b4d4f"),          // 滑块
              QStringLiteral("#5f6266"),          // 悬停
-             m_paperColor.name());               // 轨道（= 正文底色）
+             m_paperColor.name(),                 // 轨道（= 正文底色）
+             QString::number(m_hBarInset));       // 横条左内缩（逻辑像素）
+}
+
+/*
+ * 序号栏那一条带的右边缘 = 三条边距宽之和（行号 / 折叠 / 分隔线）。
+ *
+ * 边距是从 x=0 一格一格排下来的（Scintilla 的 MarginView::PaintMargin：
+ * rcSelMargin 从 rcMargin.left=0 起，每条边距接一条），所以栏宽就是三条之和。
+ *
+ * **不含**左留白（SCI_SETMARGINLEFT）：那个留白在分隔线和正文**之间**
+ * （ViewStyle.cpp: textStart = fixedColumnWidth = Σ边距 + leftMarginWidth），
+ * 属于正文侧，不算序号栏。
+ */
+int EditorViewItem::gutterRightEdge() const {
+    if (!m_sci)
+        return 0;
+
+    int x = 0;
+    for (int m = 0; m <= 2; ++m)
+        x += qMax(0, marginWidth(m));
+    return x;
+}
+
+/*
+ * 把横条的左内缩同步到当前的序号栏宽度。
+ *
+ * 只在数值真的变了才重设样式表：applyMargins 是**每次击键**都会走的
+ * （textChanged / linesChanged 都连着它），而栏宽按 4 位定死、平时恒定，
+ * 不该跟着击键重排滚动条。
+ */
+void EditorViewItem::applyScrollBarInset() {
+    if (!m_sci)
+        return;
+
+    const int inset = gutterRightEdge();
+    if (inset == m_hBarInset)
+        return;
+
+    m_hBarInset = inset;
+    if (auto *hb = m_sci->horizontalScrollBar())
+        hb->setStyleSheet(scrollBarStyleSheet());
+}
+
+void EditorViewItem::styleChrome() {
+    if (!m_sci)
+        return;
+
+    /* ---- 1) 去掉边框 ---- */
+    m_sci->setFrameShape(QFrame::NoFrame);
+    m_sci->setFrameShadow(QFrame::Plain);
+    m_sci->setLineWidth(0);
+    m_sci->setMidLineWidth(0);
+
+    /* ---- 2) 滚动条：深色、细、带圆角，轨道不见白，横条让开序号栏 ---- */
+    const QString bar = scrollBarStyleSheet();
 
     /*
      * 整块控件的 Window 色也要设成底色。
@@ -1669,7 +1871,8 @@ void EditorViewItem::applyMargins() {
     applyFoldMarkers();
     applyMarginTheme();
 
-    /* 边距宽度变了 → 底边那条补线的位置也得跟着挪 */
+    /* 栏宽变了 → 横条的左内缩跟着变；再底边那条补线的位置也得跟着挪 */
+    applyScrollBarInset();
     updateBottomLines();
 }
 
@@ -2012,6 +2215,9 @@ void EditorViewItem::updateBottomLines() {
     }
 
     overlay->lines = lines;
+    /* 横条让开的那一条（序号栏底下）由这块控件填成正文底色，见 BottomLines::fillRight */
+    overlay->paper = m_paperColor;
+    overlay->fillRight = m_hBarInset;
     overlay->setGeometry(0, top, m_sci->width(), height);
     overlay->raise();
     overlay->show();
@@ -5143,18 +5349,33 @@ QVariantList EditorViewItem::scrollBarPixelStats() const {
     if (!m_sci)
         return out;
 
-    /* 量一条：返回近白像素数（不可见 / 抓不到图给 -1），顺手把轨道色带出来 */
-    auto scan = [](QScrollBar *bar, QColor *track) -> int {
+    /*
+     * 量一条：返回近白像素数（不可见 / 抓不到图给 -1），顺手把轨道色带出来。
+     *
+     * xSkipLogical：横条左边让开序号栏内缩了一段（见 scrollBarStyleSheet），那一段
+     * 是样式表的 margin 区（轨道不画；屏幕上由补线控件填底色），不算轨道，
+     * 从内缩右边开始数。
+     *
+     * 轨道色取哪一像素：竖条还是老地方（左上角，滑块够不到）；横条取**最右端**
+     * —— 这条用例是刚灌完长文档、value 还是 0，滑块贴在轨道左边，最右端必然是
+     * add-page（= 轨道色）。
+     */
+    auto scan = [](QScrollBar *bar, QColor *track, int xSkipLogical) -> int {
         if (!bar || !bar->isVisible())
             return -1;
         const QImage img = bar->grab().toImage();
         if (img.isNull() || img.width() <= 0 || img.height() <= 0)
             return -1;
-        if (track)
-            *track = img.pixelColor(0, 0);
+        const qreal scale = bar->width() > 0 ? qreal(img.width()) / qreal(bar->width()) : 1.0;
+        const int xSkip = qRound(xSkipLogical * scale);
+        if (track) {
+            *track = bar->orientation() == Qt::Horizontal
+                         ? img.pixelColor(img.width() - 2, img.height() / 2)
+                         : img.pixelColor(0, 0);
+        }
         int white = 0;
         for (int y = 0; y < img.height(); ++y) {
-            for (int x = 0; x < img.width(); ++x) {
+            for (int x = xSkip; x < img.width(); ++x) {
                 const QColor c = img.pixelColor(x, y);
                 if (c.red() >= 250 && c.green() >= 250 && c.blue() >= 250)
                     ++white;
@@ -5168,8 +5389,8 @@ QVariantList EditorViewItem::scrollBarPixelStats() const {
     QScrollBar *vb = m_sci->verticalScrollBar();
     QScrollBar *hb = m_sci->horizontalScrollBar();
 
-    out[0] = scan(vb, &vTrack);
-    out[1] = scan(hb, &hTrack);
+    out[0] = scan(vb, &vTrack, 0);
+    out[1] = scan(hb, &hTrack, m_hBarInset);
     out[2] = vb && vb->isVisible();
     out[3] = hb && hb->isVisible();
     out[4] = vTrack.isValid() ? int(vTrack.rgb() & 0x00ffffff) : 0;

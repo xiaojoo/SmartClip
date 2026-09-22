@@ -319,6 +319,37 @@ public:
      */
     Q_INVOKABLE QVariantList bottomLinesState() const;
 
+    /*
+     * 自检用：编辑控件**最底下那一行**（横向滚动条占的那一条）从左到右扫一遍。
+     *
+     * 钉的是"滑块不许爬到序号栏底下"。量的是抓图里的墨迹，不是属性值：
+     * 样式表里 margin-left 写没写、生效没生效，属性上看不出来（Qt 不会把它
+     * 回报成几何变化），只有那一行的像素能说话。
+     *
+     * 返回 { 内缩(实际生效), 序号栏宽(该内缩多少), 行高, 序号栏带子里的墨迹数,
+     *       内缩右侧的滑块墨迹数, 抓图缩放×1000, 抓图宽 }。
+     *   - 分界线是**现读的边距宽**（gutterRightEdge），不是实际生效的那个内缩：
+     *     拿内缩当界，旧行为（内缩 0）扫出来也是干净的，那条绿就是空转；
+     *   - 第 4 项：界左边"既不是正文底色、也不是分隔线"的像素，旧行为量到的是
+     *     滑块（深灰 #4b4d4f）压在行号栏底下，现在必须是 0；
+     *   - 第 5 项：界右边数得到的滑块像素，必须 **> 0** —— 不然上一条的 0
+     *     只是"横条根本没画出来"。
+     * 横条没出现（行高 0）时前三项给 -1，不能当成 0 混过去。
+     */
+    Q_INVOKABLE QVariantList horizontalBarRowStats() const;
+
+    /*
+     * 自检用：同一件事在**真桌面**上再量一遍。
+     *
+     * 上面那条抓的是控件自己重画的图；样式表里那个 margin-left 到底把轨道挪开
+     * 没有、挪出来的那一条屏幕上是什么，只有合成完的那一帧算数。
+     *
+     * 返回 { 量到了吗, 内缩, 序号栏宽, 行高, 带子里的墨迹, 右侧滑块墨迹, 屏 DPR×1000 }。
+     * "量到了吗" = 那一帧里数得出滑块 —— 窗口被盖住时数不出来，那就是没量到，
+     * 既不算绿也不算红。
+     */
+    Q_INVOKABLE QVariantList horizontalBarRowScreenStats() const;
+
     int paddingLeft() const { return m_paddingLeft; }
     void setPaddingLeft(int v);
     int paddingTop() const { return m_paddingTop; }
@@ -1169,6 +1200,19 @@ private:
     void applyMargins();
 
     /*
+     * 横向滚动条的左内缩（见 .cpp 的 scrollBarStyleSheet）。
+     *
+     * 横条原本是整条铺满编辑控件宽度的 —— 也就是从行号栏底下就开始，
+     * 长行一滚滑块就爬到序号栏下面。这里把轨道按序号栏宽度右移。
+     */
+    QString scrollBarStyleSheet() const;
+    void applyScrollBarInset();
+    /* 序号栏那一条带的右边缘 = 三条边距宽之和（不含正文侧的左留白） */
+    int gutterRightEdge() const;
+    /* 横条占的那一行有多高（viewport 底边到控件底边）；-1 = 这一行不存在 */
+    int barRowHeight() const;
+
+    /*
      * 字数参考线（Scintilla 的 edge）。
      *
      * 独立于边距：边距管"行号右边那条分隔线"，edge 管"第 N 个字那条线"。
@@ -1297,6 +1341,12 @@ private:
     int m_paddingTop = 0;
     int m_paddingRight = 0;
     int m_paddingBottom = 0;
+
+    /*
+     * 横条样式表里那个 margin-left（逻辑像素）= 上一次同步时的序号栏宽。
+     * applyMargins 每次击键都会走，靠这个值判"有没有真的变"，不变就不重设样式表。
+     */
+    int m_hBarInset = 0;
 
     /* 最近一次量到的最长行宽（像素），自检诊断用，见 horizontalScrollState() */
     long m_lastContentWidth = 0;

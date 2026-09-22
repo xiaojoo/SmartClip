@@ -6866,6 +6866,49 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
                   .arg(vTrack, 6, 16, QLatin1Char('0'))
                   .arg(hTrack, 6, 16, QLatin1Char('0')));
 
+        /*
+         * 横条左边要**让开序号栏**（用户提的：滚动条从序号栏右边开始）。
+         *
+         * 量的是编辑控件最底下那一行的像素（见 horizontalBarRowStats）：
+         * 序号栏那一条带子里不许有滑块的墨迹，而内缩右边必须数得到滑块 ——
+         * 后面那条是防前面那条空转（滑块整个没画出来也会"干净"）。
+         */
+        const QVariantList row = view->horizontalBarRowStats();
+        const int inset = row.value(0).toInt();
+        const int gutter = row.value(1).toInt();
+        const int rowH = row.value(2).toInt();
+        const int inkInGutter = row.value(3).toInt();
+        const int inkRight = row.value(4).toInt();
+        out() << "        （内缩 " << inset << "px / 序号栏宽 " << gutter
+              << "px / 那一行高 " << rowH << "px ；带子里墨迹 " << inkInGutter
+              << " 个 / 界右侧滑块 " << inkRight << " 个）" << Qt::endl;
+
+        check(gutter > 0 && rowH > 0 && inset == gutter,
+              QStringLiteral("横条内缩 = 序号栏宽度（不是 0、也没多缩）"),
+              QStringLiteral("内缩 %1 / 栏宽 %2 / 行高 %3").arg(inset).arg(gutter).arg(rowH));
+        check(inkInGutter == 0,
+              QStringLiteral("序号栏底下那一条没有滑块（横条不压行号栏）"),
+              QStringLiteral("带子里 %1 个墨迹点").arg(inkInGutter));
+        check(inkRight > 0,
+              QStringLiteral("内缩之后横条照样画得出来（上一条不是空转）"),
+              QStringLiteral("右侧滑块 %1 个点").arg(inkRight));
+
+        /*
+         * 同一件事在真桌面上量一遍（控件 grab 是重画的，屏幕才是合成完的那一帧）。
+         * 窗口被挡住时这一条数不出滑块，就当没量到 —— 不拿它冒充绿，也不报假红。
+         */
+        const QVariantList shot = view->horizontalBarRowScreenStats();
+        if (shot.value(0).toBool()) {
+            out() << "        （真桌面：内缩 " << shot.value(1).toInt() << "px / 带子里墨迹 "
+                  << shot.value(4).toInt() << " 个 / 界右侧滑块 " << shot.value(5).toInt()
+                  << " 个 / 屏 DPR " << shot.value(6).toInt() / 1000.0 << "）" << Qt::endl;
+            check(shot.value(4).toInt() == 0,
+                  QStringLiteral("真桌面上同样不压序号栏"),
+                  QStringLiteral("带子里 %1 个墨迹点").arg(shot.value(4).toInt()));
+        } else {
+            out() << "        （真桌面那一条没量到：窗口不可见或被盖住）" << Qt::endl;
+        }
+
         QGuiApplication::clipboard()->setText(oldClipboard);
         view->closeDocument(view->currentIndex());
         view->setWrapEnabled(oldWrap);
