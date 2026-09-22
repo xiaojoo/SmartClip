@@ -1972,6 +1972,11 @@ Rectangle {
         return topBar.tabLeft(label)
     }
 
+    /* 自检用：某一栏在宿主窗口里的上边（和 topBarTabLeft 配成一对，见 TopBar::tabTop） */
+    function topBarTabTop(label) {
+        return topBar.tabTop(label)
+    }
+
     /*
      * 自检用：**像鼠标那样**点某一栏 —— 把那一栏自己当锚点传进去。
      *
@@ -2451,8 +2456,8 @@ Rectangle {
             statusHasDoc: statusBar.hasDoc,
             findOpened: editor.findBar.opened,
             findReplaceVisible: editor.findBar.replaceVisible,
-            /* 下拉菜单：长菜单（语言 27 项）必须限高 + 可滚动，
-               否则会一路盖住左侧导航栏（见 DropdownMenu.maxMenuHeight） */
+            /* 下拉菜单：条目总高 / 画出来的高 / 上限（= 宿主可用高度），
+               规则是"内容多高画多高，超过上限才出滚动条"（见 DropdownMenu.maxMenuHeight） */
             menuOpened: ddMenu.opened,
             /*
              * 弹窗"露出来之后"被挪过几次（见 DropdownMenu.openShifts）。
@@ -2473,6 +2478,12 @@ Rectangle {
             menuHeight: ddMenu.menuHeight,
             menuContentHeight: ddMenu.entriesHeight,
             menuScrollable: ddMenu.scrollable,
+            /* 菜单的上限（= 宿主可用高度，见 DropdownMenu.maxMenuHeight）：
+               自检要拿它核"画出来的高度 = min(内容高, 上限)"这条规则 */
+            menuMaxHeight: ddMenu.maxMenuHeight,
+            /* 宿主可用高 / 子栏当场的上限：自检核"画出来的高 = min(内容高, 上限)" */
+            menuHostHeight: ddMenu.hostHeight,
+            submenuCap: ddMenu.submenuCap,
             /* 有图标的菜单：图标在左、快捷键在右（工具栏已取消） */
             menuHasIcons: ddMenu.hasIcons,
             /* 弹窗里已经建出来的条目数（"露出来之后再补内容"那条自检读它） */
@@ -2498,6 +2509,8 @@ Rectangle {
             menuPaneGap: ddMenu.paneGap,
             menuTotalWidth: ddMenu.width,
             menuTotalHeight: ddMenu.height,
+            /* 弹窗"该有多大"和"实际有多大"：不一致就是 Popup 没跟着长（子栏会被裁掉） */
+            menuImplicitHeight: ddMenu.implicitHeight,
 
             /*
              * 内容区 tab 的右键菜单落在哪。

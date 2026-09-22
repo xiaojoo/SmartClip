@@ -177,21 +177,56 @@ Popup {
     readonly property real subEntriesHeight: paneHeight(subEntries)
 
     /*
-     * 菜单最高能有多高。
+     * 菜单最高能有多高 = **宿主窗口可用高度**（内容多高就画多高，装不下才滚）。
      *
-     * 语言菜单有 27 项，不限高就是 764px —— 会盖住左侧导航栏和大半个窗口。
-     * 主流编辑器的长菜单都是限高 + 内部滚动，这里照做：最多到宿主窗口高度的
-     * 一半左右，超出部分用滚轮 / 右侧细滚动条看。
+     * 这里原来还夹着一道固定的 460：语言菜单 27 项 764px 确实被治住了，可是
+     * 「文件」622 / 「视图」595 / 「编辑」510 三条因此**常年带一条滚动条**，
+     * 而 900 高的窗口下面明明放着（用户 2026-09-22 提的"文件下拉不要出现滚动条，
+     * 超出了才出现滚动条"）。固定顶换成"按窗口给"：窗口够高就整块展开，
+     * 窗口矮到装不下（比如压矮主窗口、小屏、上下分栏）才限高 + 出滚动条。
      *
      * 高度取宿主（Main.qml 的根 Rectangle，即整个窗口内容区）的高度：
      * Popup 本身不是 Item，拿不到 Window 附着属性，只能顺着 parent 往上问。
      */
     readonly property real hostHeight: root.parent ? root.parent.height : 800
-    readonly property real maxMenuHeight: Math.max(168, Math.min(hostHeight - 24, 460))
+    readonly property real maxMenuHeight: Math.max(168, hostHeight - 24)
+
+    /*
+     * 这一次打开，主栏最高画到哪儿 = min(全局上限, 锚点下面还剩的空间)。
+     *
+     * 全局上限（maxMenuHeight）只按宿主窗口算，可菜单是挂在**某一栏下面**的：
+     * 「设置」内容 ~900px，比"顶栏下沿到窗口底"那 865px 还高，光按全局算就会
+     * 判定"下面放不下"→ 翻到锚点上方 → 被夹回 y=2，整块压在导航栏上。
+     * 按当场的空间再封一道顶，它就老老实实挂在栏下、自己出滚动条。
+     *
+     * 每次 openFor / openAtPoint 重算（窗口拉高拉矮、换锚点都跟着走）。
+     */
+    property real openCap: maxMenuHeight
 
     /* 主菜单那块面板实际画出来的高度 */
-    readonly property real menuHeight: Math.min(entriesHeight, maxMenuHeight)
+    readonly property real menuHeight: Math.min(entriesHeight, openCap)
     readonly property bool scrollable: entriesHeight > menuHeight + 1
+
+    /*
+     * 子菜单那一栏的上限。
+     *
+     * 除了全局上限，还要封顶到"这一行往下还剩多少"：子栏要是能从中间某一行一直
+     * 伸出宿主下沿，展开时就得把整块弹窗往上挪 —— 而"露着的时候挪位置"在 Windows
+     * 上就是 DWM 重放旧画面那一帧（闪），那份账本文件开头躲的就是它。
+     * 宁可子栏自己滚，也不挪窗口。
+     *
+     * 写成现算的只读绑定（不是 openSubmenu 里赋一次值）：宿主高度、弹窗 y、
+     * 那一行的位置任何一个变了，它都跟着走。
+     */
+    readonly property real submenuRoomBelow: root.parent
+        ? root.parent.height - 4 - (root.y + submenuTop) : maxMenuHeight
+    /*
+     * 这里**不留下限**（不是"至少也给人家 168"）：留了下限，弹窗总高就会顶穿宿主
+     * 下沿，展开那一下就得把窗口往上挪 —— 挪一下就是 DWM 重放旧画面那一帧。
+     * 真挤到一点空间都不剩（宿主很矮、又是最后一行），就是这一栏暂时不出来，
+     * 把主栏滚一滚，行位置一变空间就回来了。
+     */
+    readonly property real submenuCap: Math.max(0, Math.min(maxMenuHeight, submenuRoomBelow))
 
     /*
      * ======================================================================
@@ -230,7 +265,7 @@ Popup {
          * **y=2 —— 整条菜单压在导航栏上**（用户报的"设置这个下拉框贴在顶上了"）。
          * 而菜单真实高度只有 460，下面明明放得下。
          */
-        var worst = Math.min(paneHeight(items), maxMenuHeight)
+        var worst = Math.min(paneHeight(items), openCap)
         if (!items)
             return worst
         var rowTop = panePadding
@@ -238,12 +273,12 @@ Popup {
             var entry = items[i]
             var isSub = entry && entry.submenu === true && entry.items && entry.items.length > 0
             if (isSub) {
-                var subH = Math.min(paneHeight(entry.items), maxMenuHeight)
+                var subH = Math.min(paneHeight(entry.items), openCap)
                 worst = Math.max(worst, rowTop + subH)
             }
             rowTop += (entry && entry.separator) ? separatorHeight : itemHeight
         }
-        return Math.min(worst, maxMenuHeight)
+        return Math.min(worst, openCap)
     }
 
     /* 这一份菜单里有没有"能展开"的条目（决定宽度要不要按两栏预留） */
@@ -258,6 +293,24 @@ Popup {
         return false
     }
 
+    /*
+     * 定位时到底按多高预留 = min(最坏展开高, 锚点下面还剩的空间)，但**至少装得下主栏**。
+     *
+     * 为什么要有这一层封顶（2026-09-22）：上限从固定的 460 换成"宿主可用高度"之后，
+     * 带子菜单的「视图」「设置」算出来的 worstExpandedHeight 就是 876，
+     * openFor 一看 `31 + 876 > 896` 就翻到锚点上面，再被 `Math.max(2, …)` 夹回
+     * **y=2 —— 菜单整个压在导航栏上**（用户报的"设置/视图锚点不对，要在导航栏下"）。
+     * 预留只是"防挪"的手段，不该反过来决定菜单挂到哪儿。
+     *
+     * 封顶之后还放不下子栏吗？放得下：子栏自己按"这一行往下还剩多少"收高
+     * （见 submenuCap），所以弹窗的总高永远不超过宿主下沿，展开时一次都不用挪。
+     * 主栏本身在下面真放不下时，照旧翻到锚点上方。
+     */
+    function reservedHeight(items, roomBelow) {
+        return Math.max(Math.min(paneHeight(items), openCap),
+                        Math.min(worstExpandedHeight(items), roomBelow))
+    }
+
     /* 开之前用来夹位置的那两个数（见 worstExpandedHeight 的说明） */
     function worstExpandedWidth(items) {
         return hasSubmenuEntry(items) ? paneWidth * 2 + paneGap : paneWidth
@@ -267,7 +320,7 @@ Popup {
     readonly property bool submenuOpened: subEntries !== undefined && subEntries !== null
                                           && subEntries.length > 0
     readonly property real submenuHeight: submenuOpened
-                                          ? Math.min(subEntriesHeight, maxMenuHeight) : 0
+                                          ? Math.min(subEntriesHeight, submenuCap) : 0
     readonly property bool submenuScrollable: subEntriesHeight > submenuHeight + 1
     readonly property bool submenuHasIcons: paneHasIcons(subEntries)
 
@@ -422,7 +475,9 @@ Popup {
          * （实测：自检"展开子菜单时弹窗的左上角一动不动"就是这么红的）。
          */
         var worstW = worstExpandedWidth(items)
-        var worstH = worstExpandedHeight(items)
+        var roomBelow = host.height - 4 - below.y
+        openCap = Math.max(168, Math.min(maxMenuHeight, roomBelow))
+        var worstH = reservedHeight(items, roomBelow)
 
         var px = Math.max(2, Math.min(below.x, host.width - worstW - 4))
         var py = below.y
@@ -467,7 +522,9 @@ Popup {
         var host = root.parent
         var p = anchor ? anchor.mapToItem(host, px, py) : Qt.point(px, py)
         var worstW = worstExpandedWidth(items)
-        var worstH = worstExpandedHeight(items)
+        var roomBelow = host.height - 4 - p.y
+        openCap = Math.max(168, Math.min(maxMenuHeight, roomBelow))
+        var worstH = reservedHeight(items, roomBelow)
 
         root.x = Math.round(Math.max(2, Math.min(p.x, host.width - worstW - 4)))
         root.y = Math.round(Math.max(2, Math.min(p.y, host.height - worstH - 4)))
@@ -512,15 +569,25 @@ Popup {
          * 这里保留夹取只当兜底 —— 真走到这儿就说明上面那份预留算漏了，
          * openShifts 记一笔，自检("弹窗：展开子菜单没有走到"露着的时候挪位置"
          * 那条兜底")会红。
+         *
+         * 但这里**不能读 implicitHeight / implicitWidth**：这一句和上面
+         * `subEntries = items` 在同一个 JS 回合里，那两个数还是"只有主栏"时的旧值。
+         * 2026-09-22 就踩在这儿 —— 兜底按旧高度把 y 从 31 顶到 441，而子栏的当场
+         * 上限（submenuCap）是按 y 算的，被这个错 y 一压直接缩成 0：屏幕上右边那块
+         * 根本出不来。所以按"这一句之后会落到多少"现算一遍再夹。
          */
-        if (host && root.y + implicitHeight > host.height - 4) {
-            const ny = Math.max(2, host.height - implicitHeight - 4)
+        var willSubH = Math.min(subEntriesHeight, Math.max(0, Math.min(maxMenuHeight,
+                            host ? host.height - 4 - (root.y + submenuTop) : maxMenuHeight)))
+        var willH = Math.max(menuHeight, submenuTop + willSubH)
+        var willW = submenuInset + paneWidth
+        if (host && root.y + willH > host.height - 4) {
+            const ny = Math.max(2, host.height - willH - 4)
             if (root.opened && ny !== root.y)
                 ++openShifts
             root.y = ny
         }
-        if (host && root.x + implicitWidth > host.width - 4) {
-            const nx = Math.max(2, host.width - implicitWidth - 4)
+        if (host && root.x + willW > host.width - 4) {
+            const nx = Math.max(2, host.width - willW - 4)
             if (root.opened && nx !== root.x)
                 ++openShifts
             root.x = nx

@@ -137,6 +137,17 @@ Rectangle {
         return cell ? cell.mapToItem(root, 0, 0).x : -1
     }
 
+    /*
+     * 某一栏在宿主窗口里的上边（自检用）。
+     *
+     * 和 tabLeft 配成一对：菜单的落点是 (那一栏的左, 那一栏的下沿 + 3)，
+     * 只比 x 抓不到"整块被顶到窗口最上面压在导航栏上"那一类（y 错了 x 全对）。
+     */
+    function tabTop(label) {
+        var cell = root.tabItem(label)
+        return cell ? cell.mapToItem(root, 0, 0).y : -1
+    }
+
     IconProvider { id: icons }
 
     RowLayout {

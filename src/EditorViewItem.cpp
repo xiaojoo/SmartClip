@@ -1428,6 +1428,25 @@ QVariantList EditorViewItem::horizontalBarRowScreenStats() const {
     if (!screen || g.width() < 2 || g.height() < 2)
         return out;
 
+    /*
+     * 先确认这一帧拍到的确实是编辑控件：本进程**别的**顶层窗口压在这块矩形上，
+     * 就当没量到。
+     *
+     * 为什么必须挡这一道：自检后半段常有下拉菜单 / 卡片还没收干净，而菜单的描边
+     * 色 #4b4d4f 和滚动条滑块**是同一个数**（见 kGuideLine 那一带的配色）——
+     * 只数"有没有滑块色的点"会被它冒充：2026-09-22 就出现过一次，菜单盖住编辑区
+     * 左下角，量出"带子里 564 个墨点"报了条假红。
+     * QGuiApplication::topLevelWindows() 只列本进程的窗口，正好就是这些污染源。
+     */
+    const QWindow *own = m_sciWidget->windowHandle();
+    const auto tops = QGuiApplication::topLevelWindows();
+    for (QWindow *w : tops) {
+        if (!w || !w->isVisible() || w == own)
+            continue;
+        if (w->geometry().intersects(g))
+            return out;
+    }
+
     const QImage shot =
         screen->grabWindow(0, g.x(), g.y(), g.width(), g.height()).toImage();
     if (shot.isNull() || shot.width() <= 0)
