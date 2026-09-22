@@ -2191,6 +2191,19 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
          */
         {
             QCoreApplication::processEvents();
+            /*
+             * 这一节要参考线**开着**才量得到，而开着/关着是**用户的设置**
+             * （QSettings 里那份，Main.qml 启动时恢复出来）。前面那节按"自检不改
+             * 用户设置"把它原样放回去了 —— 于是用户把参考线点掉之后，这两条就常年红
+             * （09-21 起挂在红位上的就是它，量到的都是 -1 = 根本没线，不是没补到底）。
+             * 所以这里自己开、自己钉，量完再原样放回去。
+             */
+            const bool wasRuler = view->rulerVisible();
+            const int wasRulerColumn = view->rulerColumn();
+            view->setRulerVisible(true);
+            view->setRulerColumn(80);   /* 80 字一定落在这一栏的可视宽度里 */
+            QCoreApplication::processEvents();
+
             const QVariantList ruler = view->rulerPixelStats();
             const QVariantList margin = view->marginPixelStats();
             out() << "        （有横条时：参考线离底边 " << ruler.value(2).toInt()
@@ -2215,6 +2228,10 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
                       .arg(bl.value(0).toBool()).arg(bl.value(1).toBool())
                       .arg(bl.value(2).toBool()).arg(bl.value(3).toBool())
                       .arg(bl.value(4).toInt()).arg(bl.value(5).toInt()));
+
+            view->setRulerVisible(wasRuler);
+            view->setRulerColumn(wasRulerColumn);
+            QCoreApplication::processEvents();
         }
         check(big.value(QStringLiteral("contentWidth")).toInt()
               > big.value(QStringLiteral("pageStep")).toInt(),
