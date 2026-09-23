@@ -527,6 +527,13 @@ Rectangle {
      */
     function toggleTerminalPanel() {
         terminalHidden = !terminalHidden
+        /*
+         * 收起时把"最大化"一起退掉：中间那一行的 visible 只看 terminalMaximized，
+         * 留着它的话面板一收就两头落空 —— 中间行藏着、面板高度给 0，
+         * 顶栏和状态栏之间整片空白。图标条现在常驻，这一条更容易被点出来。
+         */
+        if (terminalHidden)
+            terminalMaximized = false
         Cmd.remember("termHidden", terminalHidden ? "1" : "0")
         if (!terminalHidden) {
             /*
@@ -2741,6 +2748,21 @@ Rectangle {
             gapWidth: splitterGap.width,
             midRowTop: window.mapFromItem(midRow, 0, 0).y,
             midRowBottom: window.mapFromItem(midRow, 0, 0).y + midRow.height,
+            /*
+             * 左边图标条和它底部那一组的位置（自检量"终端展开 / 最大化时
+             * 那一格会不会跟着跑"，见 src/SelfTestTerminal.cpp）。
+             *
+             * 一律 mapToItem 当场算：写成属性绑定会被缓存（mapToItem 不给
+             * 绑定建依赖，别处吃过这个亏），这里要的就是"每次读都是现值"。
+             */
+            stripVisible: navStrip.visible,
+            midRowVisible: midRow.visible,
+            stripTop: navStrip.mapToItem(window.contentItem, 0, 0).y,
+            stripHeight: navStrip.height,
+            termCellY: navTerminalCell.mapToItem(window.contentItem, 0, 0).y,
+            termCellX: navTerminalCell.mapToItem(window.contentItem, 0, 0).x,
+            gearCellY: gearCell.mapToItem(window.contentItem, 0, 0).y,
+            navSlotWidth: navStripSlot.width,
             topBarHeight: topBar.height,
             statusBarHeight: statusBar.height,
             windowWidth: window.width,
@@ -3623,184 +3645,15 @@ Rectangle {
              */
             visible: !window.terminalMaximized
 
-            // ---- 左侧工具窗口图标条（已取消边框） ----
-            Rectangle {
-                id: navStrip
+            /*
+             * 图标条的槽位：只占住最左边那 34px，本体在下面的 contentRoot 里。
+             *
+             * 留着它是为了让左树 / 编辑区的横向几何和以前一模一样
+             * （实测左树卡片起于 x=34、终端面板那条 Layout.leftMargin: 34 也是它）。
+             */
+            Item {
+                id: navStripSlot
                 Layout.fillHeight: true; Layout.preferredWidth: 34
-                color: "#313335"
-                // 已删除 border.color 和 border.width
-
-                IconProvider { id: stripIcons }
-                Column {
-                    anchors.fill: parent; anchors.topMargin: 8; anchors.bottomMargin: 8; spacing: 6
-                    Repeater {
-                        /*
-                         * 五格，**每一格都接上了动作**：项目树 / 截图 / 便签 /
-                         * 翻译 / 识别文档。
-                         *
-                         * 原来后面还挂着 file / search / play / branch 四个格子，
-                         * 但都没接动作（`acts` 为假，点了没反应、光标也是普通箭头）
-                         * —— 摆着不动就是噪音，用户问"这几个没用的去掉"，去掉了。
-                         * 那几样东西在菜单里都有：搜索是顶栏那个框和「搜索」菜单，
-                         * 分支 / 运行对"剪贴板 + 笔记"这个程序根本没有对应功能。
-                         *
-                         * 截图 / 便签 / 翻译 / 识别都是"叫出一个工具"——便签那一格点
-                         * 一下就地新建一块，长按（右键）才是排列 / 收起那些（老用户
-                         * 不会误点，新用户看一眼提示就懂）；翻译那一格是把翻译卡片
-                         * 叫到桌面上；识别那一格是挑一份文档认成笔记。
-                         */
-                        model: [ { k: "folder", active: true }, { k: "screenshot", active: false },
-                                 { k: "note", active: false },
-                                 { k: "translate", active: false },
-                                 { k: "ocr", active: false },
-                                 { k: "terminal", active: false } ]
-                        delegate: Rectangle {
-                            id: navCell
-                            required property var modelData
-                            width: 26; height: 26; x: 4; radius: 5
-
-                            /* 这一格点下去有没有事发生（决定光标和提示要不要给） */
-                            readonly property bool acts: modelData.k === "folder"
-                                                         || modelData.k === "screenshot"
-                                                         || modelData.k === "note"
-                                                         || modelData.k === "translate"
-                                                         || modelData.k === "ocr"
-                                                         || modelData.k === "terminal"
-
-                            /*
-                             * 这一格算不算"当前打开的工具窗口"。
-                             *
-                             * 文件夹那格不再看 modelData.active：它现在是项目树
-                             * 的开关，面板收起来时这一格就该是未选中的样子
-                             * （和 PyCharm 左边那排工具窗口按钮一个道理）——
-                             * 面板收起来之后，标题栏那排按钮跟着没了，
-                             * 这里就是唯一能把树叫回来的地方。
-                             *
-                             * 便签那格同理：桌面上摆着便签时它才亮着 ——
-                             * 新便签是**在桌面上**出现的（不在主窗口里），
-                             * 这一格亮着就是"外面有那么几块"的唯一提示。
-                             */
-                            readonly property bool selected: {
-                                if (modelData.k === "folder")
-                                    return !window.folderTreeHidden
-                                if (modelData.k === "note")
-                                    return Notes.visibleCount > 0
-                                if (modelData.k === "translate")
-                                    return Trans.visibleCount > 0
-                                if (modelData.k === "terminal")
-                                    return !window.terminalHidden
-                                return modelData.active
-                            }
-
-                            /*
-                             * 悬停态：整格填强调蓝 + 图标转白。
-                             *
-                             * 选中那一格原本是 #3a4a5a 的浅蓝底，
-                             * 鼠标压上去时也让位给同一片蓝色 ——
-                             * 否则 hover 在选中的格子上完全没反馈。
-                             *
-                             * 这里用绑定而不是 onEntered/onExited 手动改色：
-                             * 绑定是幂等的，鼠标快速划过多格也不会串色。
-                             */
-                            readonly property bool hot: navHit.containsMouse
-                            color: hot ? window.accentColor
-                                       : (selected ? "#3a4a5a" : "transparent")
-
-                            AppIcon { anchors.centerIn: parent; provider: stripIcons; kind: modelData.k
-                                      tint: navCell.hot ? "#ffffff"
-                                                        : (navCell.selected ? window.accentColor : "#9aa0a8")
-                                      size: 16 }
-                            MouseArea {
-                                id: navHit
-                                anchors.fill: parent
-                                hoverEnabled: true
-                                cursorShape: navCell.acts ? Qt.PointingHandCursor
-                                                          : Qt.ArrowCursor
-                                acceptedButtons: Qt.LeftButton | Qt.RightButton
-                                onClicked: (mouse) => {
-                                    if (modelData.k === "folder")
-                                        window.toggleFolderTree()
-                                    else if (modelData.k === "screenshot")
-                                        Shot.beginCapture()
-                                    else if (modelData.k === "note") {
-                                        /*
-                                         * 左键 = 新建一块；右键 = 排列 / 收起那些。
-                                         * 便签这一格迟早要放好几条命令，但格子上
-                                         * 挂不下第二个按钮，右键菜单是最省地方的做法。
-                                         *
-                                         * 菜单本身走共用那份 DropdownMenu（深色 +
-                                         * 图标），不是 Qt Quick Controls 的 Menu ——
-                                         * 那个白底、没图标，和界面里其它菜单不是一个
-                                         * 长相（用户要求统一成"帮助"那份的样子）。
-                                         */
-                                        if (mouse.button === Qt.RightButton)
-                                            window.openNotesCellMenu(navCell, mouse.x, mouse.y)
-                                        else
-                                            Notes.createNote()
-                                    }
-                                    else if (modelData.k === "translate")
-                                        Trans.showCard()
-                                    else if (modelData.k === "ocr")
-                                        /* 挑一份文档认成笔记（见「文件 → 识别文档…」那条，同一个入口） */
-                                        window.importDocumentDialog()
-                                    else if (modelData.k === "terminal")
-                                        window.toggleTerminalPanel()
-                                }
-                            }
-
-                            /*
-                             * 接上动作的那几格给提示。
-                             *
-                             * 气泡里**只留名字**：不写快捷键，也不加"右键排列"这种
-                             * 补充说明 —— 图标条这排是"一眼认工具"的地方，字越少越好。
-                             * 快捷键在菜单里和设置面板里都写着；便签的右键菜单
-                             * 自己会弹，不需要气泡先教一遍。
-                             */
-                            AppToolTip {
-                                hovered: navHit.containsMouse && navCell.acts
-                                text: {
-                                    if (modelData.k === "folder")
-                                        return window.folderTreeHidden ? "显示项目树" : "收起项目树"
-                                    if (modelData.k === "screenshot")
-                                        return "截图"
-                                    if (modelData.k === "translate")
-                                        return "翻译"
-                                    if (modelData.k === "ocr")
-                                        return "识别文档"
-                                    if (modelData.k === "terminal")
-                                        return "终端"
-                                    return "便签"
-                                }
-                                /* 贴着窗口左沿放：默认的"居中在格子上"会往左出界 */
-                                x: 2
-                                y: -implicitHeight - 3
-                            }
-                        }
-                    }
-                    Item { width: 1; height: Math.max(1, parent.height - 300) }
-
-                    /*
-                     * 底部齿轮：打开设置面板（快捷键 / 关于）。
-                     *
-                     * 原来它只是个装饰格子（不接点击），现在接上 ——
-                     * 设置入口本来就该在这里，也省得再去菜单里找。
-                     */
-                    Rectangle {
-                        id: gearCell
-                        width: 26; height: 26; x: 4; radius: 5
-                        readonly property bool hot: gearHit.containsMouse
-                        color: hot ? window.accentColor : "transparent"
-                        AppIcon { anchors.centerIn: parent; provider: stripIcons; kind: "gear"
-                                  tint: gearCell.hot ? "#ffffff" : "#9aa0a8"; size: 16 }
-                        MouseArea {
-                            id: gearHit
-                            anchors.fill: parent
-                            hoverEnabled: true
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: window.showShortcuts()
-                        }
-                    }
-                }
             }
 
             FolderTree {
@@ -4009,6 +3862,253 @@ Rectangle {
             view: window.view
             count: Store.entryCount
         }
+            }
+
+            /*
+             * 左侧工具窗口图标条（已取消边框）。
+             *
+             * 它**不在 midRow 的布局里**：那条行会随终端面板展开而变矮，
+             * 面板最大化时更是整个 hide 掉（midRow 的 visible），图标条
+             * 跟着没。这里改成从顶栏下沿一直铺到状态栏上沿，中间那一行
+             * 只留一个 34px 的槽位（navStripSlot）占住宽度，几何和以前一样。
+             */
+            Rectangle {
+                id: navStrip
+                width: 34
+                /*
+                 * 顶到顶栏下沿、底到状态栏上沿 —— 中间那一行（midRow）展开、
+                 * 收起、甚至整个 hide 掉都不影响这一条的高度。
+                 *
+                 * 这里**不能用 anchors.top: topBar.bottom**：topBar / statusBar
+                 * 是 ColumnLayout 的孩子，和这条不是同胞，QML 直接拒掉
+                 * （"Cannot anchor to an item that isn't a parent or sibling"），
+                 * 结果是 y/height 双双留在默认值 —— 整条图标条塌成 0 高、
+                 * 底部那一组跑到窗口外面去（自检量到的 y=-66 就是这么来的）。
+                 */
+                x: 0
+                y: topBar.y + topBar.height
+                height: Math.max(0, statusBar.y - topBar.y - topBar.height)
+                color: "#313335"
+                // 已删除 border.color 和 border.width
+
+                IconProvider { id: stripIcons }
+                Column {
+                    id: navTopGroup
+                    anchors.left: parent.left; anchors.right: parent.right
+                    anchors.top: parent.top; anchors.topMargin: 8
+                    spacing: 6
+                    Repeater {
+                        /*
+                         * 五格，**每一格都接上了动作**：项目树 / 截图 / 便签 /
+                         * 翻译 / 识别文档。终端不在这一排里 —— 它贴在**底部**、
+                         * 紧挨着设置那一格（见下面 navTerminalCell）。
+                         *
+                         * 原来后面还挂着 file / search / play / branch 四个格子，
+                         * 但都没接动作（`acts` 为假，点了没反应、光标也是普通箭头）
+                         * —— 摆着不动就是噪音，用户问"这几个没用的去掉"，去掉了。
+                         * 那几样东西在菜单里都有：搜索是顶栏那个框和「搜索」菜单，
+                         * 分支 / 运行对"剪贴板 + 笔记"这个程序根本没有对应功能。
+                         *
+                         * 截图 / 便签 / 翻译 / 识别都是"叫出一个工具"——便签那一格点
+                         * 一下就地新建一块，长按（右键）才是排列 / 收起那些（老用户
+                         * 不会误点，新用户看一眼提示就懂）；翻译那一格是把翻译卡片
+                         * 叫到桌面上；识别那一格是挑一份文档认成笔记。
+                         */
+                        model: [ { k: "folder", active: true }, { k: "screenshot", active: false },
+                                 { k: "note", active: false },
+                                 { k: "translate", active: false },
+                                 { k: "ocr", active: false } ]
+                        delegate: Rectangle {
+                            id: navCell
+                            required property var modelData
+                            width: 26; height: 26; x: 4; radius: 5
+
+                            /* 这一格点下去有没有事发生（决定光标和提示要不要给） */
+                            readonly property bool acts: modelData.k === "folder"
+                                                         || modelData.k === "screenshot"
+                                                         || modelData.k === "note"
+                                                         || modelData.k === "translate"
+                                                         || modelData.k === "ocr"
+
+                            /*
+                             * 这一格算不算"当前打开的工具窗口"。
+                             *
+                             * 文件夹那格不再看 modelData.active：它现在是项目树
+                             * 的开关，面板收起来时这一格就该是未选中的样子
+                             * （和 PyCharm 左边那排工具窗口按钮一个道理）——
+                             * 面板收起来之后，标题栏那排按钮跟着没了，
+                             * 这里就是唯一能把树叫回来的地方。
+                             *
+                             * 便签那格同理：桌面上摆着便签时它才亮着 ——
+                             * 新便签是**在桌面上**出现的（不在主窗口里），
+                             * 这一格亮着就是"外面有那么几块"的唯一提示。
+                             */
+                            readonly property bool selected: {
+                                if (modelData.k === "folder")
+                                    return !window.folderTreeHidden
+                                if (modelData.k === "note")
+                                    return Notes.visibleCount > 0
+                                if (modelData.k === "translate")
+                                    return Trans.visibleCount > 0
+                                return modelData.active
+                            }
+
+                            /*
+                             * 悬停态：整格填强调蓝 + 图标转白。
+                             *
+                             * 选中那一格原本是 #3a4a5a 的浅蓝底，
+                             * 鼠标压上去时也让位给同一片蓝色 ——
+                             * 否则 hover 在选中的格子上完全没反馈。
+                             *
+                             * 这里用绑定而不是 onEntered/onExited 手动改色：
+                             * 绑定是幂等的，鼠标快速划过多格也不会串色。
+                             */
+                            readonly property bool hot: navHit.containsMouse
+                            color: hot ? window.accentColor
+                                       : (selected ? "#3a4a5a" : "transparent")
+
+                            AppIcon { anchors.centerIn: parent; provider: stripIcons; kind: modelData.k
+                                      tint: navCell.hot ? "#ffffff"
+                                                        : (navCell.selected ? window.accentColor : "#9aa0a8")
+                                      size: 16 }
+                            MouseArea {
+                                id: navHit
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: navCell.acts ? Qt.PointingHandCursor
+                                                          : Qt.ArrowCursor
+                                acceptedButtons: Qt.LeftButton | Qt.RightButton
+                                onClicked: (mouse) => {
+                                    if (modelData.k === "folder")
+                                        window.toggleFolderTree()
+                                    else if (modelData.k === "screenshot")
+                                        Shot.beginCapture()
+                                    else if (modelData.k === "note") {
+                                        /*
+                                         * 左键 = 新建一块；右键 = 排列 / 收起那些。
+                                         * 便签这一格迟早要放好几条命令，但格子上
+                                         * 挂不下第二个按钮，右键菜单是最省地方的做法。
+                                         *
+                                         * 菜单本身走共用那份 DropdownMenu（深色 +
+                                         * 图标），不是 Qt Quick Controls 的 Menu ——
+                                         * 那个白底、没图标，和界面里其它菜单不是一个
+                                         * 长相（用户要求统一成"帮助"那份的样子）。
+                                         */
+                                        if (mouse.button === Qt.RightButton)
+                                            window.openNotesCellMenu(navCell, mouse.x, mouse.y)
+                                        else
+                                            Notes.createNote()
+                                    }
+                                    else if (modelData.k === "translate")
+                                        Trans.showCard()
+                                    else if (modelData.k === "ocr")
+                                        /* 挑一份文档认成笔记（见「文件 → 识别文档…」那条，同一个入口） */
+                                        window.importDocumentDialog()
+                                }
+                            }
+
+                            /*
+                             * 接上动作的那几格给提示。
+                             *
+                             * 气泡里**只留名字**：不写快捷键，也不加"右键排列"这种
+                             * 补充说明 —— 图标条这排是"一眼认工具"的地方，字越少越好。
+                             * 快捷键在菜单里和设置面板里都写着；便签的右键菜单
+                             * 自己会弹，不需要气泡先教一遍。
+                             */
+                            AppToolTip {
+                                hovered: navHit.containsMouse && navCell.acts
+                                text: {
+                                    if (modelData.k === "folder")
+                                        return window.folderTreeHidden ? "显示项目树" : "收起项目树"
+                                    if (modelData.k === "screenshot")
+                                        return "截图"
+                                    if (modelData.k === "translate")
+                                        return "翻译"
+                                    if (modelData.k === "ocr")
+                                        return "识别文档"
+                                        return "便签"
+                                }
+                                /* 贴着窗口左沿放：默认的"居中在格子上"会往左出界 */
+                                x: 2
+                                y: -implicitHeight - 3
+                            }
+                        }
+                    }
+                }
+
+                /*
+                 * 底部那一组：终端 + 设置。
+                 *
+                 * 原来它是上面那个 Column 里的一根弹簧（高度 = 图标条高 - 300），
+                 * 从**顶部**量出去的 —— 终端面板一展开，图标条矮了一截，
+                 * 这两格就跟着往上跑（他报的那条）。现在单独一个 Column
+                 * 钉在图标条下沿，图标条本身又铺满整列，位置就只跟窗口高度有关。
+                 */
+                Column {
+                    id: navBottomGroup
+                    anchors.left: parent.left; anchors.right: parent.right
+                    anchors.bottom: parent.bottom; anchors.bottomMargin: 8
+                    spacing: 6
+
+                    /*
+                     * 终端那一格：贴在底部、紧挨着设置。
+                     *
+                     * 原来它是上面那一排 Repeater 的最后一格，夹在工具格中间，
+                     * 而终端是"常驻要看的东西"，和上面那几个"叫一次工具"的格子
+                     * 不是一类（2026-09-23 他圈着这个图标要放到底部）。
+                     * 配色/悬停/提示全照上面那一排的口径抄，看起来是同一套格子。
+                     */
+                    Rectangle {
+                        id: navTerminalCell
+                        width: 26; height: 26; x: 4; radius: 5
+                        readonly property bool hot: navTermHit.containsMouse
+                        readonly property bool selected: !window.terminalHidden
+                        color: hot ? window.accentColor
+                                   : (selected ? "#3a4a5a" : "transparent")
+
+                        AppIcon { anchors.centerIn: parent; provider: stripIcons; kind: "terminal"
+                                  tint: navTerminalCell.hot ? "#ffffff"
+                                                            : (navTerminalCell.selected
+                                                               ? window.accentColor : "#9aa0a8")
+                                  size: 16 }
+                        MouseArea {
+                            id: navTermHit
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: window.toggleTerminalPanel()
+                        }
+                        AppToolTip {
+                            text: qsTr("终端")
+                            hovered: navTerminalCell.hot
+                            /* 贴着窗口左沿放：默认的"居中在格子上"会往左出界 */
+                            x: 2
+                            y: -implicitHeight - 3
+                        }
+                    }
+
+                    /*
+                     * 底部齿轮：打开设置面板（快捷键 / 关于）。
+                     *
+                     * 原来它只是个装饰格子（不接点击），现在接上 ——
+                     * 设置入口本来就该在这里，也省得再去菜单里找。
+                     */
+                    Rectangle {
+                        id: gearCell
+                        width: 26; height: 26; x: 4; radius: 5
+                        readonly property bool hot: gearHit.containsMouse
+                        color: hot ? window.accentColor : "transparent"
+                        AppIcon { anchors.centerIn: parent; provider: stripIcons; kind: "gear"
+                                  tint: gearCell.hot ? "#ffffff" : "#9aa0a8"; size: 16 }
+                        MouseArea {
+                            id: gearHit
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: window.showShortcuts()
+                        }
+                    }
+                }
             }
         }
     }

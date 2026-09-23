@@ -2154,6 +2154,134 @@ void runRenderChecks(QObject *qmlRoot, EditorController *cmd)
         }
     }
 
+    /*
+     * 图标条底部那一格：终端**收起 / 展开 / 最大化**三种状态下必须在同一个 y。
+     *
+     * 2026-09-23 他报"终端展开的时候那一格跟着往上跑"。原来整条图标条塞在
+     * midRow 的布局槽位里：面板一展开图标条就矮一截，而底部那两格是从**顶部**
+     * 量出去的一根弹簧（高度 = 图标条高 - 300），于是跟着一起挪；面板最大化时
+     * midRow 整个 hide 掉，图标条连人都没了。现在图标条从顶栏下沿直接铺到
+     * 状态栏上沿，底部那一组 anchors 到图标条下沿 —— 三种状态量同一个 y。
+     */
+    {
+        auto ui = [&]() {
+            QVariant r;
+            QMetaObject::invokeMethod(qmlRoot, "uiState", Q_RETURN_ARG(QVariant, r));
+            return r.toMap();
+        };
+        auto settle = [&]() {
+            for (int k = 0; k < 25; ++k) {
+                QCoreApplication::processEvents();
+                QThread::msleep(20);
+            }
+        };
+        auto cellY = [](const QVariantMap &m) {
+            return m.value(QLatin1String("termCellY")).toReal();
+        };
+        const bool hiddenWas = qmlRoot->property("terminalHidden").toBool();
+        const bool maxWas = qmlRoot->property("terminalMaximized").toBool();
+
+        if (!qmlRoot->property("terminalHidden").toBool()) {
+            QMetaObject::invokeMethod(qmlRoot, "dispatch",
+                                      Q_ARG(QVariant, QStringLiteral("toggleTerminal")));
+            waitUntil([&] { return qmlRoot->property("terminalHidden").toBool(); }, 2000);
+        }
+        /*
+         * 真像素复查：量到的 y 对不对是一回事，屏幕上那一格**真画在那儿**是另一回事
+         * （这个工程里"几何绿了界面却不对"出过好几次）。采样点取格子左上角往里
+         * 4px —— 图标是居中的 16px，那个角只会是格子底色，不会是图标。
+         */
+        auto grabCell = [&](const QVariantMap &m, const QColor &want, const char *tag) {
+            if (!host)
+                return QColor();
+            host->raise();
+            host->activateWindow();
+            for (int k = 0; k < 15; ++k) {
+                QCoreApplication::processEvents();
+                QThread::msleep(20);
+            }
+            auto *qw = host->findChild<QQuickWidget *>();
+            const QPoint inHost = (qw ? qw->mapTo(host, QPoint(0, 0)) : QPoint())
+                + QPoint(qRound(m.value(QLatin1String("termCellX")).toReal()) + 4,
+                         qRound(cellY(m)) + 4);
+            const QPoint glo = host->mapToGlobal(inHost);
+            const QImage desk = QGuiApplication::primaryScreen()->grabWindow(0).toImage();
+            if (!desk.rect().contains(glo))
+                return QColor();
+            const QColor got = QColor::fromRgba(desk.pixel(glo));
+            desk.copy(QRect(glo - QPoint(20, 20), QSize(120, 120)).intersected(desk.rect()))
+                .save(QStringLiteral("H:/steward/build/nav-cell-%1.png").arg(tag));
+            return got;
+        };
+
+        settle();
+        const QVariantMap closed = ui();
+        const QColor gotClosed =
+            grabCell(closed, QColor(QStringLiteral("#313335")), "closed");
+
+        QMetaObject::invokeMethod(qmlRoot, "dispatch",
+                                  Q_ARG(QVariant, QStringLiteral("toggleTerminal")));
+        const bool opened = waitUntil([&] {
+            return !qmlRoot->property("terminalHidden").toBool()
+                       && panel->property("height").toReal() > 100.0;
+        }, 3000);
+        settle();
+        const QVariantMap open = ui();
+        const QColor gotOpen = grabCell(open, QColor(QStringLiteral("#3a4a5a")), "open");
+
+        qmlRoot->setProperty("terminalMaximized", true);
+        settle();
+        settle();
+        const QVariantMap maxi = ui();
+        const QColor gotMax = grabCell(maxi, QColor(QStringLiteral("#3a4a5a")), "max");
+        const bool midRowGone = maxi.value(QLatin1String("midRowVisible")).toBool() == false;
+
+        qmlRoot->setProperty("terminalMaximized", maxWas);
+        if (qmlRoot->property("terminalHidden").toBool() != hiddenWas) {
+            QMetaObject::invokeMethod(qmlRoot, "dispatch",
+                                      Q_ARG(QVariant, QStringLiteral("toggleTerminal")));
+        }
+        settle();
+
+        const double yc = cellY(closed), yo = cellY(open), ym = cellY(maxi);
+        const double winH = closed.value(QLatin1String("windowHeight")).toReal();
+        const double sbH = closed.value(QLatin1String("statusBarHeight")).toReal();
+        const double gearBottom =
+            closed.value(QLatin1String("gearCellY")).toReal() + 26.0;
+        const bool samePos = qAbs(yc - yo) < 1.0 && qAbs(yc - ym) < 1.0;
+        const bool alwaysVisible =
+            closed.value(QLatin1String("stripVisible")).toBool()
+            && open.value(QLatin1String("stripVisible")).toBool()
+            && maxi.value(QLatin1String("stripVisible")).toBool();
+        const bool atBottom = yc > winH / 2.0 && qAbs(winH - sbH - gearBottom) <= 12.0;
+        auto pxDist = [](const QColor &got, const char *want) {
+            const QColor w(QString::fromLatin1(want));
+            return qAbs(got.red() - w.red()) + qAbs(got.green() - w.green())
+                   + qAbs(got.blue() - w.blue());
+        };
+        const int dClosed = pxDist(gotClosed, "#313335");
+        const int dOpen = pxDist(gotOpen, "#3a4a5a");
+        const int dMax = pxDist(gotMax, "#3a4a5a");
+        const bool pixelsOk = dClosed <= 30 && dOpen <= 30 && dMax <= 30;
+        tcheck(opened && samePos && alwaysVisible && atBottom && pixelsOk,
+               QStringLiteral("终端那一格在图标条底部，收起 / 展开 / 最大化三种状态位置一样"),
+               QStringLiteral("收起 y=%1，展开 y=%2，最大化 y=%3（窗口高 %4、底栏 %5）；"
+                              "图标条三种状态都在=%6，最大化时中间行确实让开了=%7，"
+                              "展开到位=%8；设置那格底边 %9，离状态栏 %10；"
+                              "图标条顶 %11 高 %12 槽位宽 %13；"
+                              "屏上那一格底色 收起 %14(差%15) 展开 %16(差%17) 最大化 %18(差%19)，"
+                              "三张图存 H:/steward/build/nav-cell-*.png")
+                   .arg(yc).arg(yo).arg(ym).arg(winH).arg(sbH)
+                   .arg(alwaysVisible).arg(midRowGone).arg(opened)
+                   .arg(gearBottom).arg(winH - sbH - gearBottom)
+                   .arg(closed.value(QLatin1String("stripTop")).toReal())
+                   .arg(closed.value(QLatin1String("stripHeight")).toReal())
+                   .arg(closed.value(QLatin1String("navSlotWidth")).toReal())
+                   .arg(gotClosed.name()).arg(dClosed)
+                   .arg(gotOpen.name()).arg(dOpen)
+                   .arg(gotMax.name()).arg(dMax));
+    }
+
     /* 把还挂在队列里的 600ms 抓屏复查排空，否则退出太快、日志里没有那几行 */
     for (int i = 0; i < 120; ++i) {
         QCoreApplication::processEvents();
