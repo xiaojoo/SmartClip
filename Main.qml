@@ -2713,6 +2713,22 @@ Rectangle {
              */
             splitterLeftX: splitterMouse.x,
             splitterWidth: splitterMouse.width,
+            /*
+             * 自检要拿这两个数当判据：
+             *   splitterEnabled —— 最大化之后那条缝还让不让拖（2026-09-23 他要的）
+             *   splitterCursor  —— 悬在缝上时是什么光标。要的是标准系统光标
+             *     Qt.SizeHorCursor（Windows 上就是 IDC_SIZEWE），和终端面板顶边那条
+             *     拖高度的 Qt.SizeVerCursor 同一套字形；Qt.SplitHCursor 在 Windows 上
+             *     走的是 Qt 自己画的 pixmap（qwindowscursor.cpp 里 Split* 不进
+             *     standardCursors 表），两个挨着看就是一粗一细不配套。
+             */
+            splitterEnabled: splitterMouse.enabled,
+            splitterCursor: splitterMouse.cursorShape,
+            /* 自检按完那一下立刻读它：true = 按下确实落到这条抓手上了（分清"没送到"和"送了没效果"） */
+            splitterPressed: splitterMouse.pressed,
+            /* 命中的是哪个 item：自检拿它和 splitterLeftX/Width 对号 */
+            splitterHitX: splitterMouse.x,
+            splitterHitW: splitterMouse.width,
             gapWidth: splitterGap.width,
             midRowTop: window.mapFromItem(midRow, 0, 0).y,
             midRowBottom: window.mapFromItem(midRow, 0, 0).y + midRow.height,
@@ -4179,16 +4195,12 @@ Rectangle {
      *   y 取 midRow.y、height 取 midRow.height（为什么不用 mapFromItem
      *   换算，见下面 y 绑定那里的实测记录）。
      *
-     * 最大化时：拖动功能关掉（enabled: false），而且光标也要回到
-     * 鼠标默认的箭头 —— 注意 enabled 挡不住 cursorShape（见上面
-     * ResizeEdge 里的实测记录），所以这里把 cursorShape 也一起做成
-     * 条件绑定，否则全屏以后左侧列表右边那条缝上还会一直冒 <->。
+     * 最大化时照旧能拖（2026-09-23 他要的）：这一条原来是 `enabled: !window.maximized`，
+     * 全屏以后那条缝就废了。抓手的上下限由 folderTreeMinWidth/MaxWidth（240/600）夹着，
+     * 和窗口多宽没关系，全屏下没有理由例外。
      */
     MouseArea {
         id: splitterMouse
-
-        // 最大化时不给拖
-        enabled: !window.maximized
 
         /*
          * 位置：从树面板的右边缘**往右**吃 5px（= 那条缝 + 编辑区卡片左边 2px）。
@@ -4226,7 +4238,13 @@ Rectangle {
         z: 2000
 
         hoverEnabled: true
-        cursorShape: window.maximized ? Qt.ArrowCursor : Qt.SplitHCursor
+        /*
+         * 用 SizeHorCursor，不用 SplitHCursor —— 和下面终端面板顶边那条拖高度的
+         * 把手同一个家族（那边是 Qt.SizeVerCursor，见 qml/components/TerminalPanel.qml
+         * 的 resizeStrip）：都是"一根轴上的双箭头"。SplitHCursor 那个带一条竖线的
+         * 双箭头是另一套字形，两个挨在一起看就是一粗一细不配套（他报的第 2 条）。
+         */
+        cursorShape: Qt.SizeHorCursor
         acceptedButtons: Qt.LeftButton
 
         property real pressSceneX: 0
@@ -4235,13 +4253,13 @@ Rectangle {
         onPressed: (mouse) => {
             pressSceneX = mapToItem(null, mouse.x, 0).x
             /*
-             * 按住这一整段把光标钉成 <->。
+             * 按住这一整段把光标钉成左右双箭头。
              *
              * cursorShape 只在鼠标停在这 5px 上时生效，拖快一点指针就跑到左树 /
              * 编辑区那边（编辑区还是另一个原生子窗口，它自己会设光标），于是
              * 按住不放的过程中光标闪回默认箭头（用户报的那条）。
              */
-            Win.pushResizeCursor(Qt.SplitHCursor)
+            Win.pushResizeCursor(Qt.SizeHorCursor)
             /*
              * 面板收起来时先把它叫回来：收起来之后标题栏那排按钮也跟着没了，
              * 这条缝（抓手这 5px）就是最自然的把手（往右拖 = 把树拉出来）。

@@ -47,6 +47,8 @@ struct TerminalCell
  * 为什么要自己管回滚：这份 libvterm（0.3.3）没有内置 scrollback，它在主屏某一行
  * 被顶出顶部时回调 sb_pushline 把那一行交给我们存；备用屏（vim / less）期间不推，
  * 所以全屏程序退出之后不会留下它那一屏的残影 —— 这个行为正好是我们要的。
+ * 反过来 sb_popline（变高时把历史倒回屏上）**不接**：倒回来的行会被 ConPTY 的整屏
+ * 重画盖掉，白丢历史 —— 数字和推理在 TerminalEngine::screenCallbacks() 那里。
  *
  * 行号约定（视图和自检都用它）：
  *   row <  0            回滚区，从最老的一行往新数（-1 = 最靠近屏幕顶部的那一行）
@@ -151,7 +153,7 @@ private:
     static int onTermprop(VTermProp prop, VTermValue *val, void *user);
     static int onBell(void *user);
     static int onSbPush(int cols, const VTermScreenCell *cells, void *user);
-    static int onSbPop(int cols, VTermScreenCell *cells, void *user);
+    /* sb_popline 故意不接：见 TerminalEngine::screenCallbacks() 里那段实测记录 */
     static int onSbClear(void *user);
     static void onTerminalOutput(const char *bytes, size_t len, void *user);
 

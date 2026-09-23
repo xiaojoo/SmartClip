@@ -1029,6 +1029,98 @@ void runRenderChecks(QObject *qmlRoot, EditorController *cmd)
     }
 
     /*
+     * 用户 2026-09-23 第 3 条：终端最大化之后"滚动条消失了，但里面的内容被截断、
+     * 也不能滚动"。按他那个顺序复现：**先在常规高度灌够历史，再把面板吃下整行**。
+     *
+     * 三个数一起看才有结论：
+     *   rows      改完之后屏上能容几行
+     *   history   改完之后还剩多少行在屏顶以上（=0 就是条子藏起来的直接原因）
+     *   最早那行  还在不在（不在 = 真丢了，不是"没得滚"）
+     * 屏从 44 行涨到 134 行，libvterm 会 sb_popline 把历史倒回屏上，倒一部分是正常
+     * 的；600 行内容不可能被 134 行吃干净 —— 要是 history 归 0 又找不着 krow 1，
+     * 那就是丢了。
+     */
+    {
+        qmlRoot->setProperty("terminalMaximized", false);
+        waitUntil([&] { return view->rows() < 60; }, 4000);
+        view->clearBuffer();
+        QCoreApplication::processEvents();
+        e->sendText(QStringLiteral("1..600 | ForEach-Object { \"krow $_\" }"));
+        e->sendKey(VTERM_KEY_ENTER, VTERM_MOD_NONE);
+        const bool fed = waitUntil([&] { return allText(e).contains(QLatin1String("krow 600")); },
+                                   25000);
+        const int rowsBefore = view->rows(), histBefore = view->historyRows();
+        /* 改之前屏上有几行有字、最下面那行有字的在第几行 */
+        auto screenFill = [&](TerminalEngine *en) -> QVariantList {
+            int nonEmpty = 0, firstRow = -1, lastRow = -1;
+            for (int r = 0; r < en->rows(); ++r) {
+                if (en->lineText(r).trimmed().isEmpty())
+                    continue;
+                ++nonEmpty;
+                if (firstRow < 0)
+                    firstRow = r;
+                lastRow = r;
+            }
+            return { nonEmpty, firstRow, lastRow };
+        };
+        const QVariantList before = screenFill(e);
+
+        qmlRoot->setProperty("terminalMaximized", true);
+        waitUntil([&] { return view->rows() > 100; }, 4000);
+        for (int k = 0; k < 20; ++k)
+            QCoreApplication::processEvents();
+        const int rowsAfter = view->rows(), histAfter = view->historyRows();
+        const QVariantList after = screenFill(e);
+
+        int firstAt = -9999, lastAt = -9999, nonEmpty = 0;
+        for (int r = -histAfter; r < rowsAfter; ++r) {
+            const QString line = e->lineText(r).trimmed();
+            if (line.isEmpty())
+                continue;
+            ++nonEmpty;
+            if (line == QStringLiteral("krow 1")) firstAt = r;
+            if (line == QStringLiteral("krow 600")) lastAt = r;
+        }
+        /* 条子的可见性必须等于"有没有得滚"，两边读的是同一个数 */
+        QObject *trk = nullptr;
+        {
+            QVariant tv;
+            QMetaObject::invokeMethod(panel, "currentTrack", Q_RETURN_ARG(QVariant, tv));
+            trk = tv.value<QObject *>();
+        }
+        const bool barVisible = trk && trk->property("visible").toBool();
+        /*
+         * 宽度没变（473 → 473），所以**行数是可以直接相加减的**：没有折行合并、
+         * 也没有拆开。这一趟变高的净行数必须守恒 —— 少了就是真丢了行。
+         * （窗口同时变宽的那一种不能这么算，这里刻意只让它变高。）
+         */
+        const int totalBefore = histBefore + before[0].toInt();
+        const int totalAfter = histAfter + after[0].toInt();
+        tout(QStringLiteral("     最大化前后：格子 %1x%2 回滚 %3 屏上有字 %4 行(第 %5..%6) "
+                            "→ 格子 %7x%8 回滚 %9 屏上有字 %10 行(第 %11..%12)，"
+                            "合计 %13 → %14；krow 1 在第 %15 行，krow 600 在第 %16 行，条子可见=%17")
+                 .arg(rowsBefore).arg(view->columns()).arg(histBefore)
+                 .arg(before[0].toInt()).arg(before[1].toInt()).arg(before[2].toInt())
+                 .arg(rowsAfter).arg(view->columns()).arg(histAfter)
+                 .arg(after[0].toInt()).arg(after[1].toInt()).arg(after[2].toInt())
+                 .arg(totalBefore).arg(totalAfter).arg(firstAt).arg(lastAt).arg(barVisible));
+        tcheck(fed && totalAfter == totalBefore,
+               QStringLiteral("终端变高（宽度不变）之后一行都不许丢"),
+               QStringLiteral("回滚+屏上有字：%1 → %2（rows %3→%4，回滚 %5→%6，屏上 %7→%8）")
+                   .arg(totalBefore).arg(totalAfter).arg(rowsBefore).arg(rowsAfter)
+                   .arg(histBefore).arg(histAfter).arg(before[0].toInt()).arg(after[0].toInt()));
+        tcheck(firstAt > -9999 && lastAt > -9999,
+               QStringLiteral("终端最大化之后最早/最新那两行都还翻得着"),
+               QStringLiteral("krow 1 在第 %1 行、krow 600 在第 %2 行（rows=%3 history=%4）")
+                   .arg(firstAt).arg(lastAt).arg(rowsAfter).arg(histAfter));
+        tcheck(barVisible == (histAfter > 0),
+               QStringLiteral("条子的显与藏，和「有没有得滚」是同一个数"),
+               QStringLiteral("history=%1 条子可见=%2").arg(histAfter).arg(barVisible));
+        qmlRoot->setProperty("terminalMaximized", false);
+        waitUntil([&] { return view->rows() < 60; }, 4000);
+    }
+
+    /*
      * 关键差别：**空闲**。用户那一刻终端没有新输出，节点没人再要求重画；我的探针
      * 一直泡在刷屏内容里，第二帧就被新内容冲好了 —— 那样量到的"自愈"是假的。
      * 所以先等内容彻底安静（paint 计数不再涨），再把面板收回原高、重新吃下整行，连采 20 帧。

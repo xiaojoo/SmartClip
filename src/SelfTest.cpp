@@ -15,6 +15,7 @@
 #include <QPointer>
 #include <QQmlEngine>
 #include <QQuickItem>
+#include <QQuickWidget>
 #include <QQuickWindow>
 #include <QWidget>
 #include <QWindow>
@@ -1592,6 +1593,195 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
               QStringLiteral("分隔线热区不压左树的滚动条（左边缘不过面板右边缘）"), horiz);
         check(zoneWidth <= gap + 3.0,
               QStringLiteral("分隔线热区宽度跟着那条缝走（不是一条宽板子）"), horiz);
+    }
+
+    /*
+     * 最大化之后那条缝还要拖得动（用户 2026-09-23 第 1 条）。
+     *
+     * 原来 splitterMouse 上写着 `enabled: !window.maximized`（65baee6「页面最大化」
+     * 那一次加上的），全屏以后左树宽度就锁死了。上下限是 folderTreeMinWidth/MaxWidth
+     * （240/600）夹的，和窗口多宽无关，没有理由在全屏下例外。
+     *
+     * 判据走真事件链：按住抓手中间、往右 120px、松手，看 folderTreeWidth 跟不跟。
+     * **同一套动作先在常规态量一遍**：常规态也拖不动，那就是我这把尺子没送到，
+     * 不能拿它去判"最大化坏了"（第一版就是这么红的：启用=1、那个像素上的原生窗也
+     * 是我们自己的 Qt 窗，宽度却不动）。顺带把"那一点上命中的是哪个 item"和
+     * "WindowFromPoint 读到谁"一起打出来 —— 盖住 / 送错窗 / 真拖不动，三种红分得开。
+     */
+    {
+        QWidget *host = nullptr, *fallback = nullptr;
+        for (QWidget *w : QApplication::topLevelWidgets()) {
+            if (!w->isVisible() || w->width() <= 600 || !w->findChild<QQuickWidget *>())
+                continue;
+            if (QApplication::activeWindow() == w) {
+                host = w;
+                break;
+            }
+            if (!fallback)
+                fallback = w;
+        }
+        if (!host)
+            host = fallback;
+
+        QString dragDetail;
+        int pressedFlag = -1;   // 最近一次 dragGap：按下有没有落到抓手上
+        /* 一次"按住抓手 → 往右 120px → 松手"，返回拖完的宽度；宽度当场还原 */
+        auto dragGap = [&](const char *tag) -> int {
+            const QVariantMap u = uiState();
+            const double gx = u.value(QStringLiteral("splitterCenterX")).toDouble();
+            const double gy = (u.value(QStringLiteral("splitterTop")).toDouble()
+                               + u.value(QStringLiteral("splitterBottom")).toDouble()) / 2.0;
+            const int was = qmlRoot->property("folderTreeWidth").toInt();
+            QString hits = QStringLiteral("没有宿主窗口");
+            QString offPoint;
+            int pressedAfter = -1, movedTo = -1;
+            QPoint local;
+            QPoint glo;
+            QQuickWidget *qw = nullptr;
+            if (host) {
+                glo = host->mapToGlobal(QPoint(qRound(gx), qRound(gy)));
+                /*
+                 * 就用**宿主窗口自己**那块 QQuickWidget。原来在这里遍历所有顶层
+                 * 挑"装得下这个点"的那一块，结果挑中了最大化预热那层（3840x2160，
+                 * 和宿主根本不对齐）—— 事件发到它身上当然什么都没发生，
+                 * 而"按下落到抓手上=0"就是这一条露的马脚。
+                 */
+                qw = host->findChild<QQuickWidget *>();
+                if (qw) {
+                    local = qw->mapFromGlobal(glo);
+                    if (!QRect(QPoint(0, 0), qw->size()).contains(local)) {
+                        offPoint = QStringLiteral("%1,%2 不在 %3x%4 里")
+                                       .arg(local.x()).arg(local.y())
+                                       .arg(qw->width()).arg(qw->height());
+                        qw = nullptr;
+                    }
+                }
+            }
+            if (qw) {
+                /* 场景里这一点上命中的是谁：不是抓手的话，事件发给别人了 */
+                QQuickItem *root = qw->rootObject();
+                if (QQuickItem *hit = root ? root->childAt(local.x(), local.y()) : nullptr) {
+                    hits = QStringLiteral("命中 %1 x=%2 宽=%3").arg(
+                               QString::fromLatin1(hit->metaObject()->className()).left(24))
+                               .arg(hit->x()).arg(hit->width());
+                } else {
+                    hits = QStringLiteral("childAt 没命中任何 item");
+                }
+                const QPointF p(local);
+                const QPointF p2 = p + QPointF(120, 0);
+                const QPoint glo2 = glo + QPoint(120, 0);
+                QMouseEvent mv(QEvent::MouseMove, p, glo, Qt::NoButton, Qt::LeftButton,
+                               Qt::NoModifier);
+                QMouseEvent pr(QEvent::MouseButtonPress, p, glo, Qt::LeftButton, Qt::LeftButton,
+                               Qt::NoModifier);
+                QMouseEvent md(QEvent::MouseMove, p2, glo2, Qt::LeftButton, Qt::LeftButton,
+                               Qt::NoModifier);
+                QMouseEvent rl(QEvent::MouseButtonRelease, p2, glo2, Qt::LeftButton, Qt::NoButton,
+                               Qt::NoModifier);
+                QCoreApplication::sendEvent(qw, &mv);
+                QCoreApplication::sendEvent(qw, &pr);
+                settle();
+                /* 按下这一拍落到抓手上了吗？没有的话后面都不用看 */
+                pressedAfter = uiState().value(QStringLiteral("splitterPressed")).toBool() ? 1 : 0;
+                QCoreApplication::sendEvent(qw, &md);
+                settle();
+                movedTo = qmlRoot->property("folderTreeWidth").toInt();
+                QCoreApplication::sendEvent(qw, &rl);
+                settle();
+            } else if (host) {
+                hits = QStringLiteral("没找到收事件的 QQuickWidget");
+            }
+            const int now = qmlRoot->property("folderTreeWidth").toInt();
+            dragDetail = QStringLiteral(
+                             "%1：送进 %2x%3 的 %4,%5 → %6；抓手在 %7 宽 %8，按下落到它=%9，"
+                             "拖完（松手前）=%10，宽 %11→%12")
+                             .arg(QLatin1String(tag))
+                             .arg(qw ? qw->width() : 0).arg(qw ? qw->height() : 0)
+                             .arg(local.x()).arg(local.y()).arg(hits)
+                             .arg(u.value(QStringLiteral("splitterHitX")).toDouble())
+                             .arg(u.value(QStringLiteral("splitterHitW")).toDouble())
+                             .arg(pressedAfter).arg(movedTo).arg(was).arg(now)
+                             + (offPoint.isEmpty() ? QString() : QStringLiteral(" ｜%1").arg(offPoint));
+            qmlRoot->setProperty("folderTreeWidth", was);
+            settle();
+            pressedFlag = pressedAfter;
+            return now;
+        };
+
+        const bool wasMax = qmlRoot->property("maximized").toBool();
+        if (wasMax && host) {
+            QMetaObject::invokeMethod(qmlRoot, "toggleMaximize");
+            settle();
+        }
+        dragGap("常规");
+        QString normalLine = dragDetail;
+        const int normalPressed = pressedFlag;
+
+        if (host) {
+            host->raise();
+            host->activateWindow();
+            if (!wasMax || !qmlRoot->property("maximized").toBool()) {
+                QMetaObject::invokeMethod(qmlRoot, "toggleMaximize");
+                settle();
+            }
+        }
+        const QVariantMap mz = uiState();
+        QString owner = QStringLiteral("没量");
+#if defined(Q_OS_WIN)
+        if (host) {
+            const QPoint gl = host->mapToGlobal(
+                QPoint(qRound(mz.value(QStringLiteral("splitterCenterX")).toDouble()),
+                       qRound((mz.value(QStringLiteral("splitterTop")).toDouble()
+                               + mz.value(QStringLiteral("splitterBottom")).toDouble()) / 2.0)));
+            HWND h = WindowFromPoint(POINT{ gl.x(), gl.y() });
+            wchar_t cls[128] = L"";
+            if (h)
+                GetClassNameW(h, cls, 128);
+            owner = QStringLiteral("%1@%2,%3").arg(QString::fromWCharArray(cls)).arg(gl.x())
+                        .arg(gl.y());
+        }
+#endif
+        dragGap("最大化");
+        const int maxPressed = pressedFlag;
+        const QVariantMap mz2 = uiState();
+        check(mz2.value(QStringLiteral("splitterEnabled")).toBool(),
+              QStringLiteral("最大化时那条缝的抓手是启用的（不再被 !maximized 关掉）"),
+              QStringLiteral("启用=%1 热区 %2..%3 光标=%4")
+                  .arg(mz2.value(QStringLiteral("splitterEnabled")).toBool())
+                  .arg(mz2.value(QStringLiteral("splitterTop")).toDouble())
+                  .arg(mz2.value(QStringLiteral("splitterBottom")).toDouble())
+                  .arg(mz2.value(QStringLiteral("splitterCursor")).toInt()));
+        /*
+         * 合成鼠标**拖不动**是这工程早就量过的事（TerminalPanel.qml 里那条"按住拖
+         * 是同一个函数（合成鼠标拖不动…）"就是这么写的），所以位移这一步不能当判据 ——
+         * 常规态也拖不动（上面那两条 dragGap 的"宽 295→295"就是它）。
+         * 能拿来判红判绿的到下一层就够：按下**落到没落到这条抓手上**，
+         * 常规态和最大化态都得是 1；再钉一条"最大化时改宽度，树真的跟着宽"，
+         * 因为全屏下要是布局把宽度钉死了，抓手按得再准也白搭。
+         */
+        check(normalPressed == 1 && maxPressed == 1,
+              QStringLiteral("按下能落到那条缝的抓手上（常规态和最大化态都是）"),
+              QStringLiteral("常规按下落到抓手=%1，最大化按下落到抓手=%2（拖不动是合成鼠标的已知限制，"
+                             "见判据上面那段）；%3；%4；那个像素上的原生窗=%5")
+                  .arg(normalPressed).arg(maxPressed).arg(normalLine, dragDetail).arg(owner));
+        {
+            const int base = qmlRoot->property("folderTreeWidth").toInt();
+            const double rightWas = mz2.value(QStringLiteral("treeRightLive")).toDouble();
+            qmlRoot->setProperty("folderTreeWidth", base + 120);
+            settle();
+            const double rightNow = uiState().value(QStringLiteral("treeRightLive")).toDouble();
+            qmlRoot->setProperty("folderTreeWidth", base);
+            settle();
+            check(qAbs(rightNow - rightWas - 120.0) < 8.0,
+                  QStringLiteral("最大化时改左树宽度，树真的跟着宽（全屏布局没把它钉死）"),
+                  QStringLiteral("宽度 %1→%2，树右边缘 %3→%4（该 +120）")
+                      .arg(base).arg(base + 120).arg(rightWas).arg(rightNow));
+        }
+        /* 回到进来时的最大化状态 */
+        if (host && qmlRoot->property("maximized").toBool() != wasMax) {
+            QMetaObject::invokeMethod(qmlRoot, "toggleMaximize");
+            settle();
+        }
     }
 
     dispatch(QStringLiteral("find"));

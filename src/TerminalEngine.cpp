@@ -39,7 +39,21 @@ const VTermScreenCallbacks *TerminalEngine::screenCallbacks()
         c.settermprop = &TerminalEngine::onTermprop;
         c.bell = &TerminalEngine::onBell;
         c.sb_pushline = &TerminalEngine::onSbPush;
-        c.sb_popline = &TerminalEngine::onSbPop;
+        /*
+         * sb_popline **故意不实现**（原来有一份，2026-09-23 删掉）。
+         *
+         * libvterm 变高时会从顶部把行"倒回"屏上（screen.c:676 那段 backfill），
+         * 我们那份历史是它唯一的数据源 —— 倒一次少一次。而 ConPTY 收到新尺寸之后
+         * 会把整屏按**它自己的缓冲**重画一遍，把倒回来的那几行又盖掉。
+         * 实测（--terminal-test 里那条"终端变高一行都不许丢"）：宽度不变、
+         * 44 行涨到 134 行，"回滚 + 屏上有字"从 645 掉到 555 —— **90 行没了**，
+         * 正好等于新长出来的行数；屏上最后还是那 44 行（第 0..43 行）。
+         * 也就是说倒回来的行一次都没露过面，只是被吃掉。
+         *
+         * 不实现它：libvterm 拿不到行就 break（680 行那个判断），新露出来的那些屏行
+         * 留空，历史一行不少 —— 条子也就不会像用户报的那样"最大化之后消失、
+         * 内容被截断、滚不动"。
+         */
         c.sb_clear = &TerminalEngine::onSbClear;
         return c;
     }();
@@ -415,25 +429,6 @@ int TerminalEngine::onSbPush(int cols, const VTermScreenCell *cells, void *user)
     self->m_history.push_back(std::move(line));
     while (int(self->m_history.size()) > TerminalEngine::kHistoryLimit)
         self->m_history.pop_front();
-    return 1;
-}
-
-int TerminalEngine::onSbPop(int cols, VTermScreenCell *cells, void *user)
-{
-    auto *self = static_cast<TerminalEngine *>(user);
-    if (self->m_history.empty())
-        return 0;
-    /*
-     * 变宽时 libvterm 会问我们要回滚行来填顶部（把窗口拉高之后老内容要能落回屏上）。
-     * 存的那一行可能是**旧列数**下推入的，比现在短 —— 缺的补空格，不能读越界。
-     */
-    const auto &line = self->m_history.back();
-    const int take = qMin(cols, int(line.size()));
-    for (int i = 0; i < take; ++i)
-        cells[i] = line[size_t(i)];
-    for (int i = take; i < cols; ++i)
-        cells[i] = blankCell();
-    self->m_history.pop_back();
     return 1;
 }
 
