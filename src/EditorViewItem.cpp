@@ -1,4 +1,5 @@
 #include "EditorViewItem.h"
+#include "Theme.h"
 
 #include "ClipboardStore.h"
 
@@ -179,7 +180,6 @@ const QColor kDiffWord(0x6b, 0x3f, 0x44);
  * 像素统计也是按位置分开数的（见 marginPixelStats / rulerPixelStats），
  * 别再写成"扫到这个颜色就是那条线"。
  */
-const QColor kGuideLine(0x33, 0x38, 0x40);
 /*
  * 折叠箭头两边各留多少空隙。
  *
@@ -187,20 +187,31 @@ const QColor kGuideLine(0x33, 0x38, 0x40);
  * 在深色主题下箭头贴着行号和分隔线，看着很挤。
  */
 constexpr int kFoldIconGap = 5;
-const QColor kCaretLineBack(0x26, 0x28, 0x2b);  // 当前行底色
-const QColor kSelectionBack(0x2f, 0x65, 0x9c);  // 选中底色
-/* 深色主题的语法配色（JetBrains 暗色系） */
-QColor paletteDefault() { return QColor(0xd6, 0xd7, 0xda); }
-QColor paletteKeyword() { return QColor(0xcf, 0x8e, 0x6d); }
-QColor paletteString() { return QColor(0x6a, 0xab, 0x73); }
-QColor paletteNumber() { return QColor(0x2a, 0xac, 0xb8); }
-QColor paletteComment() { return QColor(0x7a, 0x7e, 0x85); }
-QColor paletteFunction() { return QColor(0x56, 0xa8, 0xf5); }
-QColor paletteType() { return QColor(0xc7, 0x7d, 0xbb); }
-QColor paletteOperator() { return QColor(0xbc, 0xbe, 0xc4); }
-QColor palettePreproc() { return QColor(0xb3, 0xae, 0x60); }
-QColor paletteTag() { return QColor(0xe8, 0xbf, 0x6a); }
-QColor paletteError() { return QColor(0xff, 0x6b, 0x68); }
+/*
+ * 编辑器里这几个色也走主题表（src/Theme.cpp）：原来它们是写死的 QColor(0x26,0x28,0x2b)
+ * 这种形式，不在"按 #rrggbb 查表"那批里，所以单独在这儿翻一道。
+ * 深色档查表是恒等，切回深色和以前逐字节一样。
+ */
+QColor themed(const char *darkHex) {
+    return AppTheme::instance() ? AppTheme::instance()->color(QString::fromLatin1(darkHex))
+                               : QColor(QString::fromLatin1(darkHex));
+}
+/* 走主题表：浅色档这条要变成很浅的 #e5e6eb，不能是深底上那个重色 */
+QColor kGuideLine() { return themed("#333840"); }
+QColor kCaretLineBack() { return themed("#26282b"); }   // 当前行底色
+QColor kSelectionBack() { return themed("#2f659c"); }   // 选中底色
+/* 语法配色：深色是 JetBrains 暗色系，浅色是 IntelliJ Light（表里那 11 行） */
+QColor paletteDefault() { return themed("#d6d7da"); }
+QColor paletteKeyword() { return themed("#cf8e6d"); }
+QColor paletteString() { return themed("#6aab73"); }
+QColor paletteNumber() { return themed("#2aacb8"); }
+QColor paletteComment() { return themed("#7a7e85"); }
+QColor paletteFunction() { return themed("#56a8f5"); }
+QColor paletteType() { return themed("#c77dbb"); }
+QColor paletteOperator() { return themed("#bcbec4"); }
+QColor palettePreproc() { return themed("#b3ae60"); }
+QColor paletteTag() { return themed("#e8bf6a"); }
+QColor paletteError() { return themed("#ff6b68"); }
 
 /*
  * 把 lexer 的样式描述映射到深色配色。
@@ -297,6 +308,18 @@ EditorViewItem::EditorViewItem(QQuickItem *parent) : QQuickItem(parent) {
     setFlag(ItemHasContents, false);
 
     m_store = s_store;
+
+    /*
+     * 切主题时重铺原生侧。
+     *
+     * QML 那 181 处是绑定，Theme.light 一变就自己重算；这里是原生控件，
+     * 色是当时算好塞进去的死值，必须自己再铺一遍。lexer 还按语言缓存
+     * （m_lexers），不重铺的话换完主题旧语言的语法色会留在新文档上。
+     */
+    if (AppTheme *theme = AppTheme::instance()) {
+        connect(theme, &AppTheme::lightChanged, this,
+                [this]() { restyleForTheme(); });
+    }
     /*
      * s_instance（"当前编辑器是谁"）**不在这里抢**。
      *
@@ -934,7 +957,7 @@ void EditorViewItem::applyMarginTheme() {
      * 关掉这个开关时（宽度 0）颜色无所谓，跟着底色走就行。
      */
     m_sci->SendScintilla(QsciScintillaBase::SCI_SETMARGINBACKN, 2L,
-                         m_gutterLine ? scColor(kGuideLine) : paper);
+                         m_gutterLine ? scColor(kGuideLine()) : paper);
 
     /* 折叠边距自己有颜色设置（0 = 跟随默认），改成跟底色一致 */
     m_sci->setFoldMarginColors(m_paperColor, m_paperColor);
@@ -948,7 +971,7 @@ void EditorViewItem::applyMarginTheme() {
      */
     m_sci->SendScintilla(QsciScintillaBase::SCI_STYLESETFORE,
                          QsciScintillaBase::STYLE_INDENTGUIDE,
-                         scColor(kGuideLine));
+                         scColor(kGuideLine()));
     m_sci->SendScintilla(QsciScintillaBase::SCI_STYLESETBACK,
                          QsciScintillaBase::STYLE_INDENTGUIDE, paper);
 
@@ -1023,8 +1046,8 @@ void EditorViewItem::applyFoldMarkers() {
         return;
 
     const int box = foldIconSize();
-    const QPixmap closed = foldChevron(false, QColor(0x9a, 0xa0, 0xa8), box);
-    const QPixmap open = foldChevron(true, QColor(0x9a, 0xa0, 0xa8), box);
+    const QPixmap closed = foldChevron(false, themed("#9aa0a8"), box);
+    const QPixmap open = foldChevron(true, themed("#9aa0a8"), box);
 
     const struct {
         int mark;
@@ -1063,8 +1086,8 @@ int EditorViewItem::foldIconSize() const {
 
 QVariantList EditorViewItem::foldIconPixelStats() const {
     const int box = foldIconSize();
-    const QImage closed = foldChevron(false, QColor(0x9a, 0xa0, 0xa8), box).toImage();
-    const QImage open = foldChevron(true, QColor(0x9a, 0xa0, 0xa8), box).toImage();
+    const QImage closed = foldChevron(false, themed("#9aa0a8"), box).toImage();
+    const QImage open = foldChevron(true, themed("#9aa0a8"), box).toImage();
 
     /* 量墨迹的包围盒（透明底上 alpha > 0 的像素） */
     auto inkBounds = [](const QImage &img) {
@@ -1229,7 +1252,7 @@ QVariantList EditorViewItem::marginPixelStats() const {
     for (int x = gutterEnd + 1; x < img.width(); ++x) {
         int ink = 0;
         for (int y = 0; y < img.height(); ++y) {
-            if (img.pixelColor(x, y) == kGuideLine)
+            if (img.pixelColor(x, y) == kGuideLine())
                 ++ink;
         }
         if (ink > 0 && ink < fullHeight)   // 通到底的那一列是字数参考线，不算
@@ -1245,7 +1268,7 @@ QVariantList EditorViewItem::marginPixelStats() const {
     int gutterInk = 0, gutterX = -1, gutterMaxY = -1;
     for (int y = 0; y < img.height(); ++y) {
         for (int x = 0; x <= gutterEnd; ++x) {
-            if (img.pixelColor(x, y) == kGuideLine) {
+            if (img.pixelColor(x, y) == kGuideLine()) {
                 ++gutterInk;
                 if (gutterX < 0)
                     gutterX = x;
@@ -1268,7 +1291,7 @@ QVariantList EditorViewItem::marginPixelStats() const {
         for (int x = gutterX + 2; x < img.width() && textInkX < 0; ++x) {
             for (int y = 0; y < img.height(); ++y) {
                 const QColor c = img.pixelColor(x, y);
-                if (c == paper || c == kGuideLine)
+                if (c == paper || c == kGuideLine())
                     continue;
                 textInkX = x;
                 break;
@@ -1544,8 +1567,8 @@ QString EditorViewItem::scrollBarStyleSheet() const {
         "QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {\n"
         "    background: %3;\n"
         "}\n")
-        .arg(QStringLiteral("#4b4d4f"),          // 滑块
-             QStringLiteral("#5f6266"),          // 悬停
+        .arg(themed("#4b4d4f").name(),           // 滑块（浅色档 = #c9cdd4）
+             themed("#5f6266").name(),           // 悬停
              m_paperColor.name(),                 // 轨道（= 正文底色）
              QString::number(m_hBarInset));       // 横条左内缩（逻辑像素）
 }
@@ -1615,7 +1638,7 @@ void EditorViewItem::styleChrome() {
     panelPal.setColor(QPalette::Window, m_paperColor);
     panelPal.setColor(QPalette::Base, m_paperColor);
     panelPal.setColor(QPalette::Button, m_paperColor);
-    panelPal.setColor(QPalette::Highlight, QColor(0x2f, 0x65, 0x9c));
+    panelPal.setColor(QPalette::Highlight, kSelectionBack());
     panelPal.setColor(QPalette::HighlightedText, QColor(0xff, 0xff, 0xff));
     m_sci->setPalette(panelPal);
     if (m_sci->viewport()) {
@@ -1627,7 +1650,7 @@ void EditorViewItem::styleChrome() {
     QPalette barPal = m_sci->palette();
     barPal.setColor(QPalette::Window, m_paperColor);
     barPal.setColor(QPalette::Base, m_paperColor);
-    barPal.setColor(QPalette::Button, QColor(0x4b, 0x4d, 0x4f));
+    barPal.setColor(QPalette::Button, themed("#4b4d4f"));
     barPal.setColor(QPalette::Light, m_paperColor);
     barPal.setColor(QPalette::Midlight, m_paperColor);
     barPal.setColor(QPalette::Dark, m_paperColor);
@@ -1706,6 +1729,19 @@ void EditorViewItem::styleChrome() {
      */
 }
 
+void EditorViewItem::restyleForTheme() {
+    for (QsciLexer *lexer : std::as_const(m_lexers))
+        themeLexer(lexer);
+    /* 纸色 / 当前行 / 选区 / 默认字色 */
+    applyViewOptions();
+    /* 行号栏、折叠栏那几个边距的颜色 */
+    applyMargins();
+    applyFoldMarkers();
+    /* 滚动条和右键菜单的调色板 */
+    styleChrome();
+    update();
+}
+
 void EditorViewItem::applyViewOptions() {
     if (!m_sci)
         return;
@@ -1728,7 +1764,7 @@ void EditorViewItem::applyViewOptions() {
      */
     m_sci->SendScintilla(QsciScintillaBase::SCI_SETCARETLINEVISIBLEALWAYS, 1L);
     m_sci->SendScintilla(QsciScintillaBase::SCI_SETCARETLINEBACK,
-                         scColor(kCaretLineBack));
+                         scColor(kCaretLineBack()));
     /*
      * 当前行底色的 alpha 必须给 256（SC_ALPHA_NOALPHA），不能给 255。
      *
@@ -1745,7 +1781,7 @@ void EditorViewItem::applyViewOptions() {
      */
     m_sci->SendScintilla(QsciScintillaBase::SCI_SETCARETLINEBACKALPHA, 256L);
     m_sci->SendScintilla(QsciScintillaBase::SCI_SETCARETFORE,
-                         scColor(QColor(0xd6, 0xd7, 0xda)));
+                         scColor(paletteDefault()));
 
     /*
      * 代码折叠：第 1 列做成折叠边距（具体设置在 applyMargins 里）。
@@ -1754,7 +1790,7 @@ void EditorViewItem::applyViewOptions() {
 
     /* 选中色：和 QML 外壳的强调蓝一套 */
     m_sci->SendScintilla(QsciScintillaBase::SCI_SETSELBACK, 1L,
-                         scColor(kSelectionBack));
+                         scColor(kSelectionBack()));
     m_sci->SendScintilla(QsciScintillaBase::SCI_SETSELFORE, 1L,
                          static_cast<long>(0xffffff));
 
@@ -2216,7 +2252,7 @@ void EditorViewItem::updateBottomLines() {
     if (m_gutterLine && m0 >= 0 && m1 >= 0) {
         const int x = m0 + m1;
         if (x < m_sci->width())
-            lines.append({x, kGuideLine});
+            lines.append({x, kGuideLine()});
     }
 
     /*
@@ -2231,7 +2267,7 @@ void EditorViewItem::updateBottomLines() {
         const int x = textStart - int(xOffset)
                       + m_rulerColumn * fm.horizontalAdvance(QLatin1Char(' '));
         if (x >= textStart && x < m_sci->width())
-            lines.append({x, kGuideLine});
+            lines.append({x, kGuideLine()});
     }
 
     overlay->lines = lines;
@@ -2870,7 +2906,7 @@ void EditorViewItem::applyRuler() {
         return;
 
     m_sci->setEdgeColumn(m_rulerColumn);
-    m_sci->setEdgeColor(kGuideLine);
+    m_sci->setEdgeColor(kGuideLine());
     m_sci->setEdgeMode(m_rulerVisible ? QsciScintilla::EdgeLine
                                       : QsciScintilla::EdgeNone);
 
@@ -2938,13 +2974,14 @@ QVariantList EditorViewItem::rulerPixelStats() const {
     int found = -1;
     const int from = qMax(0, expected - 6);
     const int to = qMin(img.width() - 1, expected + 6);
-    auto isRulerColumn = [&img, fullHeight](int x) {
+    const QColor guide = kGuideLine();   // 每列都现取一次太浪费，也免得中途换主题量到两套色
+    auto isRulerColumn = [&img, fullHeight, guide](int x) {
         int ink = 0;
         for (int yy = 0; yy < img.height(); ++yy) {
             const QColor c = img.pixelColor(x, yy);
-            if (qAbs(c.red() - kGuideLine.red()) <= 6
-                && qAbs(c.green() - kGuideLine.green()) <= 6
-                && qAbs(c.blue() - kGuideLine.blue()) <= 6)
+            if (qAbs(c.red() - guide.red()) <= 6
+                && qAbs(c.green() - guide.green()) <= 6
+                && qAbs(c.blue() - guide.blue()) <= 6)
                 ++ink;
         }
         return ink >= fullHeight;
@@ -2964,9 +3001,9 @@ QVariantList EditorViewItem::rulerPixelStats() const {
     if (found >= 0) {
         for (int yy = 0; yy < img.height(); ++yy) {
             const QColor c = img.pixelColor(found, yy);
-            if (qAbs(c.red() - kGuideLine.red()) <= 6
-                && qAbs(c.green() - kGuideLine.green()) <= 6
-                && qAbs(c.blue() - kGuideLine.blue()) <= 6)
+            if (qAbs(c.red() - guide.red()) <= 6
+                && qAbs(c.green() - guide.green()) <= 6
+                && qAbs(c.blue() - guide.blue()) <= 6)
                 maxY = yy;
         }
     }
@@ -5588,4 +5625,49 @@ void EditorViewItem::releaseEditorFocus() {
         if (auto *qw = m_hostWidget->findChild<QQuickWidget *>())
             qw->setFocus(Qt::OtherFocusReason);
     }
+}
+
+int EditorViewItem::dbgCountNearForTest(const QString &hex) const
+{
+    if (!m_sciWidget)
+        return -1;
+    const QImage img = m_sciWidget->grab().toImage();
+    const QColor want(hex);
+    int n = 0;
+    for (int y = 0; y < img.height(); ++y) {
+        /* 整张扫：正文只有几行、都在左边，从 40%% 宽起扫会把选区整个扫掉（第一版就是这么红的） */
+        for (int x = 0; x < img.width(); ++x) {
+            const QColor v = img.pixelColor(x, y);
+            if (qAbs(v.red() - want.red()) + qAbs(v.green() - want.green())
+                    + qAbs(v.blue() - want.blue()) <= 12)
+                ++n;
+        }
+    }
+    return n;
+}
+
+void EditorViewItem::dbgClearSelectionForTest()
+{
+    if (!m_sci)
+        return;
+    m_sci->setSelection(0, 0, 0, 0);   // 锚点 = 光标 = 空选择
+
+    int line = 0, col = 0;
+    m_sci->getCursorPosition(&line, &col);
+    m_sci->setSelection(line, col, line, col);   // 就地收成空选择，别把光标弹回文首
+}
+
+QPoint EditorViewItem::dbgCaretForTest() const
+{
+    if (!m_sci)
+        return QPoint(-1, -1);
+    int line = 0, col = 0;
+    m_sci->getCursorPosition(&line, &col);
+    return QPoint(line, col);
+}
+
+void EditorViewItem::dbgSetCaretForTest(int line, int col)
+{
+    if (m_sci)
+        m_sci->setCursorPosition(line, col);
 }

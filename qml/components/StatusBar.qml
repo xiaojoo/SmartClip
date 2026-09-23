@@ -17,7 +17,7 @@ Rectangle {
     id: root
 
     implicitHeight: 26
-    color: "#313335"
+    color: Theme.c("#313335", Theme.light)
 
     /* 剪贴板内容条数（元数据里的总条数，见 ClipboardStore::entryCount） */
     property int count: 0
@@ -28,8 +28,8 @@ Rectangle {
     readonly property bool hasDoc: root.view !== null && root.view !== undefined
                                    && root.view.hasDocument
 
-    readonly property color mutedColor: "#77808c"
-    readonly property color textColor:  "#7d7d7d"
+    readonly property color mutedColor: Theme.c("#77808c", Theme.light)
+    readonly property color textColor:  Theme.c("#7d7d7d", Theme.light)
     readonly property color accentColor: "#4c96d8"
 
     IconProvider { id: icons }
@@ -38,7 +38,7 @@ Rectangle {
         Layout.preferredWidth: 1
         Layout.preferredHeight: 12
         Layout.alignment: Qt.AlignVCenter
-        color: "#4b4d4f"
+        color: Theme.c("#4b4d4f", Theme.light)
     }
 
     component Info: Label {
@@ -65,7 +65,7 @@ Rectangle {
 
         Label {
             text: root.hasDoc ? root.view.displayName : "就绪"
-            color: root.hasDoc ? "#bbbbbb" : root.textColor
+            color: root.hasDoc ? Theme.c("#bbbbbb", Theme.light) : root.textColor
             font.pixelSize: 11
             Layout.alignment: Qt.AlignVCenter
             elide: Text.ElideRight
@@ -140,7 +140,7 @@ Rectangle {
         Info {
             visible: root.hasDoc
             text: root.hasDoc ? root.view.languageLabel(root.view.language) : ""
-            color: "#9aa0a8"
+            color: Theme.c("#9aa0a8", Theme.light)
         }
 
         Info {

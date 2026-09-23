@@ -4,6 +4,7 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import "../utils"
+import SmartClip.Globals 1.0
 
 /*
  * 工具栏按钮。
@@ -34,16 +35,16 @@ Rectangle {
     signal clicked()
 
     readonly property bool hot: hit.containsMouse && root.enabled
-    readonly property color idleIcon: root.enabled ? "#9aa0a8" : "#5c6066"
-    readonly property color hotIcon: root.checked ? "#ffffff" : "#e8e8e8"
+    readonly property color idleIcon: root.enabled ? Theme.c("#9aa0a8", Theme.light) : Theme.c("#5c6066", Theme.light)
+    readonly property color hotIcon: root.checked ? "#ffffff" : Theme.c("#e8e8e8", Theme.light)
 
     implicitWidth: content.implicitWidth + 16
     implicitHeight: 28
     radius: 4
 
     color: !root.enabled ? "transparent"
-                          : root.checked ? "#3d78b8"
-                                         : (root.hot ? "#45484c" : "transparent")
+                          : root.checked ? Theme.c("#3d78b8", Theme.light)
+                                         : (root.hot ? Theme.c("#45484c", Theme.light) : "transparent")
 
     RowLayout {
         id: content
@@ -63,7 +64,7 @@ Rectangle {
             visible: root.label !== ""
             text: root.label
             font.pixelSize: 11
-            color: (root.hot || root.checked) ? root.hotIcon : "#b4b8bf"
+            color: (root.hot || root.checked) ? root.hotIcon : Theme.c("#b4b8bf", Theme.light)
         }
 
         AppIcon {
@@ -71,7 +72,7 @@ Rectangle {
             provider: root.provider
             kind: "chevron-down"
             size: 9
-            tint: (root.hot || root.checked) ? root.hotIcon : "#7d838c"
+            tint: (root.hot || root.checked) ? root.hotIcon : Theme.c("#7d838c", Theme.light)
         }
     }
 

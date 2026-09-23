@@ -6,6 +6,7 @@ import QtQuick.Layouts
 import "../../js/TimeUtils.js" as Time
 import "../utils"
 import SmartClip.Editor 1.0
+import SmartClip.Globals 1.0
 
 /*
  * 编辑区：标签栏 + 查找栏 + 正文。
@@ -31,7 +32,7 @@ import SmartClip.Editor 1.0
 Rectangle {
     id: root
 
-    color: "#1e1f22"
+    color: Theme.c("#1e1f22", Theme.light)
     radius: 10
     clip: true
     border.width: 0
@@ -136,26 +137,26 @@ Rectangle {
      */
     signal tabContextMenuRequested(var pane, int index, var menuAnchor, real x, real y)
 
-    readonly property color barBg: "#1e1f22"
-    readonly property color editorBg: "#1e1f22"
-    readonly property color borderColor: "#4b4d4f"
-    readonly property color tabBg: "#45484c"
-    readonly property color tabActiveBg: "#2b2d30"
-    readonly property color textBright: "#e8e8e8"
-    readonly property color textMain: "#bbbbbb"
-    readonly property color textMuted: "#7d7d7d"
-    readonly property color hintKey: "#8b929e"
+    readonly property color barBg: Theme.c("#1e1f22", Theme.light)
+    readonly property color editorBg: Theme.c("#1e1f22", Theme.light)
+    readonly property color borderColor: Theme.c("#4b4d4f", Theme.light)
+    readonly property color tabBg: Theme.c("#45484c", Theme.light)
+    readonly property color tabActiveBg: Theme.c("#2b2d30", Theme.light)
+    readonly property color textBright: Theme.c("#e8e8e8", Theme.light)
+    readonly property color textMain: Theme.c("#bbbbbb", Theme.light)
+    readonly property color textMuted: Theme.c("#7d7d7d", Theme.light)
+    readonly property color hintKey: Theme.c("#8b929e", Theme.light)
     readonly property color accentColor: "#4c96d8"
-    readonly property color imageColor: "#d7a85b"
-    readonly property color lineNumberColor: "#606366"
-    readonly property color dangerColor: "#e06c75"
+    readonly property color imageColor: Theme.c("#d7a85b", Theme.light)
+    readonly property color lineNumberColor: Theme.c("#606366", Theme.light)
+    readonly property color dangerColor: Theme.c("#e06c75", Theme.light)
     /*
      * 编辑区里那些竖线（行号右边那条分隔线 / 字数参考线 / 缩进参考线）的颜色，
      * 和 src/EditorViewItem.cpp 里的 kGuideLine 是同一个值。
      *
      * 分栏那条拖动的分隔线也用它 —— 用户要的是"和序号线一样的一条"。
      */
-    readonly property color gutterLineColor: "#333840"
+    readonly property color gutterLineColor: Theme.c("#333840", Theme.light)
 
     /*
      * 正文默认字号（12）。
@@ -830,7 +831,7 @@ Rectangle {
                         paddingRight: 0
 
                         fontPixelSize: root.editorFontSize
-                        textColor: "#d6d7da"
+                        textColor: Theme.c("#d6d7da", Theme.light)
                         paperColor: root.editorBg
                         gutterColor: root.editorBg
                         lineNumberColor: root.lineNumberColor
@@ -948,7 +949,7 @@ Rectangle {
                         fontFamily: editorView.fontFamily
                         commentFontPixelSize: editorView.commentFontPixelSize
                         lineHeightFactor: editorView.lineHeightFactor
-                        textColor: "#d6d7da"
+                        textColor: Theme.c("#d6d7da", Theme.light)
                         paperColor: root.editorBg
                         gutterColor: root.editorBg
                         lineNumberColor: root.lineNumberColor

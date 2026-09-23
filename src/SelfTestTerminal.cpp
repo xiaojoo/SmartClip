@@ -27,6 +27,8 @@
 #include <QMap>
 #include <QMetaObject>
 #include <QQuickWidget>
+#include <QSettings>
+#include "Theme.h"
 #include <QQmlEngine>
 #include <QQuickItem>
 #include <QQuickItemGrabResult>
@@ -496,6 +498,18 @@ int countNear(const QImage &img, const QRect &box, const QColor &want)
 
 void runRenderChecks(QObject *qmlRoot, EditorController *cmd)
 {
+    /*
+     * 主题钉成深色再跑这一套。
+     *
+     * 下面有一批断言量的是"窗口底色 / 卡片边 / 圆角露出来的那一线"，它们隐含
+     * 假设界面是深色。用户把界面切成白色之后这些会红成一片（实测 8 红里 6 条
+     * 是这个原因），而程序其实没坏。所以进来先存一份、强制深色，末尾原样还回去。
+     */
+    auto *theme = AppTheme::instance();
+    const bool themeWas = theme && theme->light();
+    if (theme)
+        theme->setLight(false);
+
     tout(QStringLiteral("\n-- 界面与真实渲染（量抓下来的图，不量代码）--"));
 
     /* 快捷键本身认不认：PortableText 里那个反引号不是所有版本都解得出来 */
@@ -2205,12 +2219,19 @@ void runRenderChecks(QObject *qmlRoot, EditorController *cmd)
                 + QPoint(qRound(m.value(QLatin1String("termCellX")).toReal()) + 4,
                          qRound(cellY(m)) + 4);
             const QPoint glo = host->mapToGlobal(inHost);
-            const QImage desk = QGuiApplication::primaryScreen()->grabWindow(0).toImage();
-            if (!desk.rect().contains(glo))
+            /*
+             * 抓**宿主 QWidget**，不抓桌面：桌面上随时有别的项目窗口压着这一条
+             * （实测三次采到同一个 #7a782e，那是浏览器里一张照片，不是本程序）。
+             * host->grab() 直接把这块控件渲染出来，遮挡与它无关。
+             */
+            const QImage shot = host->grab().toImage();
+            const QPoint inWidget = inHost;   // 已经是宿主 QWidget 坐标
+            if (!shot.rect().contains(inWidget))
                 return QColor();
-            const QColor got = QColor::fromRgba(desk.pixel(glo));
-            desk.copy(QRect(glo - QPoint(20, 20), QSize(120, 120)).intersected(desk.rect()))
+            const QColor got = QColor::fromRgba(shot.pixel(inWidget));
+            shot.copy(QRect(inWidget - QPoint(20, 20), QSize(120, 120)).intersected(shot.rect()))
                 .save(QStringLiteral("H:/steward/build/nav-cell-%1.png").arg(tag));
+            Q_UNUSED(glo);
             return got;
         };
 
@@ -2243,11 +2264,27 @@ void runRenderChecks(QObject *qmlRoot, EditorController *cmd)
         }
         settle();
 
+        /*
+         * 浅色档：同一个采样点应该从 #313335 翻成 #f2f2f2。
+         * 这条量的是"切换真的作用到渲染上"，不是只量到属性翻了。
+         */
+        if (theme)
+            theme->setLight(true);
+        settle();
+        const QColor gotLight = grabCell(closed, QColor(QStringLiteral("#f2f2f2")), "light");
+        if (host)
+            host->grab().toImage().save(QStringLiteral("H:/steward/build/theme-light.png"));
+        if (theme)
+            theme->setLight(false);
+        settle();
+        if (host)
+            host->grab().toImage().save(QStringLiteral("H:/steward/build/theme-dark.png"));
+
         const double yc = cellY(closed), yo = cellY(open), ym = cellY(maxi);
         const double winH = closed.value(QLatin1String("windowHeight")).toReal();
         const double sbH = closed.value(QLatin1String("statusBarHeight")).toReal();
         const double gearBottom =
-            closed.value(QLatin1String("gearCellY")).toReal() + 26.0;
+            closed.value(QLatin1String("themeCellY")).toReal() + 26.0;
         const bool samePos = qAbs(yc - yo) < 1.0 && qAbs(yc - ym) < 1.0;
         const bool alwaysVisible =
             closed.value(QLatin1String("stripVisible")).toBool()
@@ -2262,13 +2299,20 @@ void runRenderChecks(QObject *qmlRoot, EditorController *cmd)
         const int dClosed = pxDist(gotClosed, "#313335");
         const int dOpen = pxDist(gotOpen, "#3a4a5a");
         const int dMax = pxDist(gotMax, "#3a4a5a");
+        const int dLight = pxDist(gotLight, "#f2f2f2");
         const bool pixelsOk = dClosed <= 30 && dOpen <= 30 && dMax <= 30;
-        tcheck(opened && samePos && alwaysVisible && atBottom && pixelsOk,
+        /* 深色那格和浅色那格必须是两个颜色，否则"切了没反应"也能过上面那条 */
+        const bool themeFlips = dLight <= 30
+                                && (gotLight.red() - gotClosed.red()
+                                    + gotLight.green() - gotClosed.green()
+                                    + gotLight.blue() - gotClosed.blue()) > 60;
+        tcheck(opened && samePos && alwaysVisible && atBottom && pixelsOk && themeFlips,
                QStringLiteral("终端那一格在图标条底部，收起 / 展开 / 最大化三种状态位置一样"),
                QStringLiteral("收起 y=%1，展开 y=%2，最大化 y=%3（窗口高 %4、底栏 %5）；"
                               "图标条三种状态都在=%6，最大化时中间行确实让开了=%7，"
                               "展开到位=%8；设置那格底边 %9，离状态栏 %10；"
                               "图标条顶 %11 高 %12 槽位宽 %13；"
+                              "切到白色之后同一格 %20(该是 #f2f2f2，差%21)；"
                               "屏上那一格底色 收起 %14(差%15) 展开 %16(差%17) 最大化 %18(差%19)，"
                               "三张图存 H:/steward/build/nav-cell-*.png")
                    .arg(yc).arg(yo).arg(ym).arg(winH).arg(sbH)
@@ -2279,8 +2323,87 @@ void runRenderChecks(QObject *qmlRoot, EditorController *cmd)
                    .arg(closed.value(QLatin1String("navSlotWidth")).toReal())
                    .arg(gotClosed.name()).arg(dClosed)
                    .arg(gotOpen.name()).arg(dOpen)
-                   .arg(gotMax.name()).arg(dMax));
+                   .arg(gotMax.name()).arg(dMax)
+                   .arg(gotLight.name()).arg(dLight));
     }
+
+    /* 主题这一档现在是什么（量具先证明它读得到活路径，再谈断言） */
+    {
+        QVariant r;
+        QMetaObject::invokeMethod(qmlRoot, "uiState", Q_RETURN_ARG(QVariant, r));
+        const QVariantMap m = r.toMap();
+        tout(QStringLiteral("（主题）注册表 ui/theme=%1  QML Theme.light=%2  图标条底该是 %3")
+                 .arg(QSettings().value(QStringLiteral("ui/theme")).toString())
+                 .arg(m.value(QStringLiteral("themeLight")).toBool())
+                 .arg(m.value(QStringLiteral("themeChrome")).toString()));
+    }
+
+    /*
+     * 内容区的选中底色：真渲染上比"取消选择 / 全选"两头。
+     *
+     * 2026-09-23 他挑了 A 档 #e6effc（贴他参考图那块淡蓝 #f1f6fe）。判据两头都要量：
+     * 只数"屏上有没有这个色"会被当前行底色、滚动条撞车。放在这一节的最后跑 ——
+     * 主自检那边中段插进去会扰动后面的用例（实测把"整词匹配"那条带偏成第 3 行）。
+     * 扫描必须覆盖整张抓图：正文只有几行、都在左边，早先按 40%% 宽起扫把选区整个扫掉了。
+     */
+    {
+        EditorViewItem *ev = EditorViewItem::instance();
+        auto pump = []() {
+            for (int k = 0; k < 20; ++k) {
+                QCoreApplication::processEvents();
+                QThread::msleep(20);
+            }
+        };
+        int before = -1, after = -1, selLen = -1, paper = -1;
+        const bool lightWas2 = theme && theme->light();
+        if (theme)
+            theme->setLight(true);
+        if (ev) {
+            ev->dbgClearSelectionForTest();
+            pump();
+            before = ev->dbgCountNearForTest(QStringLiteral("#a8cdf5"));
+            ev->selectAll();
+            pump();
+            after = ev->dbgCountNearForTest(QStringLiteral("#a8cdf5"));
+            selLen = ev->selectionLength();
+            paper = ev->dbgCountNearForTest(QStringLiteral("#ffffff"));
+            ev->dbgClearSelectionForTest();
+            pump();
+        }
+        if (theme)
+            theme->setLight(lightWas2);
+        /*
+         * 预览那份 HTML：颜色在 CSS 字符串里，切档必须重新生成过。
+         * 直接问 Cmd.markdownHtml() 要一份，看内联样式里出现的是浅色档的字色
+         * 还是深色档那套 #e8e8e8（后者就是"白底上一片淡字"那个毛病）。
+         */
+        QString cssLight, cssDark;
+        if (cmd) {
+            const QString md = QStringLiteral("# 标题\n正文一段\n\n代码块\n");;
+            if (theme) theme->setLight(true);
+            cssLight = cmd->markdownHtml(md, QString());
+            if (theme) theme->setLight(false);
+            cssDark = cmd->markdownHtml(md, QString());
+            if (theme) theme->setLight(lightWas2);
+        }
+        tcheck(!cssLight.contains(QStringLiteral("#e8e8e8"))
+               && cssLight.contains(QStringLiteral("#1d2129"))
+               && cssDark.contains(QStringLiteral("#e8e8e8")),
+               QStringLiteral("预览的 CSS 跟着主题重生成（浅色档不再有 #e8e8e8 淡字）"),
+               QStringLiteral("浅色档含 #1d2129=%1 还含 #e8e8e8=%2；深色档含 #e8e8e8=%3")
+                   .arg(cssLight.contains(QStringLiteral("#1d2129")))
+                   .arg(cssLight.contains(QStringLiteral("#e8e8e8")))
+                   .arg(cssDark.contains(QStringLiteral("#e8e8e8"))));
+
+        tcheck(before >= 0 && before <= 40 && after >= before + 400,
+               QStringLiteral("内容区选中底色在渲染上就是那档蓝 #a8cdf5（不选时几乎为 0）"),
+               QStringLiteral("取消选择 %1 个像素 → 全选 %2 个（ΔE<=12）；选区长度=%3，"
+                              "同一次抓图里纸色 %4 个")
+                   .arg(before).arg(after).arg(selLen).arg(paper));
+    }
+
+    if (theme && themeWas)
+        theme->setLight(true);   /* 还原用户那一档，别把设置带跑 */
 
     /* 把还挂在队列里的 600ms 抓屏复查排空，否则退出太快、日志里没有那几行 */
     for (int i = 0; i < 120; ++i) {

@@ -1,4 +1,5 @@
 #include "EditorController.h"
+#include "Theme.h"
 
 
 #include <QAbstractNativeEventFilter>
@@ -85,6 +86,30 @@ th { background-color: #2b2d30; color: #e8e8e8; font-weight: bold;
 td { border-width: 1px; border-style: solid; border-color: #4b4d4f; }
 hr { color: #4b4d4f; }
 )CSS";
+
+/*
+ * 预览那份 HTML 的样式表整段过一遍主题表。
+ *
+ * 为什么单独处理：这些颜色在 **CSS 字符串**里，既不是 QML 字面量也不是 QColor，
+ * 那两套机械替换都扫不到 —— 浅色档下预览就是白底上一片 #e8e8e8 淡字
+ * （他截图圈的就是这个）。按 #rrggbb 逐个查表，深色档恒等。
+ *
+ * 切主题后必须由 QML 再调一次 refreshMarkdown()（见 Main.qml 那个
+ * Connections { target: Theme }）：HTML 是生成出来的字符串，不吃绑定。
+ */
+QString themedCss(const QString &css) {
+    static const QRegularExpression kHexes(QStringLiteral("#[0-9a-fA-F]{6}"));
+    QString out;
+    int last = 0;
+    QRegularExpressionMatchIterator it = kHexes.globalMatch(css);
+    while (it.hasNext()) {
+        const QRegularExpressionMatch m = it.next();
+        out += css.mid(last, int(m.capturedStart()) - last);
+        out += AppTheme::instance() ? AppTheme::instance()->c(m.captured(0)) : m.captured(0);
+        last = int(m.capturedEnd());
+    }
+    return out + css.mid(last);
+}
 
 #if defined(Q_OS_WIN)
 
@@ -673,7 +698,7 @@ QString EditorController::markdownToPreviewHtml(const QString &markdown,
 
     QString html = doc.toHtml();
     const QString styleTag =
-        QStringLiteral("<style type=\"text/css\">") + QString::fromLatin1(kMarkdownCss)
+        QStringLiteral("<style type=\"text/css\">") + themedCss(QString::fromLatin1(kMarkdownCss))
         + QStringLiteral("</style>");
     const int headEnd = html.indexOf(QStringLiteral("</head>"));
     if (headEnd >= 0)

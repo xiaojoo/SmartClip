@@ -1,4 +1,5 @@
 #include "WindowHelper.h"
+#include "Theme.h"
 
 #include "DialogStyle.h"
 #include "EditorViewItem.h"
@@ -24,6 +25,18 @@
 #include <QStringList>
 #include <QWidget>
 #include <QWindow>
+
+/*
+ * DWM 描边色跟着主题走：深色档查表是恒等，就是原来的 #4b4d4f。
+ * 这一笔是系统画的（见 applyDwmRoundedCorners），所以切主题要重下一次属性。
+ */
+COLORREF dwmBorderRgb() {
+    const QString hex = AppTheme::instance()
+                            ? AppTheme::instance()->c(QStringLiteral("#4b4d4f"))
+                            : QStringLiteral("#4b4d4f");
+    const QColor c(hex);
+    return RGB(c.red(), c.green(), c.blue());
+}
 
 namespace {
 
@@ -920,8 +933,12 @@ void WindowHelper::attachWidget(QWidget *widget)
             = qEnvironmentVariableIsSet("SMARTCLIP_SQUARE_WHEN_MAXIMIZED");
         const HRESULT roundHr = squareWhenMaximized
                                     ? E_NOTIMPL
-                                    : applyDwmRoundedCorners(m_widget, RGB(0x4b, 0x4d, 0x4f));
+                                    : applyDwmRoundedCorners(m_widget, dwmBorderRgb());
         m_dwmRound = SUCCEEDED(roundHr);
+        if (m_dwmRound && AppTheme::instance()) {
+            QObject::connect(AppTheme::instance(), &AppTheme::lightChanged, m_widget,
+                             [this]() { applyDwmRoundedCorners(m_widget, dwmBorderRgb()); });
+        }
         trace(QStringLiteral("圆角：%1（系统 build %2）")
                   .arg(m_dwmRound
                            ? QStringLiteral("走 DWM 抗锯齿裁剪，半径由系统定")

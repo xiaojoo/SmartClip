@@ -47,13 +47,13 @@ Rectangle {
     visible: root.opened
 
     readonly property real headerHeight: 30
-    readonly property color borderColor: "#3c3f41"
+    readonly property color borderColor: Theme.c("#3c3f41", Theme.light)
     /* 和左树 / 编辑区那两张卡片同一套（实测 FolderTree、EditorArea 都是 10 + #1e1f22） */
     readonly property real cardRadius: 10
-    readonly property color cardColor: "#1e1f22"
-    readonly property color textColor: "#cccccc"
-    readonly property color mutedColor: "#8a9199"
-    readonly property color accentColor: "#0e639c"
+    readonly property color cardColor: Theme.c("#1e1f22", Theme.light)
+    readonly property color textColor: Theme.c("#cccccc", Theme.light)
+    readonly property color mutedColor: Theme.c("#8a9199", Theme.light)
+    readonly property color accentColor: Theme.c("#0e639c", Theme.light)
 
     /*
      * 会话表：只存界面要显示的东西，正文在 itemAt 那一侧。
@@ -198,7 +198,7 @@ Rectangle {
 
                     width: parent.width
                     height: root.headerHeight
-                    color: "#252526"
+                    color: Theme.c("#252526", Theme.light)
                     /*
                      * 只有上面两个角要圆 —— 它压在卡片的圆角上，直角会把卡片顶上那两个角
                      * 盖成方的（卡片的 clip 只裁矩形，不裁圆角）。
@@ -263,7 +263,7 @@ Rectangle {
                                     width: Math.min(tabLabel.implicitWidth + 29, 220)
                                     height: 24
                                     radius: 3
-                                    color: active ? "#1e1f21" : (hot ? "#2d2d30" : "transparent")
+                                    color: active ? Theme.c("#1e1f21", Theme.light) : (hot ? Theme.c("#2d2d30", Theme.light) : "transparent")
 
                                     Label {
                                         id: tabLabel
@@ -289,7 +289,7 @@ Rectangle {
                                         width: 16
                                         height: 16
                                         radius: 3
-                                        color: closeHit.containsMouse ? "#404043" : "transparent"
+                                        color: closeHit.containsMouse ? Theme.c("#404043", Theme.light) : "transparent"
                                         visible: tab.active || tab.hot
 
                                         AppIcon {
@@ -355,7 +355,7 @@ Rectangle {
                             width: 24
                             height: 22
                             radius: 4
-                            color: hot ? "#3a3a3d" : "transparent"
+                            color: hot ? Theme.c("#3a3a3d", Theme.light) : "transparent"
 
                             AppIcon {
                                 anchors.centerIn: parent
@@ -444,7 +444,7 @@ Rectangle {
                             /* 字号跟主窗口那条"编辑器字号"不是一回事，这里给一个终端常用的档 */
                             fontFamily: "Cascadia Mono"
                             fontSize: 13
-                            foregroundColor: "#d4d4d4"
+                            foregroundColor: Theme.c("#d4d4d4", Theme.light)
                             backgroundColor: root.cardColor
                             padding: 6
                             cornerRadius: root.cardRadius - 2
@@ -483,7 +483,7 @@ Rectangle {
                             visible: view.historyRows > 0
                             /* 8 宽 → 半径 4 = 整个短边，两端才是真半圆（不圆就是方块） */
                             radius: width / 2
-                            color: "#2a2d2e"
+                            color: Theme.c("#2a2d2e", Theme.light)
 
                             Rectangle {
                                 id: thumb
@@ -496,7 +496,7 @@ Rectangle {
                                 y: (sb.height - height) * (view.historyRows - view.scrollUp)
                                    / Math.max(1, view.historyRows)
                                 radius: width / 2
-                                color: "#4a4d50"
+                                color: Theme.c("#4a4d50", Theme.light)
                             }
 
                             MouseArea {

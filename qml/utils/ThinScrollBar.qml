@@ -2,6 +2,7 @@ pragma ComponentBehavior: Bound
 
 import QtQuick
 import QtQuick.Controls
+import SmartClip.Globals 1.0
 
 // Thin, dark scrollbar: fully transparent track, only a slim dark line handle.
 ScrollBar {
@@ -21,7 +22,7 @@ ScrollBar {
         implicitWidth: 8
         implicitHeight: 8
         radius: 4
-        color: "#565a60"
+        color: Theme.c("#565a60", Theme.light)
         opacity: 0.9
     }
 }

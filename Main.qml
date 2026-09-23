@@ -154,6 +154,16 @@ Rectangle {
     }
 
     /* 重新渲染一遍（预览没开就清空，省得留着上一份的内容） */
+    /*
+     * 预览的配色不在 QML 里，在 Cmd.markdownHtml() 生成的那段 CSS 字符串里
+     * （见 src/EditorController.cpp 的 themedCss）—— 字符串不吃绑定，
+     * 所以切主题必须手动重生成一次，否则预览还是上一档的颜色。
+     */
+    Connections {
+        target: Theme
+        function onLightChanged() { window.refreshMarkdown() }
+    }
+
     function refreshMarkdown() {
         if (!canPreviewMarkdown || !markdownPreview) {
             markdownHtml = ""
@@ -2761,8 +2771,10 @@ Rectangle {
             stripHeight: navStrip.height,
             termCellY: navTerminalCell.mapToItem(window.contentItem, 0, 0).y,
             termCellX: navTerminalCell.mapToItem(window.contentItem, 0, 0).x,
-            gearCellY: gearCell.mapToItem(window.contentItem, 0, 0).y,
+            themeCellY: themeCell.mapToItem(window.contentItem, 0, 0).y,
             navSlotWidth: navStripSlot.width,
+            themeLight: Theme.light,
+            themeChrome: String(Theme.c("#313335", Theme.light)),
             topBarHeight: topBar.height,
             statusBarHeight: statusBar.height,
             windowWidth: window.width,
@@ -3559,7 +3571,7 @@ Rectangle {
             anchors.fill: parent
 
             // 卡片之外那圈底（编辑区右侧 5px 间隙、左树面板左侧的留白）
-            color: "#313335"
+            color: Theme.c("#313335", Theme.light)
 
             /*
              * 圆角不在这里做。
@@ -3888,7 +3900,7 @@ Rectangle {
                 x: 0
                 y: topBar.y + topBar.height
                 height: Math.max(0, statusBar.y - topBar.y - topBar.height)
-                color: "#313335"
+                color: Theme.c("#313335", Theme.light)
                 // 已删除 border.color 和 border.width
 
                 IconProvider { id: stripIcons }
@@ -3965,11 +3977,11 @@ Rectangle {
                              */
                             readonly property bool hot: navHit.containsMouse
                             color: hot ? window.accentColor
-                                       : (selected ? "#3a4a5a" : "transparent")
+                                       : (selected ? Theme.c("#3a4a5a", Theme.light) : "transparent")
 
                             AppIcon { anchors.centerIn: parent; provider: stripIcons; kind: modelData.k
                                       tint: navCell.hot ? "#ffffff"
-                                                        : (navCell.selected ? window.accentColor : "#9aa0a8")
+                                                        : (navCell.selected ? window.accentColor : Theme.c("#9aa0a8", Theme.light))
                                       size: 16 }
                             MouseArea {
                                 id: navHit
@@ -4064,12 +4076,12 @@ Rectangle {
                         readonly property bool hot: navTermHit.containsMouse
                         readonly property bool selected: !window.terminalHidden
                         color: hot ? window.accentColor
-                                   : (selected ? "#3a4a5a" : "transparent")
+                                   : (selected ? Theme.c("#3a4a5a", Theme.light) : "transparent")
 
                         AppIcon { anchors.centerIn: parent; provider: stripIcons; kind: "terminal"
                                   tint: navTerminalCell.hot ? "#ffffff"
                                                             : (navTerminalCell.selected
-                                                               ? window.accentColor : "#9aa0a8")
+                                                               ? window.accentColor : Theme.c("#9aa0a8", Theme.light))
                                   size: 16 }
                         MouseArea {
                             id: navTermHit
@@ -4088,24 +4100,46 @@ Rectangle {
                     }
 
                     /*
-                     * 底部齿轮：打开设置面板（快捷键 / 关于）。
+                     * 底部这一格：换主题（2026-09-23 他点的就是这一格）。
                      *
-                     * 原来它只是个装饰格子（不接点击），现在接上 ——
-                     * 设置入口本来就该在这里，也省得再去菜单里找。
+                     * 原来它是"设置"入口（点一下开快捷键面板）。设置那条路不能断，
+                     * 所以分工照便签那一格已有的口径来：**左键 = 直接执行**（切深色/
+                     * 白色，立刻生效并落盘），**右键 = 那排设置命令**。
+                     *
+                     * 图标跟着状态换：深色档是"圆心 + 八道射线"那枚（画出来就是太阳，
+                     * 表示"点一下变亮"），浅色档换成月牙。见 IconProvider.qml 的
+                     * "gear" / "moon"。
                      */
                     Rectangle {
-                        id: gearCell
+                        id: themeCell
                         width: 26; height: 26; x: 4; radius: 5
-                        readonly property bool hot: gearHit.containsMouse
+                        readonly property bool hot: themeHit.containsMouse
                         color: hot ? window.accentColor : "transparent"
-                        AppIcon { anchors.centerIn: parent; provider: stripIcons; kind: "gear"
-                                  tint: gearCell.hot ? "#ffffff" : "#9aa0a8"; size: 16 }
+                        AppIcon { anchors.centerIn: parent; provider: stripIcons
+                                  kind: Theme.light ? "moon" : "gear"
+                                  tint: themeCell.hot ? "#ffffff" : Theme.c("#9aa0a8", Theme.light)
+                                  size: 16 }
                         MouseArea {
-                            id: gearHit
+                            id: themeHit
                             anchors.fill: parent
                             hoverEnabled: true
                             cursorShape: Qt.PointingHandCursor
-                            onClicked: window.showShortcuts()
+                            acceptedButtons: Qt.LeftButton | Qt.RightButton
+                            onClicked: (mouse) => {
+                                if (mouse.button === Qt.RightButton)
+                                    ddMenu.openAtPoint(themeCell, mouse.x, mouse.y, [
+                                        { label: "快捷键 / 设置", act: "settings" },
+                                        { label: "存储位置", act: "storage" } ])
+                                else
+                                    Theme.toggle()
+                            }
+                        }
+                        AppToolTip {
+                            text: Theme.light ? "换回深色主题" : "换成白色主题"
+                            hovered: themeCell.hot
+                            /* 贴着窗口左沿放：默认的"居中在格子上"会往左出界 */
+                            x: 2
+                            y: -implicitHeight - 3
                         }
                     }
                 }
@@ -4129,7 +4163,7 @@ Rectangle {
         color: "transparent"
         radius: window.cornerRadius
         border.width: 1
-        border.color: "#4b4d4f"
+        border.color: Theme.c("#4b4d4f", Theme.light)
     }
 
     /*

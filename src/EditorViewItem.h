@@ -800,6 +800,12 @@ public:
      * 但那块原生窗口还停在旧高度上，把分隔线整个盖住）。
      */
     Q_INVOKABLE QVariantMap paneGeometryForTest() const;
+    /* 自检用：正文区里和 hex 差得<=12 的像素有多少个 / 取消选择 */
+    Q_INVOKABLE int dbgCountNearForTest(const QString &hex) const;
+    Q_INVOKABLE void dbgClearSelectionForTest();
+    /* 光标位置存/取：上面那个"取消选择"会把光标留在选区末尾，用例之间得靠它还原 */
+    Q_INVOKABLE QPoint dbgCaretForTest() const;
+    Q_INVOKABLE void dbgSetCaretForTest(int line, int col);
 
     /*
      * 滚动条的右键动作（"滚动到这里 / 左边缘 / 翻页 / 滚一行"那七条）。
@@ -1196,6 +1202,8 @@ private:
      */
     void applyLineSpacing();
     void applyViewOptions();
+    /* 切主题：lexers 按语言缓存着，色板要逐个重铺（见 AppTheme::lightChanged） */
+    void restyleForTheme();
     void applyLanguageLexer();
     void applyMargins();
 

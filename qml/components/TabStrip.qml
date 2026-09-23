@@ -4,6 +4,7 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import "../utils"
+import SmartClip.Globals 1.0
 
 /*
  * 一个编辑组的标签栏。
@@ -71,15 +72,15 @@ Rectangle {
      */
     signal tabActivated(var pane, int index)
 
-    color: "#1e1f22"
+    color: Theme.c("#1e1f22", Theme.light)
     topLeftRadius: roundTopLeft ? cornerRadius : 0
     topRightRadius: roundTopRight ? cornerRadius : 0
 
     readonly property color accentColor: "#4c96d8"
-    readonly property color tabActiveBg: "#2b2d30"
-    readonly property color textBright: "#e8e8e8"
-    readonly property color textMain: "#bbbbbb"
-    readonly property color textMuted: "#7d7d7d"
+    readonly property color tabActiveBg: Theme.c("#2b2d30", Theme.light)
+    readonly property color textBright: Theme.c("#e8e8e8", Theme.light)
+    readonly property color textMain: Theme.c("#bbbbbb", Theme.light)
+    readonly property color textMuted: Theme.c("#7d7d7d", Theme.light)
 
     /*
      * 这一条标签栏和顶上那条横向滚动条的几何（自检读它，见 src/SelfTest.cpp）。
@@ -248,7 +249,7 @@ Rectangle {
                         width: Math.max(120, Math.min(240, tabLabel.implicitWidth + 74))
                         radius: 5
                         color: active ? root.tabActiveBg
-                                      : (hot ? "#3a3d41" : "transparent")
+                                      : (hot ? Theme.c("#3a3d41", Theme.light) : "transparent")
 
                         /* 这一层压在 tabHit 之上，小叉才收得到点击（见原说明） */
                         RowLayout {
@@ -365,7 +366,7 @@ Rectangle {
             radius: 5
             visible: root.paneActions && root.markdownToggleVisible
             color: root.markdownPreview ? root.accentColor
-                                        : (mdHit.containsMouse ? "#3a3d41"
+                                        : (mdHit.containsMouse ? Theme.c("#3a3d41", Theme.light)
                                                                : "transparent")
 
             AppIcon {
@@ -397,7 +398,7 @@ Rectangle {
         anchors.right: parent.right
         anchors.bottom: parent.bottom
         height: 1
-        color: "#4b4d4f"
+        color: Theme.c("#4b4d4f", Theme.light)
         opacity: 0.65
     }
 }

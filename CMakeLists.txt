@@ -64,6 +64,9 @@ set(SMARTCLIP_SOURCES
     src/Diff.cpp
     src/EditorViewItem.h
     src/EditorViewItem.cpp
+    # 深色/白色主题那一张色表（QML 单例 Theme，见 src/Theme.h）
+    src/Theme.h
+    src/Theme.cpp
     src/Screenshot.h
     src/Screenshot.cpp
     # 贴图窗口（"固定到桌面"那块图，见 src/PinWindow.h）：

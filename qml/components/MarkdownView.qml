@@ -2,6 +2,7 @@ pragma ComponentBehavior: Bound
 
 import QtQuick
 import QtQuick.Controls
+import SmartClip.Globals 1.0
 
 /*
  * Markdown 预览（只读渲染）。
@@ -69,7 +70,7 @@ Rectangle {
         body.select(0, body.length)
     }
 
-    readonly property color textColor: "#d6d7da"
+    readonly property color textColor: Theme.c("#d6d7da", Theme.light)
 
     color: "transparent"
     clip: true
@@ -223,7 +224,7 @@ Rectangle {
         width: Math.min(parent.width - 60, 420)
         visible: root.html === ""
         text: root.emptyHint
-        color: "#7d7d7d"
+        color: Theme.c("#7d7d7d", Theme.light)
         font.pixelSize: 13
         horizontalAlignment: Text.AlignHCenter
         wrapMode: Text.WordWrap

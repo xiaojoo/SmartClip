@@ -4,6 +4,7 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import "../utils"
+import SmartClip.Globals 1.0
 
 /*
  * 左树的一行。
@@ -32,9 +33,9 @@ Rectangle {
     /* 右键：把"哪一行"和鼠标坐标报给 Main，由它弹菜单（见 FolderTree） */
     signal rowContextMenu(real x, real y)
 
-    readonly property color selColor:    "#214283"
+    readonly property color selColor:    Theme.c("#214283", Theme.light)
     /* 右键那一行的底色：灰黑，比面板底色（#1e1f22）亮一档就够，不抢蓝底的风头 */
-    readonly property color contextColor: "#34373b"
+    readonly property color contextColor: Theme.c("#34373b", Theme.light)
 
     /*
      * 自检用：图标那一格在场景里的 x。
@@ -52,13 +53,13 @@ Rectangle {
      * 见 FolderTree.firstRowChevronPanelX。
      */
     readonly property real chevronCellX: chevronItem ? chevronItem.mapToItem(null, 0, 0).x : -1
-    readonly property color textBright:  "#e8e8e8"
-    readonly property color textColor:   "#bbbbbb"
-    readonly property color textMuted:   "#7d7d7d"
+    readonly property color textBright:  Theme.c("#e8e8e8", Theme.light)
+    readonly property color textColor:   Theme.c("#bbbbbb", Theme.light)
+    readonly property color textMuted:   Theme.c("#7d7d7d", Theme.light)
     readonly property color accentColor: "#4c96d8"
-    readonly property color chevronDim:  "#6f767e"
-    readonly property color folderColor: "#c8b74f"
-    readonly property color importColor: "#7fa8c8"
+    readonly property color chevronDim:  Theme.c("#6f767e", Theme.light)
+    readonly property color folderColor: Theme.c("#c8b74f", Theme.light)
+    readonly property color importColor: Theme.c("#7fa8c8", Theme.light)
 
     readonly property bool isFolder: modelData && modelData.kind === "folder"
     readonly property bool isDate: isFolder && modelData.folderKind === "date"

@@ -1,4 +1,5 @@
 #include "Checker.h"
+#include "Theme.h"
 #include "ClipboardManager.h"
 #include "ClipboardStore.h"
 #include "Diff.h"
@@ -139,26 +140,43 @@ int main(int argc, char *argv[]) {
      * openEditorContextMenu），颜色由 DropdownMenu.qml 自己写死。
      * 想更黑就把下面这几处换成 #1e1f22（编辑区底色）或纯黑。
      */
-    QPalette tipPalette = app.palette();
-    tipPalette.setColor(QPalette::ToolTipBase, QColor(0x2b, 0x2d, 0x30));
-    tipPalette.setColor(QPalette::ToolTipText, QColor(0xd6, 0xd7, 0xda));
+    /*
+     * 主题单例：必须在下面那段调色板之前建好，且必须早于 QML 加载
+     * （原因见本文件后面"用 QML 单例而不是上下文属性"那段）。
+     */
+    AppTheme theme;
 
-    /* 菜单 / 对话框面板 */
-    tipPalette.setColor(QPalette::Window, QColor(0x2b, 0x2d, 0x30));
-    tipPalette.setColor(QPalette::WindowText, QColor(0xc8, 0xcc, 0xd1));
-    tipPalette.setColor(QPalette::Base, QColor(0x2b, 0x2d, 0x30));
-    tipPalette.setColor(QPalette::AlternateBase, QColor(0x31, 0x33, 0x35));
-    tipPalette.setColor(QPalette::Text, QColor(0xc8, 0xcc, 0xd1));
-    tipPalette.setColor(QPalette::Button, QColor(0x2b, 0x2d, 0x30));
-    tipPalette.setColor(QPalette::ButtonText, QColor(0xc8, 0xcc, 0xd1));
-    tipPalette.setColor(QPalette::Highlight, QColor(0x21, 0x42, 0x83));
-    tipPalette.setColor(QPalette::HighlightedText, QColor(0xff, 0xff, 0xff));
-    /* 置灰项（菜单里当前不可用的命令）：和界面其它地方的次要文字一个色 */
-    tipPalette.setColor(QPalette::Disabled, QPalette::WindowText, QColor(0x6f, 0x73, 0x7a));
-    tipPalette.setColor(QPalette::Disabled, QPalette::Text, QColor(0x6f, 0x73, 0x7a));
-    tipPalette.setColor(QPalette::Disabled, QPalette::ButtonText, QColor(0x6f, 0x73, 0x7a));
+    /*
+     * 调色板要能重贴：切主题时 QPalette 不是绑定，是当时算好塞进 app 的一份死值，
+     * 所以抽成一个函数，启动时调一次、lightChanged 上再调一次。
+     */
+    auto applyWidgetPalette = [&app]() {
+        auto *t = AppTheme::instance();
+        QPalette tipPalette = app.palette();
+        tipPalette.setColor(QPalette::ToolTipBase, t->color(QStringLiteral("#2b2d30")));
+        tipPalette.setColor(QPalette::ToolTipText, t->color(QStringLiteral("#d6d7da")));
 
-    app.setPalette(tipPalette);
+        /* 菜单 / 对话框面板 */
+        tipPalette.setColor(QPalette::Window, t->color(QStringLiteral("#2b2d30")));
+        tipPalette.setColor(QPalette::WindowText, t->color(QStringLiteral("#c8ccd1")));
+        tipPalette.setColor(QPalette::Base, t->color(QStringLiteral("#2b2d30")));
+        tipPalette.setColor(QPalette::AlternateBase, t->color(QStringLiteral("#313335")));
+        tipPalette.setColor(QPalette::Text, t->color(QStringLiteral("#c8ccd1")));
+        tipPalette.setColor(QPalette::Button, t->color(QStringLiteral("#2b2d30")));
+        tipPalette.setColor(QPalette::ButtonText, t->color(QStringLiteral("#c8ccd1")));
+        tipPalette.setColor(QPalette::Highlight, t->color(QStringLiteral("#214283")));
+        tipPalette.setColor(QPalette::HighlightedText, QColor(0xff, 0xff, 0xff));
+        /* 置灰项（菜单里当前不可用的命令）：和界面其它地方的次要文字一个色 */
+        const QColor muted = t->color(QStringLiteral("#6f737a"));
+        tipPalette.setColor(QPalette::Disabled, QPalette::WindowText, muted);
+        tipPalette.setColor(QPalette::Disabled, QPalette::Text, muted);
+        tipPalette.setColor(QPalette::Disabled, QPalette::ButtonText, muted);
+
+        app.setPalette(tipPalette);
+    };
+    applyWidgetPalette();
+    QObject::connect(&theme, &AppTheme::lightChanged, &app,
+                     [&applyWidgetPalette]() { applyWidgetPalette(); });
 
     /* 弹框不再响那一声，见 ModalBeepSilencer 的说明 */
     static ModalBeepSilencer beepSilencer;
@@ -461,6 +479,7 @@ int main(int argc, char *argv[]) {
      * 但在根对象构造期间读到 null（TypeError: ... of null）。
      * 单例在对象构造前就已注册，绑定第一遍就能拿到。
      */
+    qmlRegisterSingletonInstance("SmartClip.Globals", 1, 0, "Theme", &theme);
     qmlRegisterSingletonInstance("SmartClip.Globals", 1, 0, "Store", &store);
     qmlRegisterSingletonInstance("SmartClip.Globals", 1, 0, "Win", &windowHelper);
     qmlRegisterSingletonInstance("SmartClip.Globals", 1, 0, "Cmd", &editorController);

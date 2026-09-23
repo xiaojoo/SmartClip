@@ -6,6 +6,7 @@
 #include "PinWindow.h"
 #include "Screenshot.h"
 #include "Speech.h"
+#include "Theme.h"
 #include "Translate.h"
 #include <QMessageBox>
 #include <QMouseEvent>
@@ -486,6 +487,19 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
                   EditorController *cmd, StickyNotes *notes, TranslateCards *cards,
                   LlmClient *llm, Speech *speech) {
     EditorViewItem *view = EditorViewItem::instance();
+
+    /*
+     * 主题钉成深色再跑。
+     *
+     * 这一套里有十来个断言量的是"行号栏不许是白的 / 画面里不许有纯白像素 /
+     * 滚动条轨道 = 正文底色 #1e1f22"—— 它们把深色当成了前提。用户在白色档下
+     * 跑自检会红一片（实测 11 红里 9 条是这个），而程序没坏：那几条恰恰证明
+     * 浅色已经铺到了原生那一侧。所以进来存一份、强制深色，末尾还回去。
+     */
+    AppTheme *theme = AppTheme::instance();
+    const bool themeWas = theme && theme->light();
+    if (theme)
+        theme->setLight(false);
 
     /*
      * stdout 不缓冲。
@@ -7804,6 +7818,9 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
         gPassed += SelfTest::translatePassed();
         gFailed += SelfTest::translateFailed();
     }
+
+    if (theme && themeWas)
+        theme->setLight(true);   /* 还原用户那一档 */
 
     out() << Qt::endl
           << "通过 " << gPassed << " 项，失败 " << gFailed << " 项" << Qt::endl;

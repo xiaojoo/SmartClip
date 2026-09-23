@@ -5,10 +5,11 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import "../delegates"
 import "../utils"
+import SmartClip.Globals 1.0
 
 Rectangle {
     id: root
-    color: "#1e1f22"
+    color: Theme.c("#1e1f22", Theme.light)
     radius: 10
     clip: true
     border.width: 0
@@ -202,11 +203,11 @@ Rectangle {
     }
 
 
-    readonly property color borderColor: "#43454a"
-    readonly property color textBright:  "#ced0d6"
-    readonly property color textMuted:   "#6f737a"
+    readonly property color borderColor: Theme.c("#43454a", Theme.light)
+    readonly property color textBright:  Theme.c("#ced0d6", Theme.light)
+    readonly property color textMuted:   Theme.c("#6f737a", Theme.light)
     /* 标题 / 按钮的悬停底色：比面板底色亮一点点就够，深色界面上不抢眼 */
-    readonly property color hoverColor:  "#2b2d30"
+    readonly property color hoverColor:  Theme.c("#2b2d30", Theme.light)
 
     IconProvider { id: icons }
 

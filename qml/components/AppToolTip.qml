@@ -2,6 +2,7 @@ pragma ComponentBehavior: Bound
 
 import QtQuick
 import QtQuick.Controls
+import SmartClip.Globals 1.0
 
 /*
  * 深色工具提示 —— 界面里所有提示框都用它（提示框的**全局外观**都在这一个文件里）。
@@ -27,9 +28,9 @@ Popup {
     id: control
 
     /* 外观（自检读这三个，见 Main.qml 的 uiState） */
-    readonly property color tipBackground: "#2b2d30"
-    readonly property color tipBorder: "#4b4d4f"
-    readonly property color tipTextColor: "#d6d7da"
+    readonly property color tipBackground: Theme.c("#2b2d30", Theme.light)
+    readonly property color tipBorder: Theme.c("#4b4d4f", Theme.light)
+    readonly property color tipTextColor: Theme.c("#d6d7da", Theme.light)
 
     /* 提示文字 */
     property string text: ""

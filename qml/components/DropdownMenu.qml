@@ -121,12 +121,12 @@ Popup {
         onTriggered: root.runCommand(act)
     }
 
-    readonly property color bgColor:     "#3c3f41"
-    readonly property color borderColor: "#4b4d4f"
-    readonly property color textColor:   "#bbbbbb"
-    readonly property color textHot:     "#e8e8e8"
-    readonly property color hoverColor:  "#46484a"
-    readonly property color mutedColor:  "#6f737a"
+    readonly property color bgColor:     Theme.c("#3c3f41", Theme.light)
+    readonly property color borderColor: Theme.c("#4b4d4f", Theme.light)
+    readonly property color textColor:   Theme.c("#bbbbbb", Theme.light)
+    readonly property color textHot:     Theme.c("#e8e8e8", Theme.light)
+    readonly property color hoverColor:  Theme.c("#46484a", Theme.light)
+    readonly property color mutedColor:  Theme.c("#6f737a", Theme.light)
     readonly property color accentColor: "#4c96d8"
 
     readonly property real itemHeight: 28
@@ -951,10 +951,10 @@ Popup {
                               ? entry.modelData.icon : ""
                         size: 14
                         /* 和工具栏原来那套图标一个色：平时灰、悬停转亮 */
-                        tint: entry.isDisabled ? "#4d5157"
+                        tint: entry.isDisabled ? Theme.c("#4d5157", Theme.light)
                                                : (itemHit.containsMouse
                                                   ? root.textHot
-                                                  : "#9aa0a8")
+                                                  : Theme.c("#9aa0a8", Theme.light))
                     }
                 }
 
@@ -987,7 +987,7 @@ Popup {
                     text: entry.modelData && entry.modelData.shortcut
                           ? entry.modelData.shortcut : ""
                     visible: text !== ""
-                    color: entry.isDisabled ? "#55585d" : root.mutedColor
+                    color: entry.isDisabled ? Theme.c("#55585d", Theme.light) : root.mutedColor
                     font.pixelSize: 11
                     verticalAlignment: Text.AlignVCenter
                 }
@@ -1005,7 +1005,7 @@ Popup {
                     provider: menuIcons
                     kind: "chevron-right"
                     size: 11
-                    tint: entry.isDisabled ? "#55585d"
+                    tint: entry.isDisabled ? Theme.c("#55585d", Theme.light)
                                            : (itemHit.containsMouse ? root.textHot
                                                                     : root.mutedColor)
                 }

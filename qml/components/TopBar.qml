@@ -22,7 +22,7 @@ Rectangle {
     id: root
 
     implicitHeight: 34
-    color: "#313335"
+    color: Theme.c("#313335", Theme.light)
 
     // 要操作的窗口（Main.qml 的 window），转给右侧的窗口按钮
     property var host: null
@@ -45,12 +45,12 @@ Rectangle {
      */
     signal aboutRequested()
 
-    readonly property color borderColor: "#43454a"
-    readonly property color iconColor:   "#8b929e"
-    readonly property color textColor:   "#b4b8bf"
-    readonly property color textBright:  "#ced0d6"
-    readonly property color textMuted:   "#6f737a"
-    readonly property color fieldBg:     "#2b2d30"
+    readonly property color borderColor: Theme.c("#43454a", Theme.light)
+    readonly property color iconColor:   Theme.c("#8b929e", Theme.light)
+    readonly property color textColor:   Theme.c("#b4b8bf", Theme.light)
+    readonly property color textBright:  Theme.c("#ced0d6", Theme.light)
+    readonly property color textMuted:   Theme.c("#6f737a", Theme.light)
+    readonly property color fieldBg:     Theme.c("#2b2d30", Theme.light)
 
     /*
      * 这一栏点了有没有反应。
@@ -210,14 +210,14 @@ Rectangle {
                     Layout.preferredHeight: 22
                     Layout.preferredWidth: tabLabel.implicitWidth + 14
                     radius: 4
-                    color: tabHover.containsMouse && live ? "#3a3d41" : "transparent"
+                    color: tabHover.containsMouse && live ? Theme.c("#3a3d41", Theme.light) : "transparent"
 
                     Label {
                         id: tabLabel
                         anchors.centerIn: parent
                         text: modelData
                         font.pixelSize: 12
-                        color: tabHover.containsMouse && live ? "#e8e8e8" : root.textColor
+                        color: tabHover.containsMouse && live ? Theme.c("#e8e8e8", Theme.light) : root.textColor
                     }
 
                     MouseArea {

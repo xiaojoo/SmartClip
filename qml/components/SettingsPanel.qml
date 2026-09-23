@@ -148,10 +148,10 @@ Window {
         function onRunFinished(count) { root.reloadSummarize() }
     }
 
-    readonly property color bgColor:      "#2b2d30"
-    readonly property color sidebarColor: "#26282b"
-    readonly property color headerColor:  "#33363a"
-    readonly property color borderColor:  "#4b4d4f"
+    readonly property color bgColor:      Theme.c("#2b2d30", Theme.light)
+    readonly property color sidebarColor: Theme.c("#26282b", Theme.light)
+    readonly property color headerColor:  Theme.c("#33363a", Theme.light)
+    readonly property color borderColor:  Theme.c("#4b4d4f", Theme.light)
     /*
      * 面板最外圈那一道边框。
      *
@@ -160,15 +160,15 @@ Window {
      * 整个框像是没有边界。所以外框单独提一档亮、加粗到 2px，
      * 宽度统一收在 frameWidth 上（背景圆角和标题栏圆角都跟着它走）。
      */
-    readonly property color frameColor:   "#5c6066"
+    readonly property color frameColor:   Theme.c("#5c6066", Theme.light)
     readonly property int frameWidth:     2
-    readonly property color rowHover:     "#34373b"
-    readonly property color rowSel:       "#2f3a44"
-    readonly property color textColor:    "#c8ccd1"
-    readonly property color textBright:   "#e8e8e8"
-    readonly property color mutedColor:   "#8a9098"
+    readonly property color rowHover:     Theme.c("#34373b", Theme.light)
+    readonly property color rowSel:       Theme.c("#2f3a44", Theme.light)
+    readonly property color textColor:    Theme.c("#c8ccd1", Theme.light)
+    readonly property color textBright:   Theme.c("#e8e8e8", Theme.light)
+    readonly property color mutedColor:   Theme.c("#8a9098", Theme.light)
     readonly property color accentColor:  "#4c96d8"
-    readonly property color warnColor:    "#c8503c"
+    readonly property color warnColor:    Theme.c("#c8503c", Theme.light)
 
     readonly property int rowHeight: 26
 
@@ -642,7 +642,7 @@ Window {
                     provider: icons
                     kind: "gear"
                     size: 15
-                    tint: "#9aa0a8"
+                    tint: Theme.c("#9aa0a8", Theme.light)
                 }
     
                 Text {
@@ -662,14 +662,14 @@ Window {
                     anchors.rightMargin: 5
                     anchors.verticalCenter: parent.verticalCenter
                     radius: 5
-                    color: closeHit.containsMouse ? "#c8503c" : "transparent"
+                    color: closeHit.containsMouse ? Theme.c("#c8503c", Theme.light) : "transparent"
     
                     AppIcon {
                         anchors.centerIn: parent
                         provider: icons
                         kind: "close"
                         size: 13
-                        tint: closeHit.containsMouse ? "#ffffff" : "#9aa0a8"
+                        tint: closeHit.containsMouse ? "#ffffff" : Theme.c("#9aa0a8", Theme.light)
                     }
     
                     MouseArea {
@@ -762,7 +762,7 @@ Window {
                                     kind: navRow.modelData.icon
                                     size: 14
                                     tint: navRow.active ? root.accentColor
-                                                        : (navRow.hot ? root.textBright : "#9aa0a8")
+                                                        : (navRow.hot ? root.textBright : Theme.c("#9aa0a8", Theme.light))
                                 }
     
                                 Text {
@@ -980,7 +980,7 @@ Window {
                                         width: 168
                                         height: 20
                                         radius: 4
-                                        color: keyRow.capturing ? "#1e2023" : "transparent"
+                                        color: keyRow.capturing ? Theme.c("#1e2023", Theme.light) : "transparent"
                                         border.width: keyRow.capturing ? 1 : 0
                                         border.color: root.accentColor
     
@@ -1167,7 +1167,7 @@ Window {
                                     width: 76
                                     height: 22
                                     radius: 4
-                                    color: okHit.containsMouse ? "#3a3e42" : "#33363a"
+                                    color: okHit.containsMouse ? Theme.c("#3a3e42", Theme.light) : Theme.c("#33363a", Theme.light)
                                     border.width: 1
                                     border.color: okHit.containsMouse ? root.accentColor : root.borderColor
     
@@ -1549,7 +1549,7 @@ Window {
                                              */
                                             onTextChanged: if (!activeFocus) cursorPosition = 0
                                             background: Rectangle {
-                                                color: "#26282b"
+                                                color: Theme.c("#26282b", Theme.light)
                                                 border.color: root.borderColor
                                                 border.width: 1
                                                 radius: 4
@@ -1655,7 +1655,7 @@ Window {
                                     onEditingFinished: Llm.localExe = text
                                     onTextChanged: if (!activeFocus) cursorPosition = 0
                                     background: Rectangle {
-                                        color: "#26282b"
+                                        color: Theme.c("#26282b", Theme.light)
                                         border.color: root.borderColor
                                         border.width: 1
                                         radius: 4
@@ -1709,7 +1709,7 @@ Window {
                                     onEditingFinished: Llm.localModel = text
                                     onTextChanged: if (!activeFocus) cursorPosition = 0
                                     background: Rectangle {
-                                        color: "#26282b"
+                                        color: Theme.c("#26282b", Theme.light)
                                         border.color: root.borderColor
                                         border.width: 1
                                         radius: 4
@@ -1763,7 +1763,7 @@ Window {
                                     onEditingFinished: Llm.localMmproj = text
                                     onTextChanged: if (!activeFocus) cursorPosition = 0
                                     background: Rectangle {
-                                        color: "#26282b"
+                                        color: Theme.c("#26282b", Theme.light)
                                         border.color: root.borderColor
                                         border.width: 1
                                         radius: 4
@@ -1815,7 +1815,7 @@ Window {
                                     validator: IntValidator { bottom: 1; top: 65535 }
                                     onEditingFinished: Llm.localPort = parseInt(text)
                                     background: Rectangle {
-                                        color: "#26282b"
+                                        color: Theme.c("#26282b", Theme.light)
                                         border.color: root.borderColor
                                         border.width: 1
                                         radius: 4
@@ -1967,7 +1967,7 @@ Window {
                                         width: 96
                                         height: 24
                                         radius: 4
-                                        color: engCell.active ? "#2f3a44"
+                                        color: engCell.active ? Theme.c("#2f3a44", Theme.light)
                                                               : (engHit.containsMouse ? root.rowHover
                                                                                       : "transparent")
                                         border.width: 1
@@ -2024,7 +2024,7 @@ Window {
                                     onEditingFinished: Llm.pinOcrRunner = text
                                     onTextChanged: if (!activeFocus) cursorPosition = 0
                                     background: Rectangle {
-                                        color: "#26282b"
+                                        color: Theme.c("#26282b", Theme.light)
                                         border.color: root.borderColor
                                         border.width: 1
                                         radius: 4
@@ -2097,7 +2097,7 @@ Window {
                                     width: 138
                                     height: 24
                                     radius: 4
-                                    color: docEngCell.active ? "#2f3a44"
+                                    color: docEngCell.active ? Theme.c("#2f3a44", Theme.light)
                                                              : (docEngHit.containsMouse ? root.rowHover
                                                                                         : "transparent")
                                     border.width: 1
@@ -2162,7 +2162,7 @@ Window {
                                     height: 24
                                     radius: 4
                                     anchors.verticalCenter: parent.verticalCenter
-                                    color: tierCell.active ? "#2f3a44"
+                                    color: tierCell.active ? Theme.c("#2f3a44", Theme.light)
                                                            : (tierHit.containsMouse ? root.rowHover
                                                                                     : "transparent")
                                     border.width: 1
@@ -2220,7 +2220,7 @@ Window {
                                 onEditingFinished: Doc.pythonPath = text
                                 onTextChanged: if (!activeFocus) cursorPosition = 0
                                 background: Rectangle {
-                                    color: "#26282b"
+                                    color: Theme.c("#26282b", Theme.light)
                                     border.color: root.borderColor
                                     border.width: 1
                                     radius: 4
@@ -2293,7 +2293,7 @@ Window {
                                 onEditingFinished: Doc.runner = text
                                 onTextChanged: if (!activeFocus) cursorPosition = 0
                                 background: Rectangle {
-                                    color: "#26282b"
+                                    color: Theme.c("#26282b", Theme.light)
                                     border.color: root.borderColor
                                     border.width: 1
                                     radius: 4
@@ -2382,7 +2382,7 @@ Window {
                         Text {
                             width: parent.width
                             wrapMode: Text.WordWrap
-                            color: Check.llmReady ? root.accentColor : "#d7a85b"
+                            color: Check.llmReady ? root.accentColor : Theme.c("#d7a85b", Theme.light)
                             font.pixelSize: 11
                             text: Check.modelSummary
                         }
@@ -2465,7 +2465,7 @@ Window {
                                     height: 8
                                     radius: 4
                                     anchors.verticalCenter: parent.verticalCenter
-                                    color: fmtRow.available ? "#7bc47f" : root.mutedColor
+                                    color: fmtRow.available ? Theme.c("#7bc47f", Theme.light) : root.mutedColor
                                 }
 
                                 Text {
@@ -2474,7 +2474,7 @@ Window {
                                     text: fmtRow.tool
                                           + (fmtRow.available ? "" : "（没找到）")
                                     color: fmtRow.available ? root.mutedColor
-                                                            : "#d7a85b"
+                                                            : Theme.c("#d7a85b", Theme.light)
                                     font.pixelSize: 11
                                     elide: Text.ElideRight
                                 }
@@ -2517,7 +2517,7 @@ Window {
                                     }
                                     onTextChanged: if (!activeFocus) cursorPosition = 0
                                     background: Rectangle {
-                                        color: "#26282b"
+                                        color: Theme.c("#26282b", Theme.light)
                                         border.color: root.borderColor
                                         border.width: 1
                                         radius: 4
@@ -2638,7 +2638,7 @@ Window {
                                 rightPadding: 7
                                 onEditingFinished: root.sumFrom = text
                                 background: Rectangle {
-                                    color: "#26282b"
+                                    color: Theme.c("#26282b", Theme.light)
                                     border.color: root.borderColor
                                     border.width: 1
                                     radius: 4
@@ -2664,7 +2664,7 @@ Window {
                                 rightPadding: 7
                                 onEditingFinished: root.sumTo = text
                                 background: Rectangle {
-                                    color: "#26282b"
+                                    color: Theme.c("#26282b", Theme.light)
                                     border.color: root.borderColor
                                     border.width: 1
                                     radius: 4
