@@ -3,8 +3,35 @@
 #include "TerminalPty.h"
 
 #include <QFileInfo>
+#include <QTimer>
 
 namespace {
+
+/*
+ * 把一行**原始格子**拼成文字，口径和 TerminalEngine::lineText() 对齐：
+ * 宽字符的尾巴格（chars[0]==0xffffffff）跳过、空格子补一个空格、行尾空格去掉。
+ * 只拿它判断"刚滚进来的这一行，是不是清屏之前屏上的那一行"（见 onSbPush）。
+ */
+QString cellsText(const VTermScreenCell *cells, int cols)
+{
+    QString line;
+    for (int c = 0; c < cols; ++c) {
+        const quint32 first = cells[c].chars[0];
+        if (first == 0xffffffffu)
+            continue;
+        if (first == 0) {
+            line += QLatin1Char(' ');
+            continue;
+        }
+        QString piece;
+        for (int i = 0; i < VTERM_MAX_CHARS_PER_CELL && cells[c].chars[i] != 0; ++i)
+            piece += QChar(cells[c].chars[i]);
+        line += piece;
+    }
+    while (!line.isEmpty() && line.at(line.size() - 1) == QLatin1Char(' '))
+        line.chop(1);
+    return line;
+}
 
 /* 一个"什么都没有"的格子：越界 / 回滚行比当前屏窄时补它 */
 VTermScreenCell blankCell()
@@ -109,22 +136,6 @@ void TerminalEngine::applyOutput(const QByteArray &bytes)
 void TerminalEngine::feedBytesForTest(const QByteArray &bytes)
 {
     applyOutput(bytes);
-}
-
-void TerminalEngine::eraseScreenForClear()
-{
-    /*
-     * 清屏这一笔必须喂给**我们自己的解析器**，不能走 sendBytes。
-     *
-     * sendBytes 是写给 shell 的 stdin 的（TerminalPty::write）—— 把 "\x1b[2J" 发过去
-     * 等于替用户敲了一段转义字符，PowerShell 顶多回显个乱码，屏上的字一个都不动。
-     * 用户报的"删除并不能清空当前终端展示的数据"就是这么来的（垃圾桶那颗按钮）。
-     * 喂进解析器才是"终端收到了一条清屏指令"：整屏擦掉、光标回原位。
-     *
-     * 3J（擦回滚）一并注进去：这份 libvterm 0.3 不认它也无所谓，回滚是我们自己存的，
-     * 调用方紧接着会 clearHistory()。
-     */
-    applyOutput("\x1b[2J\x1b[3J\x1b[H");
 }
 
 void TerminalEngine::closeSession()
@@ -332,6 +343,15 @@ void TerminalEngine::mouseMove(int row, int col, int modifiers)
     vterm_mouse_move(m_vt, row, col, VTermModifier(modifiers));
 }
 
+void TerminalEngine::suppressHistoryBriefly()
+{
+    /* 先把屏上这几行的文字记下来：它们马上就要被 Ctrl+L 滚进回滚，而那正是用户要清的 */
+    m_histDropQueue.clear();
+    for (int r = 0; r < m_rows; ++r)
+        m_histDropQueue << lineText(r);
+    clearHistory();
+}
+
 bool TerminalEngine::running() const
 {
     return m_pty->running();
@@ -441,6 +461,22 @@ int TerminalEngine::onBell(void *user)
 int TerminalEngine::onSbPush(int cols, const VTermScreenCell *cells, void *user)
 {
     auto *self = static_cast<TerminalEngine *>(user);
+    /*
+     * 刚按过垃圾桶：Ctrl+L 在 shell 那边是「把整屏滚上去」，这一滚会经 sb_pushline
+     * 把刚清掉的旧内容又塞回回滚。
+     *
+     * 丢的判断按**内容**对上才丢：clearBuffer() 之前把屏上那几行的文字记进队列，
+     * 滚进来的行和队首一模一样才丢掉并出队；**对不上就整个停止丢**、正常存。
+     * 按时间窗、按行数预算都试过，都会吃掉真新的输出（自检当场量到
+     * 「清完立刻灌 600 行，history 还是 0」和「krow 1 找不着」）。
+     */
+    if (!self->m_histDropQueue.isEmpty()) {
+        if (cellsText(cells, cols) == self->m_histDropQueue.first()) {
+            self->m_histDropQueue.removeFirst();
+            return 1;
+        }
+        self->m_histDropQueue.clear();
+    }
     std::vector<VTermScreenCell> line(cells, cells + cols);
     self->m_history.push_back(std::move(line));
     while (int(self->m_history.size()) > TerminalEngine::kHistoryLimit)

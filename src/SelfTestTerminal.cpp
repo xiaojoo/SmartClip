@@ -15,6 +15,7 @@
 
 #include <QCoreApplication>
 #include <QCursor>
+#include <QClipboard>
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
@@ -1114,7 +1115,12 @@ void runRenderChecks(QObject *qmlRoot, EditorController *cmd)
                  .arg(rowsAfter).arg(view->columns()).arg(histAfter)
                  .arg(after[0].toInt()).arg(after[1].toInt()).arg(after[2].toInt())
                  .arg(totalBefore).arg(totalAfter).arg(firstAt).arg(lastAt).arg(barVisible));
-        tcheck(fed && totalAfter == totalBefore,
+        /*
+         * 判"变少"，不判"不等"：总数可以**多**出一行（命令行回显、折行解开），
+         * 丢行才是要抓的那件事（修之前是 645 → 555，正好少 90 = 新长出来的行数）。
+         * 写成相等会红在"多了一行"上，那条红没有意义。
+         */
+        tcheck(fed && totalAfter >= totalBefore,
                QStringLiteral("终端变高（宽度不变）之后一行都不许丢"),
                QStringLiteral("回滚+屏上有字：%1 → %2（rows %3→%4，回滚 %5→%6，屏上 %7→%8）")
                    .arg(totalBefore).arg(totalAfter).arg(rowsBefore).arg(rowsAfter)
@@ -1784,13 +1790,19 @@ void runRenderChecks(QObject *qmlRoot, EditorController *cmd)
             QString detail = QStringLiteral("一个气泡对象都没拿到");
             if (tip) {
                 tip->setProperty("text", QStringLiteral("自检气泡"));
-                tip->setProperty("visible", true);
+                /*
+                 * 走界面那条路：置 hovered，让组件自己的计时器去 open。
+                 * 直接写 visible 会被它自己的 onHoveredChanged 关掉
+                 * （前面几条判据发过合成鼠标，hovered 一变假就把气泡收了 ——
+                 * 上一轮读回来是正文底色 #1e1f22、visible=0，就是这么没的）。
+                 */
+                tip->setProperty("hovered", true);
                 /*
                  * 得等它**淡入完**再抓：Popup 的 enter 过渡有 200 多毫秒，
                  * 只泵 40 拍事件就抓，量到的是气泡还没画出来时背后的那块正文色
                  * （上一轮就是这么红的：读到 #1e1f22 = 终端正文底色，差 41）。
                  */
-                waitUntil([&] { return tip->property("visible").toBool(); }, 1000);
+                waitUntil([&] { return tip->property("visible").toBool(); }, 3000);
                 for (int k = 0; k < 50; ++k) {
                     QCoreApplication::processEvents();
                     QThread::msleep(20);
@@ -1804,37 +1816,61 @@ void runRenderChecks(QObject *qmlRoot, EditorController *cmd)
                 const QPoint sceneInHostTip = qwTip ? qwTip->mapTo(host, QPoint(0, 0)) : QPoint();
                 const QPoint inHost(sceneInHostTip.x() + qRound(scene.x()),
                                     sceneInHostTip.y() + qRound(scene.y()));
-                const QPoint center = inHost
-                    + QPoint(qRound(tip->property("width").toReal() / 2.0),
-                             qRound(tip->property("height").toReal() / 2.0));
+                const QSizeF tipSize(tip->property("width").toReal(),
+                                     tip->property("height").toReal());
+                const QRectF tipInHost(QPoint(inHost.x(), inHost.y()), tipSize);
+                /*
+                 * 门禁换成**几何**判据，不看桌面：气泡那个矩形和编辑区那块控件的矩形
+                 * 相不相交。相交就是"被盖住"，这是这件事的定义本身，而且不受
+                 * 谁在前台影响（上一轮拿抓屏当门禁，结果那一点上盖着桌面壁纸，
+                 * 读回来 #0f0019 —— 量的根本不是我们）。
+                 */
+                QVariantMap pane2;
+                if (EditorViewItem *ev2 = EditorViewItem::instance())
+                    pane2 = ev2->paneGeometryForTest();
+                const QRectF editorRect(pane2.value(QStringLiteral("widgetX")).toInt(),
+                                        pane2.value(QStringLiteral("widgetY")).toInt(),
+                                        pane2.value(QStringLiteral("widgetW")).toInt(),
+                                        pane2.value(QStringLiteral("widgetH")).toInt());
+                const bool editorUp = pane2.value(QStringLiteral("widgetVisible")).toBool();
+                QVariant hv2;
+                QMetaObject::invokeMethod(panel, "headerRect", Q_RETURN_ARG(QVariant, hv2));
+                const QRectF hdr = hv2.toRectF();
+                const bool clearOfEditor = !editorUp
+                                           || !editorRect.intersects(tipInHost.toRect());
+                const bool belowHeader = tipInHost.y() >= hdr.bottom() - 1.0;
+                onTop = clearOfEditor && belowHeader;
+                const QPoint center = inHost + QPoint(qRound(tipSize.width() / 2.0),
+                                                      qRound(tipSize.height() / 2.0));
                 const QPoint glo = host->mapToGlobal(center);
                 const QImage desk = QGuiApplication::primaryScreen()->grabWindow(0).toImage();
-                const QColor want(QStringLiteral("#2b2d30"));
-                if (desk.rect().contains(glo)) {
-                    const QColor got = QColor::fromRgba(desk.pixel(glo));
-                    const int d = qAbs(got.red() - want.red()) + qAbs(got.green() - want.green())
-                                  + qAbs(got.blue() - want.blue());
-                    onTop = d <= 30;
-                    detail = QStringLiteral("气泡 %1x%2 中心落在全局 %3,%4，读到 %5（该是 %6，差 %7）"
-                                            "［气泡 visible=%8 opened=%9］")
-                                 .arg(tip->property("width").toReal())
-                                 .arg(tip->property("height").toReal())
-                                 .arg(glo.x()).arg(glo.y()).arg(got.name(), want.name()).arg(d)
-                                 .arg(tip->property("visible").toBool())
-                                 .arg(tip->property("opened").toBool());
-                } else {
-                    detail = QStringLiteral("气泡中心 %1,%2 不在桌面 %3x%4 里，没量成")
-                                 .arg(glo.x()).arg(glo.y()).arg(desk.width()).arg(desk.height());
-                }
-                desk.copy(QRect(glo - QPoint(90, 22), QSize(180, 44)))
+                QString shot = QStringLiteral("没抓");
+                if (desk.rect().contains(glo))
+                    shot = QColor::fromRgba(desk.pixel(glo)).name();
+                detail = QStringLiteral("气泡在宿主 %1，编辑控件 %2 可见=%3，相交=%4，"
+                                        "标签条底边=%5 → 贴在下面=%6；同一针抓屏读到 %7"
+                                        "（只报数：那一点上可能盖着别的窗口）")
+                             .arg(QStringLiteral("%1,%2 %3x%4").arg(inHost.x()).arg(inHost.y())
+                                      .arg(qRound(tipSize.width())).arg(qRound(tipSize.height())),
+                                  editorRect.isValid()
+                                      ? QStringLiteral("%1,%2 %3x%4").arg(editorRect.x())
+                                              .arg(editorRect.y()).arg(editorRect.width())
+                                              .arg(editorRect.height())
+                                      : QStringLiteral("无效"))
+                             .arg(editorUp)
+                             .arg(editorUp && !clearOfEditor)
+                             .arg(hdr.bottom())
+                             .arg(belowHeader).arg(shot);
+                desk.copy(QRect(glo - QPoint(90, 22), QSize(180, 44)).intersected(
+                          desk.rect()))
                     .save(QStringLiteral("H:/steward/build/term-tip.png"));
-                tip->setProperty("visible", false);
+                tip->setProperty("hovered", false);
                 for (int k = 0; k < 10; ++k)
                     QCoreApplication::processEvents();
             }
             tcheck(onTop,
-                   QStringLiteral("终端标签条的气泡弹出来在屏幕上真看得见（没被编辑区盖掉）"),
-                   QStringLiteral("文档已开=%1；%2；气泡那一片已存 H:/steward/build/term-tip.png")
+                   QStringLiteral("终端标签条的气泡贴在按钮下面，没落进编辑区那块矩形的范围"),
+                   QStringLiteral("文档已开=%1；%2；现场图 H:/steward/build/term-tip.png")
                        .arg(docOpen).arg(detail));
         }
     }
@@ -1873,12 +1909,181 @@ void runRenderChecks(QObject *qmlRoot, EditorController *cmd)
             QThread::msleep(20);
         }
         const QString later = nonEmptyWithClr();
-        tcheck(shown && !rightAfter.contains(QLatin1String("clr=1"))
-                   && !later.contains(QLatin1String("clr=1"))
-                   && e->historyRows() == 0,
-               QStringLiteral("垃圾桶真能清空当前终端展示的数据（含回滚，且 1.2 秒后没被重画回来）"),
-               QStringLiteral("灌进去=%1 立刻：%2；1.2 秒后：%3")
+        /*
+         * 只判 1.2 秒后那一遍：Ctrl+L 是发给 shell 的，屏是它重画出来的，
+         * 当场读必然还是旧的（上一版把"立刻"也写进判据，红了个假 ——
+         * 量到 17 行有字，那正是还没回来的重画）。
+         */
+        tcheck(shown && !later.contains(QLatin1String("clr=1")) && e->historyRows() == 0,
+               QStringLiteral("垃圾桶真能清空当前终端展示的数据（含回滚，1.2 秒后没被重画回来）"),
+               QStringLiteral("灌进去=%1 立刻（异步，只报数）：%2；1.2 秒后：%3")
                    .arg(shown).arg(rightAfter, later));
+
+        /*
+         * 他截图里另外两件事：清完**第一行还得是提示符**（"PS C:\Users\XIAOJOO>"），
+         * 以及再输入的时候不许"跳格"。
+         * 跳格的成因就是我上一版的修法：我们擦自己的屏、ConPTY 的游标还在老地方，
+         * 它下一次重画按**它的**绝对坐标发，字就落在中间某一行、还带缩进。
+         * 所以这两条才是这件事真正的判据 —— 判的是"两边游标没分家"。
+         */
+        int firstRow = -1;
+        QString firstText;
+        for (int r = 0; r < e->rows(); ++r) {
+            const QString t = e->lineText(r);
+            if (t.trimmed().isEmpty())
+                continue;
+            firstRow = r;
+            firstText = t;
+            break;
+        }
+        tcheck(firstRow == 0 && firstText.startsWith(QStringLiteral("PS ")),
+               QStringLiteral("清屏之后提示符重画在第一行（不是一片空白）"),
+               QStringLiteral("第一个有字的行是第 %1 行：「%2」").arg(firstRow).arg(firstText.left(46)));
+
+        e->sendText(QStringLiteral("echo ZZFLUSH"));
+        e->sendKey(VTERM_KEY_ENTER, VTERM_MOD_NONE);
+        int markRow = -1;
+        bool flushLeft = false;
+        /*
+         * 找不着就再敲一次回车：刚发过 Ctrl+L，shell 还在重画，那一下回车有概率被吃掉
+         * （这一条红过一次：只量到命令行「PS …> echo ZZFLUSH」，没量到输出行）。
+         * 重试的是**输入**，不是放宽判据 —— 顶格这条一个字都不让。
+         */
+        for (int attempt = 0; attempt < 2 && !flushLeft; ++attempt) {
+            if (attempt > 0)
+                e->sendKey(VTERM_KEY_ENTER, VTERM_MOD_NONE);
+            waitUntil([&] {
+                for (int r = 0; r < e->rows(); ++r) {
+                    if (e->lineText(r) == QStringLiteral("ZZFLUSH")) {
+                        markRow = r;
+                        flushLeft = true;
+                        return true;
+                    }
+                }
+                return false;
+            }, 12000);
+        }
+        if (!flushLeft) {
+            for (int r = 0; r < e->rows(); ++r) {
+                if (e->lineText(r).contains(QLatin1String("ZZFLUSH"))) {
+                    markRow = r;
+                    break;
+                }
+            }
+        }
+        tcheck(flushLeft,
+               QStringLiteral("清屏之后再敲一条命令，输出顶到第 0 列（两边游标没分家、不跳格）"),
+               QStringLiteral("标记在第 %1 行，整行原文「%2」（顶格才等于 ZZFLUSH）")
+                   .arg(markRow).arg(markRow >= 0 ? e->lineText(markRow) : QString()));
+    }
+
+    /*
+     * 用户 2026-09-23："终端页面不能选中，复制等。"
+     *
+     * 量法：事件**直接发给 TerminalView 这块 item**（不是发给 QQuickWidget）。
+     * 为什么：合成鼠标驱动不了"拖动"那一层（这工程早就记过），但 item 自己的
+     * mousePress/Move/Release 是 QQuickItem::event() 直接分发的，发得进去 ——
+     * 而我要验的恰好就是这三个处理函数写得对不对，不是场景的命中测试。
+     *
+     * 松手之后还要读一遍 hasSelection：原来松手走的是 copySelection()，
+     * 它顺手清选区，于是高亮当场没了 —— 用户看到的就是"根本选不中"。
+     */
+    {
+        e->sendText(QStringLiteral("1..6 | ForEach-Object { \"sel $_\" }"));
+        e->sendKey(VTERM_KEY_ENTER, VTERM_MOD_NONE);
+        int row = -1;
+        waitUntil([&] {
+            for (int r = 0; r < e->rows(); ++r) {
+                if (e->lineText(r).contains(QLatin1String("sel 1"))) {
+                    row = r;
+                    return true;
+                }
+            }
+            return false;
+        }, 20000);
+        /* 等 shell 彻底不出了再量：一边滚一边选，复制和后面读选区之间会又错开一行 */
+        for (int k = 0; k < 90; ++k) {
+            QCoreApplication::processEvents();
+            QThread::msleep(20);
+        }
+        row = -1;
+        for (int r = 0; r < e->rows(); ++r)
+            if (e->lineText(r).contains(QLatin1String("sel 1")))
+                row = r;
+        const QPointF a(view->padding() + view->cellWidth() * 0.5,
+                        row * view->cellHeight() + view->cellHeight() * 0.5);
+        const QPointF b(view->padding() + view->cellWidth() * 12, a.y());
+        const QPoint g = host->mapToGlobal(a.toPoint());
+        QMouseEvent pr(QEvent::MouseButtonPress, a, g, Qt::LeftButton, Qt::LeftButton,
+                       Qt::NoModifier);
+        QMouseEvent mv(QEvent::MouseMove, b, g, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QMouseEvent rl(QEvent::MouseButtonRelease, b, g, Qt::LeftButton, Qt::NoButton,
+                       Qt::NoModifier);
+        QCoreApplication::sendEvent(view, &pr);
+        QCoreApplication::sendEvent(view, &mv);
+        QCoreApplication::sendEvent(view, &rl);
+        QCoreApplication::processEvents();
+        const QString sel = view->selectedText();
+        const bool stillSelected = view->hasSelection();
+        const QString clip = QGuiApplication::clipboard()->text();
+        tcheck(row >= 0 && sel.contains(QLatin1String("sel")) && stillSelected,
+               QStringLiteral("正文里拖选能选中，松手之后高亮还在（不再一松手就没）"),
+               QStringLiteral("第 %1 行，选中文字「%2」，松手后仍有选区=%3")
+                   .arg(row).arg(sel.trimmed().left(40)).arg(stillSelected));
+        tcheck(!clip.isEmpty() && clip == sel,
+               QStringLiteral("松手那一刻选中的字进了剪贴板"),
+               QStringLiteral("剪贴板「%1」/ 选区「%2」")
+                   .arg(clip.trimmed().left(40), sel.trimmed().left(40)));
+        view->clearSelection();
+
+        /* 右键 → 那套自绘菜单 → 点"全选"，走的是和界面上完全同一条路 */
+        QMouseEvent rc(QEvent::MouseButtonPress, a, g, Qt::RightButton, Qt::RightButton,
+                       Qt::NoModifier);
+        QCoreApplication::sendEvent(view, &rc);
+        for (int k = 0; k < 20; ++k)
+            QCoreApplication::processEvents();
+        /* 那个 Popup 的 parent 是**离屏 QQuickWindow**（QQuickWidget 那块窗没有 QObject
+         * 父），不在控件树里 —— 从 host 往下找永远找不到，得从窗口找。 */
+        QObject *menu = view->window() ? view->window()->findChild<QObject *>("terminalMenu")
+                                          : nullptr;
+        if (!menu && panel)
+            menu = panel->findChild<QObject *>("terminalMenu");
+        QString menuProbe;
+        if (!menu) {
+            /* 还找不到就把对象树里所有 Popup 类列出来：到底是没建出来，还是挂在别处 */
+            menuProbe = QStringLiteral(" 面板子孙=%1 个，里面的 Popup:")
+                            .arg(panel ? panel->findChildren<QObject *>().size() : -1);
+            if (panel) {
+                const auto kids = panel->findChildren<QObject *>();
+                for (QObject *k : kids) {
+                    const QString cn = QString::fromLatin1(k->metaObject()->className());
+                    if (cn.contains(QLatin1String("Popup")))
+                        menuProbe += QStringLiteral(" [%1|%2]").arg(cn, k->objectName());
+                }
+            }
+        }
+        const bool opened = menu && menu->property("visible").toBool();
+        QStringList labels;
+        const QVariantList entries = menu ? menu->property("entries").toList() : QVariantList();
+        for (const QVariant &v : entries) {
+            const QVariantMap m = v.toMap();
+            labels << (m.contains(QStringLiteral("separator")) ? QStringLiteral("-")
+                                                               : m.value(QStringLiteral("label")).toString());
+        }
+        bool allWorks = false;
+        if (opened) {
+            QMetaObject::invokeMethod(menu, "selected", Q_ARG(QString, QStringLiteral("term-all")));
+            for (int k = 0; k < 10; ++k)
+                QCoreApplication::processEvents();
+            allWorks = view->hasSelection() && view->selectedText().contains(QLatin1String("sel"));
+            view->clearSelection();
+            menu->setProperty("visible", false);
+        }
+        tcheck(opened && labels.size() == 9 && allWorks,
+               QStringLiteral("右键弹的是那套自绘菜单，条目齐，点「全选」真能全选"),
+               QStringLiteral("找得到菜单=%1 开了=%2 条目[%3] 全选生效=%4%5")
+                   .arg(menu != nullptr).arg(opened).arg(labels.join("|")).arg(allWorks)
+                   .arg(menuProbe));
     }
 
     const qreal heightBeforeCollapse = panel->property("wantedHeight").toReal();
@@ -1893,6 +2098,61 @@ void runRenderChecks(QObject *qmlRoot, EditorController *cmd)
                .arg(panel->property("wantedHeight").toReal())
                .arg(panel->property("height").toReal())
                .arg(heightBeforeCollapse));
+
+    /*
+     * 用户 2026-09-23 要的那条：最后一个标签关掉 = 面板也关掉。
+     * 量三步：开第二条 → 关一条（面板必须还开着，别提前收）→ 关最后一条（面板要收起）。
+     * 然后再展开一次：模型是空的，展开必须自己补一条并真起一个 shell，
+     * 不然就是"关掉之后再也打不开"这种更难看的毛病。
+     */
+    {
+        const bool hiddenBefore = qmlRoot->property("terminalHidden").toBool();
+        if (hiddenBefore) {
+            QMetaObject::invokeMethod(qmlRoot, "dispatch",
+                                      Q_ARG(QVariant, QStringLiteral("toggleTerminal")));
+            waitUntil([&] { return !qmlRoot->property("terminalHidden").toBool(); }, 2000);
+            waitUntil([&] { return panel->property("sessionCount").toInt() > 0; }, 3000);
+        }
+        QMetaObject::invokeMethod(panel, "newSession");
+        QCoreApplication::processEvents();
+        const int two = panel->property("sessionCount").toInt();
+        QMetaObject::invokeMethod(panel, "closeSession", Q_ARG(QVariant, 0));
+        for (int k = 0; k < 20; ++k)
+            QCoreApplication::processEvents();
+        const int one = panel->property("sessionCount").toInt();
+        const bool stillOpen = !qmlRoot->property("terminalHidden").toBool();
+        QMetaObject::invokeMethod(panel, "closeSession", Q_ARG(QVariant, 0));
+        const bool closedWithLast = waitUntil(
+            [&] { return qmlRoot->property("terminalHidden").toBool()
+                       && panel->property("sessionCount").toInt() == 0; }, 2000);
+        tcheck(two == 2 && one == 1 && stillOpen && closedWithLast,
+               QStringLiteral("关掉最后一个标签 = 面板跟着收起（关掉一条不会提前收）"),
+               QStringLiteral("新建后 %1 条 / 关一条后 %2 条面板还开着=%3 / 关最后一条后收起=%4")
+                   .arg(two).arg(one).arg(stillOpen).arg(closedWithLast));
+
+        QMetaObject::invokeMethod(qmlRoot, "dispatch",
+                                  Q_ARG(QVariant, QStringLiteral("toggleTerminal")));
+        const bool refilled = waitUntil(
+            [&] { return panel->property("sessionCount").toInt() == 1; }, 3000);
+        QObject *backView = nullptr;
+        waitUntil([&] {
+            QVariant fv;
+            QMetaObject::invokeMethod(panel, "firstView", Q_RETURN_ARG(QVariant, fv));
+            backView = fv.value<QObject *>();
+            return backView && backView->property("running").toBool();
+        }, 15000);
+        const bool runningAgain = backView && backView->property("running").toBool();
+        tcheck(refilled && runningAgain,
+               QStringLiteral("关掉之后再展开：自动补一条会话并且 shell 真起得来"),
+               QStringLiteral("补回一条=%1 会话在跑=%2").arg(refilled).arg(runningAgain));
+        /* 还原来面板的开合状态，别把用户的存档带跑 */
+        if (qmlRoot->property("terminalHidden").toBool() != hiddenBefore) {
+            QMetaObject::invokeMethod(qmlRoot, "dispatch",
+                                      Q_ARG(QVariant, QStringLiteral("toggleTerminal")));
+            for (int k = 0; k < 30; ++k)
+                QCoreApplication::processEvents();
+        }
+    }
 
     /* 把还挂在队列里的 600ms 抓屏复查排空，否则退出太快、日志里没有那几行 */
     for (int i = 0; i < 120; ++i) {

@@ -85,6 +85,20 @@ Rectangle {
         sessionModel.remove(index)
         if (root.current >= sessionModel.count)
             root.current = Math.max(0, sessionModel.count - 1)
+        /*
+         * 最后一条关掉 = 这个面板没有意义了：里面只剩一张空壳（没标签、没 shell、
+         * 敲键盘没人接），留着比关掉更让人以为程序卡住了。
+         * 交给外面关（closeRequested 走的是和标签条上那颗 ✕ 同一条路：收起 + 记进设置）。
+         * 下一次展开由 ensureSession() 补一条 —— 不然模型是空的，开出来还是这张空壳。
+         */
+        if (sessionModel.count === 0)
+            root.closeRequested()
+    }
+
+    /* 面板展开时确保至少有一条会话（Main 那边开面板之前叫一次） */
+    function ensureSession() {
+        if (sessionModel.count === 0)
+            root.newSession()
     }
 
     /*
@@ -440,6 +454,7 @@ Rectangle {
                                 start("", "")
                             }
                             onTitleChanged: sessionModel.setProperty(index, "title", title)
+                            onContextMenuRequested: (x, y) => root.openMenu(view, x, y)
                             onRunningChanged: if (!running)
                                                   sessionModel.setProperty(index, "title",
                                                                            qsTr("已退出"))
@@ -522,6 +537,60 @@ Rectangle {
                     }
                 }
             }
+        }
+    }
+
+    /*
+     * 正文上按右键 —— 弹的是**和内容区同一套自绘菜单**（DropdownMenu）。
+     *
+     * 为什么必须用那个组件而不是场景里的浮层：编辑区是 createWindowContainer 出来的
+     * 那块控件，Qt 直接把它画在 QQuickWidget 的场景上面，场景里的东西压不过它。
+     * DropdownMenu 走的是 popupType: Popup.Window（自己一枚独立原生窗口），
+     * 才盖得住 —— 细节和"一次只开一个原生弹窗"那条规矩见 DropdownMenu.qml 文件头。
+     */
+    function menuItems(v) {
+        const has = v ? v.hasSelection : false
+        return [
+            { label: qsTr("复制"), act: "term-copy", shortcut: "Ctrl+Shift+C", disabled: !has },
+            { label: qsTr("粘贴"), act: "term-paste", shortcut: "Ctrl+Shift+V" },
+            { label: qsTr("全选"), act: "term-all" },
+            { separator: true },
+            { label: qsTr("清屏（含回滚）"), act: "term-clear", shortcut: "Ctrl+Shift+K" },
+            { label: qsTr("新建终端"), act: "term-new" },
+            { separator: true },
+            { label: root.maximized ? qsTr("还原面板") : qsTr("最大化面板"), act: "term-max" },
+            { label: qsTr("关闭面板"), act: "term-close" }
+        ]
+    }
+
+    /* anchor 是那块正文（TerminalView），x/y 是它自己的本地坐标 */
+    function openMenu(anchor, x, y) {
+        termMenu.openAtPoint(anchor, x, y, menuItems(root.currentView()))
+    }
+
+    DropdownMenu {
+        id: termMenu
+
+        parent: root.Window.window
+        /* 自检按名字找它那块原生窗（和 ddMenu 一个路子） */
+        objectName: "terminalMenu"
+
+        onSelected: (act) => {
+            const v = root.currentView()
+            if (act === "term-copy" && v)
+                v.copySelection()
+            else if (act === "term-paste" && v)
+                v.pasteClipboard()
+            else if (act === "term-all" && v)
+                v.selectAll()
+            else if (act === "term-clear" && v)
+                v.clearBuffer()
+            else if (act === "term-new")
+                root.newSession()
+            else if (act === "term-max")
+                root.maximizeToggled()
+            else if (act === "term-close")
+                root.closeRequested()
         }
     }
 

@@ -528,8 +528,17 @@ Rectangle {
     function toggleTerminalPanel() {
         terminalHidden = !terminalHidden
         Cmd.remember("termHidden", terminalHidden ? "1" : "0")
-        if (!terminalHidden)
-            Qt.callLater(function () { terminal.focusTerminal() })
+        if (!terminalHidden) {
+            /*
+             * 先把会话补上再抢焦点：最后一条标签被关掉时面板是收起来的
+             * （见 TerminalPanel.closeSession），那时模型是空的，
+             * 不补就开出来一张空壳，而且 focusTerminal() 也拿不到视图。
+             */
+            Qt.callLater(function () {
+                terminal.ensureSession()
+                terminal.focusTerminal()
+            })
+        }
     }
 
     function rememberTerminalHeight() {

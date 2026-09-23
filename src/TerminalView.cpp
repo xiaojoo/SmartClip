@@ -365,12 +365,27 @@ void TerminalView::closeSession()
 void TerminalView::clearBuffer()
 {
     /*
-     * 屏交给**我们自己的解析器**清（不是发给 shell —— 那样等于替用户敲了一段转义
-     * 字符，屏上一个字都不动，见 TerminalEngine::eraseScreenForClear），
-     * 回滚清我们存的那份 —— 只清一样都不算"清空"：往上滚还能翻出旧内容，或者屏还花着。
+     * 清屏这笔**得让 shell 自己清**，不能我们擦屏。
+     *
+     * 上一版是往我们自己的解析器里灌 ESC[2J + ESC[H：屏是干净了，可 ConPTY 那一侧
+     * 的游标还停在它原来那一行 —— 它下一次重画发的是**按它坐标算的绝对定位**，
+     * 于是新敲进去的字落在面板中间某一行、还带着缩进（用户 2026-09-23 的图：
+     * 清完一片空白，再输 "dir" 出现在第 22 行）。两边各记一个游标，必然分家。
+     *
+     * 发 Ctrl+L 才是人按的那个"清屏"：PowerShell 的 Clear-Display、cmd 的 cls
+     * 会把 conhost 的缓冲清掉、把提示符重画在**第一行**，我们跟着它重画就行。
+     * 回滚是我们自己存的那份（libvterm 0.3 没有 scrollback），照旧清我们自己这份。
      */
-    m_engine->eraseScreenForClear();
-    m_engine->clearHistory();
+    m_engine->sendBytes(QByteArray(1, '\x0c'));   // Ctrl+L
+    /*
+     * 清完开 400ms 的"不进回滚"窗口，而不是过 300ms 再清一遍。
+     *
+     * 我先试的是再清一遍，那是个地雷：Ctrl+L 到 shell 那边是异步的，
+     * 那 300ms 里用户要是灌了几百行，第二刀把它们全砍了
+     * —— 自检当场量到"改尺寸之前 602 行、之后只剩 15 行"。
+     * 现在只挡住"这一滚被记进回滚"，屏上的字一个不少。
+     */
+    m_engine->suppressHistoryBriefly();
     setScrollUp(0);
     /* 回滚行数直接归零，引擎那边不会为此发 contentsChanged —— 不补一句，
        QML 那条 `visible: view.historyRows > 0` 停在"还看得见"上（垃圾桶按了条子不藏）。 */
@@ -1066,6 +1081,15 @@ void TerminalView::mousePressEvent(QMouseEvent *event)
         pasteClipboard();   // Windows 终端惯例：中键 = 粘贴
         return;
     }
+    /*
+     * 右键：弹**程序自己那套**自绘菜单（和编辑区、左树、tab 同一份 DropdownMenu，
+     * 差别只在条目）。这里不清选区 —— 右键之前多半刚选好字，菜单上的"复制"要用；
+     * 而且右键一落就把高亮抹掉，看起来又像"选不中"。
+     */
+    if (event->button() == Qt::RightButton) {
+        emit contextMenuRequested(event->position().x(), event->position().y());
+        return;
+    }
     if (event->button() != Qt::LeftButton)
         return;
 
@@ -1107,10 +1131,32 @@ void TerminalView::mouseReleaseEvent(QMouseEvent *event)
         return;
     m_selecting = false;
     /* 选中即复制（Windows Terminal / VS Code 的默认行为），拖一个点不算选 */
-    if (m_selRowA != m_selRowB || m_selColA != m_selColB)
-        copySelection();
-    else
+    if (m_selRowA != m_selRowB || m_selColA != m_selColB) {
+        /*
+         * 复制完**留着高亮**。原来这里调的是 copySelection()，它顺手把选区清了 ——
+         * 鼠标一松字上的底色就没了，用户报的就是"终端页面不能选中"
+         * （2026-09-23）。VS Code / Windows Terminal 松手之后高亮都还在，
+         * 要撤是下一次按下、Esc、或菜单里点走。
+         * Ctrl+C 那条还是走 copySelection()（复制完清选区，下一次 Ctrl+C 才是打断）。
+         */
+        const QString text = selectedText();
+        if (!text.isEmpty())
+            QGuiApplication::clipboard()->setText(text);
+        notifySelection();
+    } else {
         clearSelection();
+    }
+}
+
+void TerminalView::selectAll()
+{
+    /* 从回滚区最老那一行的第 0 列，一直到当前屏最后一行的最后一列 */
+    m_selActive = true;
+    m_selRowA = -m_engine->historyRows();
+    m_selColA = 0;
+    m_selRowB = m_engine->rows() - 1;
+    m_selColB = qMax(0, m_engine->cols() - 1);
+    notifySelection();
 }
 
 void TerminalView::mouseDoubleClickEvent(QMouseEvent *event)

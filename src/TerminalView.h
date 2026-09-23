@@ -77,6 +77,8 @@ public:
     Q_INVOKABLE void pasteClipboard();
     Q_INVOKABLE QString selectedText() const;
     Q_INVOKABLE void clearSelection();
+    /* 右键菜单里的"全选"：从回滚区最老那一行一直到当前屏最后一行 */
+    Q_INVOKABLE void selectAll();
     /* 清屏 + 清回滚（面板上那个垃圾桶） */
     Q_INVOKABLE void clearBuffer();
 
@@ -174,6 +176,12 @@ signals:
     void fontChanged();
     void themeChanged();
     void gridChanged();
+    /*
+     * 在正文上按了右键（且对面没开鼠标上报）。x/y 是**本 item 的本地坐标** ——
+     * 面板拿它去开那套自绘菜单（DropdownMenu.openAtPoint 收的就是锚点本地坐标，
+     * 它自己换算到宿主窗口）。
+     */
+    void contextMenuRequested(qreal x, qreal y);
     /* shell 自己退出了（用户打了 exit）：面板据此决定标签要不要留 */
     void sessionExited(int exitCode);
 

@@ -76,11 +76,15 @@ public:
     void clearHistory();
 
     /*
-     * 把整屏擦掉 —— 喂我们自己的解析器，不是发给 shell。
-     * 为什么不能走 sendBytes：见 .cpp 里那段（垃圾桶那颗按钮原来就是这么发的，
-     * 结果"点了没反应"）。
+     * 清完这一小段时间里，被顶出屏幕的行不进回滚。
+     *
+     * 垃圾桶发的是 Ctrl+L，shell 收到是「滚动 + 重画提示符」，这一滚会经
+     * sb_pushline 把刚清掉的内容又塞回我们这儿（自检量到：清完 history=1、
+     * 还能翻到旧行）。开一个几百毫秒的窗口把这一批丢掉。
+     * 只丢「进回滚」这一步 —— 屏上的字一个不少，所以窗口里真有新输出也看得见。
      */
-    void eraseScreenForClear();
+    void suppressHistoryBriefly();
+
 
     /* 面板/窗口改了尺寸：同步伪控制台和网格的行列数 */
     void setSize(int cols, int rows);
@@ -183,4 +187,6 @@ private:
     QColor m_defaultFg { QStringLiteral("#d4d4d4") };
     QColor m_defaultBg { QStringLiteral("#1e1f22") };
     bool m_contentsDirty = false;
+    /* 见 suppressHistoryBriefly：按内容对上才丢，对不上立刻停止丢 */
+    QStringList m_histDropQueue;
 };
