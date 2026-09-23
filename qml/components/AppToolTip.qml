@@ -41,7 +41,16 @@ Popup {
     padding: 6
 
     /*
-     * 贴在父项上方居中，但**不许越过窗口左右两边**。
+     * 贴在父项上方居中（默认），但**不许越过窗口左右两边**。
+     *
+     * preferBelow：改贴到父项**下面**。
+     * 为什么要有这个开关：界面里有一块东西不是 QML 画的 —— 编辑区是
+     * createWindowContainer 出来的那块控件，Qt 直接把它画在 QQuickWidget 上面，
+     * 场景里的东西压不过它。终端面板在编辑区**下面**，所以标签条上那几颗按钮的气泡
+     * 一往上弹就整个落进编辑区那块矩形里，被盖得一个字都看不见
+     * （用户 2026-09-23："打开文档之后，终端右边的添加/删除气泡被隐藏了" ——
+     * 没开文档时那块控件不显示，所以只有开了文档才看得见这个毛病）。
+     * 贴到下面就是落在终端正文那一片，那是我们自己的场景，压得住。
      *
      * 原来是一条绑定 `x: (parent.width - implicitWidth) / 2`：贴着右边缘的那些
      * 按钮（标签栏最右边那个"源码 / 预览"开关）居中之后有一半跑到窗口外面，
@@ -57,6 +66,7 @@ Popup {
      * Popup **收着的时候 x 写了不落地** —— 实测写 -486，关着读回来还是 0，
      * open 之后才生效。所以"调一下 place() 再读属性"量不到东西。
      */
+    property bool preferBelow: false
     property int edgeMargin: 6
 
     function place() {
@@ -81,7 +91,7 @@ Popup {
         x = high < low ? low : Math.max(low, Math.min(high, want))
     }
 
-    y: parent ? -implicitHeight - 3 : 0
+    y: parent ? (preferBelow ? parent.height + 3 : -implicitHeight - 3) : 0
 
     onAboutToShow: place()
 

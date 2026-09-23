@@ -8,11 +8,13 @@
 #include "SelfTest.h"
 
 #include "EditorController.h"
+#include "EditorViewItem.h"
 
 #include "TerminalEngine.h"
 #include "TerminalView.h"
 
 #include <QCoreApplication>
+#include <QCursor>
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
@@ -965,13 +967,21 @@ void runRenderChecks(QObject *qmlRoot, EditorController *cmd)
          * 那是"黑这个颜色在这套主题里该映射成什么"的决定（改调色板 0 号会同时改掉
          * 所有黑前景），不是"哪一层没画"的 bug，所以摆在这儿给人看，不塞进门禁里。
          */
-        tcheck(canvasRunPeak < 100 && worstScreen < 100,
-               QStringLiteral("面板吃下整行之后的头几帧：没有黑带（画布和屏幕两层都量）"),
-               QStringLiteral("视图 %1x%2 格子 %3 列，画布最长黑段=%4，屏幕黑段峰值=%5；"
-                              "顺带：单帧最多铺黑底=%6 块、画布黑采样峰值=%7（宽字符尾巴，见上）")
+        /*
+         * 门禁量的是**画布 + 我们主动铺的矩形**这两层（都在渲染线程自己那一侧，
+         * 读回来不会骗人）：修之前是"画布最长黑段 2384、一帧铺 91 块 #ff000000"。
+         *
+         * 屏幕那一列只报数不当门禁：换几何的头一帧屏幕上可以整条全黑（这一轮量到
+         * 3797 px = 视图整个宽），而**同一帧画布是干净的**（连续黑段 0、铺黑底 0）——
+         * 那是离屏表面回读那一拍，和终端内容无关，结案记录见 maximize-flash-tradeoffs
+         * （4K 面积税，只有 GPU 顶层能消）。拿它当门禁就是把那件已拍板的事重新吵一遍。
+         */
+        tcheck(canvasRunPeak < 100 && blackRectPeak == 0,
+               QStringLiteral("面板吃下整行之后的头几帧：画布干净，我们也没主动铺过黑底格子"),
+               QStringLiteral("视图 %1x%2 格子 %3 列，画布最长黑段=%4，单帧最多铺黑底=%5 块；"
+                              "屏幕黑段峰值=%6（只报数：头一帧画布干净而屏幕全黑 = 离屏回读那一拍）")
                    .arg(view->width()).arg(view->height()).arg(view->columns())
-                   .arg(canvasRunPeak).arg(worstScreen).arg(blackRectPeak)
-                   .arg(canvasBlackPeak).arg(series.join(" || ")));
+                   .arg(canvasRunPeak).arg(blackRectPeak).arg(worstScreen));
     }
 
     /*
@@ -1478,6 +1488,83 @@ void runRenderChecks(QObject *qmlRoot, EditorController *cmd)
     }
 
     /*
+     * 按住拖的那一段，光标不许闪回箭头（用户 2026-09-23 又提的那条）。
+     *
+     * QML 的 cursorShape 只在鼠标**停在那个 item 上**时生效：拖高度的把手只有 6px 高、
+     * 位置条只有 8px 宽，指针一抖就跑到正文里，按住不放的过程中光标当场变回箭头。
+     * 修法是拖动期间压一枚应用级 override 光标（Win.pushResizeCursor，左树那条缝同一招）。
+     *
+     * 量的层次要挑对：**位移**这一层合成鼠标量不了（这工程早就记过"合成鼠标拖不动"），
+     * 但 override 是按下那一刻压上去的 —— 所以判据是"按下之后 overrideCursor 的 shape
+     * 是不是那一枚、松手之后是不是还掉了"，这两步合成分得出来。
+     */
+    {
+        auto overrideShape = []() -> int {
+            const QCursor *c = QApplication::overrideCursor();
+            return c ? int(c->shape()) : -1;
+        };
+        auto *qw = host->findChild<QQuickWidget *>();
+        auto pressReleaseOn = [&](QQuickItem *item, int *pressedShape, int *afterRelease) {
+            if (!item || !qw) {
+                *pressedShape = -2;
+                *afterRelease = -2;
+                return;
+            }
+            const QPointF sc = item->mapToScene(QPointF(item->width() / 2.0,
+                                                        item->height() / 2.0));
+            const QPoint gl = host->mapToGlobal(sc.toPoint());
+            QMouseEvent pr(QEvent::MouseButtonPress, sc, gl, Qt::LeftButton, Qt::LeftButton,
+                           Qt::NoModifier);
+            QMouseEvent rl(QEvent::MouseButtonRelease, sc, gl, Qt::LeftButton, Qt::NoButton,
+                           Qt::NoModifier);
+            QCoreApplication::sendEvent(qw, &pr);
+            QCoreApplication::processEvents();
+            *pressedShape = overrideShape();
+            QCoreApplication::sendEvent(qw, &rl);
+            QCoreApplication::processEvents();
+            *afterRelease = overrideShape();
+        };
+        QVariant sv;
+        QMetaObject::invokeMethod(panel, "stripItem", Q_RETURN_ARG(QVariant, sv));
+        auto *strip = qobject_cast<QQuickItem *>(sv.value<QObject *>());
+        int stripPressed = -2, stripReleased = -2;
+        pressReleaseOn(strip, &stripPressed, &stripReleased);
+        tcheck(stripPressed == int(Qt::SizeVerCursor) && stripReleased == -1,
+               QStringLiteral("拖高度按住的那一段，光标钉在上下拉伸、松手就还掉"),
+               QStringLiteral("把手 %1x%2，按下之后 override=%3（该是 %4），松手之后=%5（该是没压）")
+                   .arg(strip ? qRound(strip->width()) : -1)
+                   .arg(strip ? qRound(strip->height()) : -1)
+                   .arg(stripPressed).arg(int(Qt::SizeVerCursor)).arg(stripReleased));
+
+        /* 位置条那条 8px 轨道里的 MouseArea：按 children 里带 cursorShape 的那个找 */
+        QObject *trackMouse = nullptr;
+        {
+            QVariant tv;
+            QMetaObject::invokeMethod(panel, "currentTrack", Q_RETURN_ARG(QVariant, tv));
+            if (auto *trk = tv.value<QObject *>()) {
+                const auto kids = trk->children();
+                for (QObject *c : kids) {
+                    if (c->metaObject()->className()
+                            && QString::fromLatin1(c->metaObject()->className())
+                                   .contains(QLatin1String("MouseArea"))) {
+                        trackMouse = c;
+                        break;
+                    }
+                }
+            }
+        }
+        int barPressed = -2, barReleased = -2;
+        pressReleaseOn(qobject_cast<QQuickItem *>(trackMouse), &barPressed, &barReleased);
+        view->scrollToEnd();
+        tcheck(barPressed == int(Qt::PointingHandCursor) && barReleased == -1,
+               QStringLiteral("拖位置条按住的那一段，光标钉住、松手就还掉"),
+               QStringLiteral("找到轨道里的 MouseArea=%1，按下之后 override=%2（该是 %3），"
+                              "松手之后=%4")
+                   .arg(trackMouse != nullptr).arg(barPressed)
+                   .arg(int(Qt::PointingHandCursor)).arg(barReleased));
+    }
+
+    /*
      * 用户报的第一条：**拖动改尺寸途中**面板里出黑块，点一下选择才消失。
      * 合成鼠标驱动不了那条 6px 热区（见下面拖高度那条的说明），所以这里直接推拖动真正推的
      * 那个数：一格一格把高度顶上去，每一格等**几何落定**就抓一帧桌面。
@@ -1550,6 +1637,250 @@ void runRenderChecks(QObject *qmlRoot, EditorController *cmd)
      * Quick Layouts 会跳过不可见的项、不再给它设几何，于是 height 停在收起前的残值
      * （实测 233），那不是缺陷，是布局的规矩。
      */
+    /*
+     * 用户 2026-09-23 第 1 条：**打开文档之后**，终端标签条右边那几颗按钮
+     * （新建 / 清屏）看不到了。
+     *
+     * 怀疑的是编辑区那块原生子窗（createWindowContainer 出来的 QScintilla）：
+     * 原生窗口永远画在 QML 上面，它只要往面板这一片伸过去一点，按钮就被盖掉，
+     * 而在 QML 自己的坐标里量永远是"没重叠"。所以这里把两边都换算成**全局矩形**
+     * 再对号，并把那一刻的真实桌面裁一条下来给人看。
+     */
+    {
+        /*
+         * 先把"打开了文档"这个前提**当场造出来**：上一节开的那份到这里可能已经换了
+         * 状态，而这一条量的就是"有文档时那几颗按钮还在不在"。
+         * 判据里把 hasDocument 和原生子窗的颗数一起打出来 —— 0 颗子窗 = 前提没成立，
+         * 那时候"没盖住"是假绿（第一版就是这么绿的）。
+         */
+        const QString tmpDoc2 = QDir::tempPath() + QStringLiteral("/smartclip-term-probe2.md");
+        QFile f2(tmpDoc2);
+        if (f2.open(QIODevice::WriteOnly)) {
+            f2.write("# 文档已打开\n\n这一段用来让编辑区那块原生子窗真的摆到界面上。\n");
+            f2.close();
+        }
+        QMetaObject::invokeMethod(qmlRoot, "openTreeFile", Q_ARG(QVariant, tmpDoc2));
+        bool docOpen = false;
+        waitUntil([&] {
+            QObject *v = qmlRoot->property("view").value<QObject *>();
+            docOpen = v && v->property("hasDocument").toBool();
+            return docOpen;
+        }, 4000);
+        for (int k = 0; k < 30; ++k)
+            QCoreApplication::processEvents();
+
+        /*
+         * 两个时机都要量：面板常规高度（在编辑区下面）和面板吃下整行（盖住编辑区那一片）。
+         * 后者才是嫌疑最大的那一种 —— 编辑区那块控件的矩形要是不跟着收，
+         * 它就正好压在标签条这一条上。
+         */
+        auto measure = [&](const char *tag) {
+        QVariant hv;
+        QMetaObject::invokeMethod(panel, "headerRect", Q_RETURN_ARG(QVariant, hv));
+        const QRectF headerScene = hv.toRectF();
+        QVariant bv;
+        QMetaObject::invokeMethod(panel, "headerButtons", Q_RETURN_ARG(QVariant, bv));
+        const QVariantList btns = bv.toList();
+        auto *qw = host->findChild<QQuickWidget *>();
+        /*
+         * 盖住按钮的不是"原生子窗"：EnumChildWindows 在这台机器上一颗都数不到 ——
+         * 编辑那块控件压根没有 HWND。它是宿主页面上和 QQuickWidget **并列的一块 QWidget**，
+         * Qt 直接把它画在 QQuickWidget 上面（谁 raise 过谁在上）。
+         * 所以这里量的是它的 geometry()（宿主坐标）和按钮的场景坐标，两边都换算到
+         * 宿主坐标再对号 —— 和 EditorViewItem 摆它时用的是同一套换算
+         * （"场景坐标 + QQuickWidget 相对宿主的偏移"）。
+         */
+        const QPoint sceneInHost = qw ? qw->mapTo(host, QPoint(0, 0)) : QPoint();
+        QVariantMap pane;
+        if (EditorViewItem *ev = EditorViewItem::instance())
+            pane = ev->paneGeometryForTest();
+        const QRect widgetRect(sceneInHost.x() + pane.value(QStringLiteral("widgetX")).toInt(),
+                               sceneInHost.y() + pane.value(QStringLiteral("widgetY")).toInt(),
+                               pane.value(QStringLiteral("widgetW")).toInt(),
+                               pane.value(QStringLiteral("widgetH")).toInt());
+        const bool widgetUp = pane.value(QStringLiteral("widgetVisible")).toBool();
+        QString report = QStringLiteral("标签条 %1x%2@%3,%4；编辑控件 摆在 %5 可见=%6；按钮 %7 颗")
+                             .arg(qRound(headerScene.width())).arg(qRound(headerScene.height()))
+                             .arg(sceneInHost.x() + qRound(headerScene.x()))
+                             .arg(sceneInHost.y() + qRound(headerScene.y()))
+                             .arg(widgetRect.isValid()
+                                      ? QStringLiteral("%1,%2 %3x%4").arg(widgetRect.x())
+                                              .arg(widgetRect.y()).arg(widgetRect.width())
+                                              .arg(widgetRect.height())
+                                      : QStringLiteral("无效"))
+                             .arg(widgetUp).arg(btns.size());
+        int covered = 0, buttonsOk = 0;
+        QString who;
+        for (const QVariant &v : btns) {
+            const QRectF b = v.toRectF();
+            if (b.width() <= 0 || b.height() <= 0)
+                continue;
+            ++buttonsOk;
+            const QPoint center(sceneInHost.x() + qRound(b.center().x()),
+                                sceneInHost.y() + qRound(b.center().y()));
+            if (widgetUp && widgetRect.contains(center)) {
+                ++covered;
+                who += QStringLiteral(" 编辑控件盖住%1,%2").arg(center.x()).arg(center.y());
+            }
+        }
+        tcheck(docOpen && covered == 0 && buttonsOk == 4,
+               QStringLiteral("%1：打开文档之后，标签条右边那 4 颗按钮没被编辑区那块控件盖住")
+                   .arg(QLatin1String(tag)),
+               QStringLiteral("文档已开=%1 按钮找到 %2 颗、被盖 %3 颗%4；%5")
+                   .arg(docOpen).arg(buttonsOk).arg(covered)
+                   .arg(who, report));
+        /* 真实桌面裁一条：数字对不上时靠它看现场 */
+        const QImage desk = QGuiApplication::primaryScreen()->grabWindow(0).toImage();
+        const QRect crop(sceneInHost.x() + qRound(headerScene.x()),
+                         sceneInHost.y() + qRound(headerScene.y()) - 4,
+                         qRound(headerScene.width()), qRound(headerScene.height()) + 8);
+        if (desk.rect().contains(crop))
+            desk.copy(crop).save(QStringLiteral("H:/steward/build/term-header-%1.png")
+                                     .arg(QLatin1String(tag)));
+        };
+        measure("常规高度");
+        qmlRoot->setProperty("terminalMaximized", true);
+        waitUntil([&] { return view->rows() > 100; }, 4000);
+        for (int k = 0; k < 30; ++k)
+            QCoreApplication::processEvents();
+        measure("面板最大化");
+        qmlRoot->setProperty("terminalMaximized", false);
+        waitUntil([&] { return view->rows() < 60; }, 4000);
+
+        /*
+         * 第三种顺序才是嫌疑最大的那一种：**先开文档、后开面板**。
+         * 这时编辑区那块控件已经按"没有面板"的高度摆好了，面板再挤进来 ——
+         * 它要是慢半拍没跟着收，就直接压到标签条上（上面两种顺序量出来只差 5px，
+         * 也就是说只要它滞后一格，按钮就没了）。
+         * 开完面板**立刻量一遍**（不等它落定），再等稳量第二遍。
+         */
+        QMetaObject::invokeMethod(qmlRoot, "dispatch",
+                                  Q_ARG(QVariant, QStringLiteral("toggleTerminal")));
+        if (waitUntil([&] { return !panel->property("visible").toBool(); }, 1500)) {
+            QMetaObject::invokeMethod(qmlRoot, "dispatch",
+                                      Q_ARG(QVariant, QStringLiteral("toggleTerminal")));
+            waitUntil([&] { return panel->property("visible").toBool(); }, 1500);
+            measure("后开面板·当场");
+            for (int k = 0; k < 40; ++k)
+                QCoreApplication::processEvents();
+            measure("后开面板·落定");
+        } else {
+            tcheck(false, QStringLiteral("后开面板这一种顺序没能复现（面板收不掉）"),
+                   QStringLiteral("visible=%1").arg(panel->property("visible").toBool()));
+        }
+
+        /*
+         * 用户确认了第 1 条藏起来的是**悬停气泡**。那就别读属性了 —— 属性永远是对的，
+         * "被那块原生控件盖住"这件事只有在真实桌面上才看得见：
+         * 真把一个气泡 open 出来，抓桌面，读它中心那一像素，看是不是气泡自己的底色。
+         * 修之前它整个弹在标签条**上方** = 编辑区那块矩形里，读回来是编辑区的颜色。
+         */
+        {
+            QVariant tv2;
+            QMetaObject::invokeMethod(panel, "headerTips", Q_RETURN_ARG(QVariant, tv2));
+            const QVariantList tips = tv2.toList();
+            QObject *tip = tips.isEmpty() ? nullptr : tips[0].value<QObject *>();
+            bool onTop = false;
+            QString detail = QStringLiteral("一个气泡对象都没拿到");
+            if (tip) {
+                tip->setProperty("text", QStringLiteral("自检气泡"));
+                tip->setProperty("visible", true);
+                /*
+                 * 得等它**淡入完**再抓：Popup 的 enter 过渡有 200 多毫秒，
+                 * 只泵 40 拍事件就抓，量到的是气泡还没画出来时背后的那块正文色
+                 * （上一轮就是这么红的：读到 #1e1f22 = 终端正文底色，差 41）。
+                 */
+                waitUntil([&] { return tip->property("visible").toBool(); }, 1000);
+                for (int k = 0; k < 50; ++k) {
+                    QCoreApplication::processEvents();
+                    QThread::msleep(20);
+                }
+                auto *parItem = qobject_cast<QQuickItem *>(
+                    tip->property("parent").value<QObject *>());
+                const QPointF local(tip->property("x").toReal(),
+                                    tip->property("y").toReal());
+                const QPointF scene = parItem ? parItem->mapToScene(local) : local;
+                auto *qwTip = host->findChild<QQuickWidget *>();
+                const QPoint sceneInHostTip = qwTip ? qwTip->mapTo(host, QPoint(0, 0)) : QPoint();
+                const QPoint inHost(sceneInHostTip.x() + qRound(scene.x()),
+                                    sceneInHostTip.y() + qRound(scene.y()));
+                const QPoint center = inHost
+                    + QPoint(qRound(tip->property("width").toReal() / 2.0),
+                             qRound(tip->property("height").toReal() / 2.0));
+                const QPoint glo = host->mapToGlobal(center);
+                const QImage desk = QGuiApplication::primaryScreen()->grabWindow(0).toImage();
+                const QColor want(QStringLiteral("#2b2d30"));
+                if (desk.rect().contains(glo)) {
+                    const QColor got = QColor::fromRgba(desk.pixel(glo));
+                    const int d = qAbs(got.red() - want.red()) + qAbs(got.green() - want.green())
+                                  + qAbs(got.blue() - want.blue());
+                    onTop = d <= 30;
+                    detail = QStringLiteral("气泡 %1x%2 中心落在全局 %3,%4，读到 %5（该是 %6，差 %7）"
+                                            "［气泡 visible=%8 opened=%9］")
+                                 .arg(tip->property("width").toReal())
+                                 .arg(tip->property("height").toReal())
+                                 .arg(glo.x()).arg(glo.y()).arg(got.name(), want.name()).arg(d)
+                                 .arg(tip->property("visible").toBool())
+                                 .arg(tip->property("opened").toBool());
+                } else {
+                    detail = QStringLiteral("气泡中心 %1,%2 不在桌面 %3x%4 里，没量成")
+                                 .arg(glo.x()).arg(glo.y()).arg(desk.width()).arg(desk.height());
+                }
+                desk.copy(QRect(glo - QPoint(90, 22), QSize(180, 44)))
+                    .save(QStringLiteral("H:/steward/build/term-tip.png"));
+                tip->setProperty("visible", false);
+                for (int k = 0; k < 10; ++k)
+                    QCoreApplication::processEvents();
+            }
+            tcheck(onTop,
+                   QStringLiteral("终端标签条的气泡弹出来在屏幕上真看得见（没被编辑区盖掉）"),
+                   QStringLiteral("文档已开=%1；%2；气泡那一片已存 H:/steward/build/term-tip.png")
+                       .arg(docOpen).arg(detail));
+        }
+    }
+
+    /*
+     * 用户 2026-09-23 第 2 条：垃圾桶（"清屏（含回滚）"）点了没反应，屏上那些字还在。
+     *
+     * 判据钉的是"那些字没了"，不是"屏全空" —— 清完之后 shell 自己会不会重画一行提示符
+     * 是另一件事（现在的答案是不会，我们只擦显示、没替它敲 Ctrl+L），
+     * 所以这里量两样：灌进去的标记还在不在，以及回滚是不是也清了。
+     * 再等 1.2 秒量第二遍：ConPTY 手里那份缓冲要是把刚擦掉的行又倒回来，第一遍会绿、
+     * 第二遍会红。
+     */
+    {
+        e->sendText(QStringLiteral("1..40 | ForEach-Object { \"clr $_\" }"));
+        e->sendKey(VTERM_KEY_ENTER, VTERM_MOD_NONE);
+        const bool shown = waitUntil(
+            [&] { return allText(e).contains(QLatin1String("clr 40")); }, 20000);
+        auto nonEmptyWithClr = [&]() -> QString {
+            int n = 0;
+            for (int r = -e->historyRows(); r < e->rows(); ++r) {
+                const QString line = e->lineText(r).trimmed();
+                if (line.isEmpty())
+                    continue;
+                ++n;
+            }
+            return QStringLiteral("%1 行有字/回滚 %2/还留着 clr=%3")
+                .arg(n).arg(e->historyRows())
+                .arg(allText(e).contains(QLatin1String("clr ")) ? 1 : 0);
+        };
+        view->clearBuffer();
+        QCoreApplication::processEvents();
+        const QString rightAfter = nonEmptyWithClr();
+        for (int k = 0; k < 60; ++k) {
+            QCoreApplication::processEvents();
+            QThread::msleep(20);
+        }
+        const QString later = nonEmptyWithClr();
+        tcheck(shown && !rightAfter.contains(QLatin1String("clr=1"))
+                   && !later.contains(QLatin1String("clr=1"))
+                   && e->historyRows() == 0,
+               QStringLiteral("垃圾桶真能清空当前终端展示的数据（含回滚，且 1.2 秒后没被重画回来）"),
+               QStringLiteral("灌进去=%1 立刻：%2；1.2 秒后：%3")
+                   .arg(shown).arg(rightAfter, later));
+    }
+
     const qreal heightBeforeCollapse = panel->property("wantedHeight").toReal();
     QMetaObject::invokeMethod(qmlRoot, "dispatch", Q_ARG(QVariant, QStringLiteral("toggleTerminal")));
     tcheck(heightBeforeCollapse > 100 && waitUntil([&] {

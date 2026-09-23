@@ -75,6 +75,13 @@ public:
     /* 清回滚区（面板上那个垃圾桶） */
     void clearHistory();
 
+    /*
+     * 把整屏擦掉 —— 喂我们自己的解析器，不是发给 shell。
+     * 为什么不能走 sendBytes：见 .cpp 里那段（垃圾桶那颗按钮原来就是这么发的，
+     * 结果"点了没反应"）。
+     */
+    void eraseScreenForClear();
+
     /* 面板/窗口改了尺寸：同步伪控制台和网格的行列数 */
     void setSize(int cols, int rows);
 

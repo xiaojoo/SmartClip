@@ -365,10 +365,11 @@ void TerminalView::closeSession()
 void TerminalView::clearBuffer()
 {
     /*
-     * 屏交给 shell 清（CSI 2J + 光标回原位），回滚区清我们自己那份 ——
-     * 只清一样都不算"清空"：往上滚还能翻出旧内容，或者屏还花着。
+     * 屏交给**我们自己的解析器**清（不是发给 shell —— 那样等于替用户敲了一段转义
+     * 字符，屏上一个字都不动，见 TerminalEngine::eraseScreenForClear），
+     * 回滚清我们存的那份 —— 只清一样都不算"清空"：往上滚还能翻出旧内容，或者屏还花着。
      */
-    m_engine->sendBytes("\x1b[2J\x1b[H");
+    m_engine->eraseScreenForClear();
     m_engine->clearHistory();
     setScrollUp(0);
     /* 回滚行数直接归零，引擎那边不会为此发 contentsChanged —— 不补一句，

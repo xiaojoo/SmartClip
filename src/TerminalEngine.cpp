@@ -111,6 +111,22 @@ void TerminalEngine::feedBytesForTest(const QByteArray &bytes)
     applyOutput(bytes);
 }
 
+void TerminalEngine::eraseScreenForClear()
+{
+    /*
+     * 清屏这一笔必须喂给**我们自己的解析器**，不能走 sendBytes。
+     *
+     * sendBytes 是写给 shell 的 stdin 的（TerminalPty::write）—— 把 "\x1b[2J" 发过去
+     * 等于替用户敲了一段转义字符，PowerShell 顶多回显个乱码，屏上的字一个都不动。
+     * 用户报的"删除并不能清空当前终端展示的数据"就是这么来的（垃圾桶那颗按钮）。
+     * 喂进解析器才是"终端收到了一条清屏指令"：整屏擦掉、光标回原位。
+     *
+     * 3J（擦回滚）一并注进去：这份 libvterm 0.3 不认它也无所谓，回滚是我们自己存的，
+     * 调用方紧接着会 clearHistory()。
+     */
+    applyOutput("\x1b[2J\x1b[3J\x1b[H");
+}
+
 void TerminalEngine::closeSession()
 {
     m_pty->shutdown();

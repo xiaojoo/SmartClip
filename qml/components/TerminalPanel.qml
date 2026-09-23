@@ -4,6 +4,7 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import SmartClip.Terminal 1.0
+import SmartClip.Globals 1.0
 import "../utils"
 
 /*
@@ -105,6 +106,51 @@ Rectangle {
     function currentTrack() {
         const d = views.itemAt(root.current)
         return d ? d.scrollTrack : null
+    }
+
+    /* 自检用：顶边那条拖高度的把手（按住期间光标要钉在上下拉伸上） */
+    function stripItem() {
+        return resizeStrip
+    }
+
+    /*
+     * 自检用：标签条和右边那一排按钮在**场景**里的矩形。
+     *
+     * 为什么要交出去：编辑区是 createWindowContainer 出来的原生子窗，它永远画在 QML
+     * 上面。它要是往面板这边伸过去，右边那几颗按钮就被盖掉了（用户报的"打开文档之后
+     * 添加/删除的气泡不见了"）。盖住这件事只有在"按钮的全局矩形 vs 那块原生窗的
+     * 全局矩形"上才量得出来，光看 QML 自己的几何永远是"没重叠"。
+     */
+    function headerRect() {
+        const a = header.mapToItem(null, 0, 0)
+        return Qt.rect(a.x, a.y, header.width, header.height)
+    }
+
+    function headerButtons() {
+        const out = []
+        for (let i = 0; i < headerButtonsRepeater.count; ++i) {
+            const it = headerButtonsRepeater.itemAt(i)
+            if (!it)
+                continue
+            const p = it.mapToItem(null, 0, 0)
+            out.push(Qt.rect(p.x, p.y, it.width, it.height))
+        }
+        return out
+    }
+
+    /*
+     * 自检用：那 4 颗按钮的悬停气泡（Popup）。
+     * 判据要真 open 一个出来、抓真实桌面看它落在的那几像素是不是气泡自己的底色 ——
+     * 属性读起来永远是对的，被原生控件盖住这件事只有在图上才看得见。
+     */
+    function headerTips() {
+        const out = []
+        for (let i = 0; i < headerButtonsRepeater.count; ++i) {
+            const it = headerButtonsRepeater.itemAt(i)
+            if (it && it.tipItem)
+                out.push(it.tipItem)
+        }
+        return out
     }
 
     function focusTerminal() {
@@ -272,6 +318,8 @@ Rectangle {
 
                     /* ---- 右边那一排：新建 / 清空 / 最大化 / 关闭 ---- */
                     Repeater {
+                        id: headerButtonsRepeater
+
                         model: [
                             { kind: "plus",       tip: qsTr("新建终端"),        on: () => root.newSession() },
                             { kind: "trash",      tip: qsTr("清屏（含回滚）"),  on: () => { const v = root.currentView(); if (v) v.clearBuffer() } },
@@ -286,6 +334,8 @@ Rectangle {
 
                             required property var modelData
                             readonly property bool hot: cellHit.containsMouse
+                            /* 自检用：把这颗按钮的气泡交出去（见 headerTips()） */
+                            readonly property var tipItem: headerTip
 
                             Layout.alignment: Qt.AlignVCenter
                             width: 24
@@ -311,8 +361,17 @@ Rectangle {
                             }
 
                             AppToolTip {
+                                id: headerTip
+
                                 text: cell.modelData.tip
                                 hovered: cell.hot
+                                /*
+                                 * 往下弹：往上弹就落进编辑区那块矩形里被盖掉
+                                 * （编辑区不是 QML 画的，压不过 —— 见 AppToolTip.qml
+                                 * 的 preferBelow 那段）。标签条在面板最上面，
+                                 * 下面有的是终端正文那一块我们自己的地方。
+                                 */
+                                preferBelow: true
                             }
                         }
                     }
@@ -438,11 +497,21 @@ Rectangle {
                                 }
 
                                 /* 点哪儿窗口就跳到哪儿（不然只有按住拖能生效，点一下没反应） */
-                                onPressed: (mouse) => view.scrollUp = upAt(mouse.y)
+                                /*
+                                 * 按住拖的这一段把光标钉住：轨道只有 8px 宽，手指抖一点就
+                                 * 跑到正文里，光标闪回箭头 —— 和面板顶边那条拖高度的把手
+                                 * 同一个毛病、同一个修法（见文件末尾 resizeStrip）。
+                                 */
+                                onPressed: (mouse) => {
+                                    Win.pushResizeCursor(Qt.PointingHandCursor)
+                                    view.scrollUp = upAt(mouse.y)
+                                }
                                 onPositionChanged: (mouse) => {
                                     if (pressed)
                                         view.scrollUp = upAt(mouse.y)
                                 }
+                                onReleased: Win.popResizeCursor()
+                                onCanceled: Win.popResizeCursor()
 
                                 onWheel: (wheel) => {
                                     /* 往前滚 = 看更早的，所以传负数（scrollLines 正方向是"往新内容"） */
@@ -476,6 +545,16 @@ Rectangle {
         onPressed: (mouse) => {
             pressY = mapToItem(null, 0, mouse.y).y
             pressHeight = root.height
+            /*
+             * 按住这一段把光标钉成上下拉伸。
+             *
+             * cursorShape 只在鼠标**停在这 6px 上**时生效，而这条把手就 6px 高：
+             * 拖得比面板长得快一点点，指针就跑进正文 / 标签条里，光标当场闪回箭头
+             * （用户 2026-09-23 报的那条）。QML 的 cursorShape 管不住这种情况，
+             * 得用应用级 override（见 src/WindowHelper.h 的 pushResizeCursor，
+             * 左树和编辑区那条缝用的是同一招）。
+             */
+            Win.pushResizeCursor(Qt.SizeVerCursor)
             mouse.accepted = true
         }
         onPositionChanged: (mouse) => {
@@ -486,9 +565,13 @@ Rectangle {
             mouse.accepted = true
         }
         onReleased: (mouse) => {
+            Win.popResizeCursor()
             root.dragFinished()
             mouse.accepted = true
         }
-        onCanceled: root.dragFinished()
+        onCanceled: {
+            Win.popResizeCursor()
+            root.dragFinished()
+        }
     }
 }
