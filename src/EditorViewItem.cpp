@@ -28,6 +28,7 @@
 #include <QScreen>
 #include <QStringConverter>
 #include <QStyle>
+#include <QTextStream>
 #include <QTimer>
 #include <QToolTip>
 #include <QWidget>
@@ -2330,6 +2331,31 @@ void EditorViewItem::applyGeometry() {
     m_sciWidget->setGeometry(x, y, w, h);
     m_sci->setGeometry(0, 0, w, h);
     m_sciWidget->raise();
+
+    /*
+     * 诊断（SMARTCLIP_TERM_LOG）：把这块**原生编辑控件**摆到哪儿了记下来。
+     *
+     * 为什么要它：终端面板和编辑区是上下两个兄弟，编辑区是原生子窗口
+     * （createWindowContainer），它**永远画在 QML 上面**。只要它的矩形往面板那一片
+     * 伸过去（布局没及时收回高度 / 场景坐标算旧了），终端右边就会露出一整块硬边
+     * 黑矩形 —— 和用户量到的形状完全一致（左边是终端的字、右边全黑、边界笔直）。
+     * 这一行让它每次重摆都留个数字，能直接和"黑块出现在哪一行"对上。
+     */
+    if (qEnvironmentVariableIsSet("SMARTCLIP_TERM_LOG")) {
+        static QFile *f = [] {
+            auto *x = new QFile(QStringLiteral("H:/steward/build/term-geom.log"));
+            x->open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text);
+            return x;
+        }();
+        if (f) {
+            QTextStream s(f);
+            s << QStringLiteral("    [编辑原生窗] 摆到 %1,%2 %3x%4（item %5x%6 场景 %7,%8）\n")
+                     .arg(x).arg(y).arg(w).arg(h)
+                     .arg(qRound(width())).arg(qRound(height()))
+                     .arg(qRound(scene.x())).arg(qRound(scene.y()));
+            s.flush();
+        }
+    }
 
     /* 过渡期里坐标照摆，但先别放回屏幕（见文件上面那个开关的说明） */
     if (!nativeSuppressed && !m_sciWidget->isVisible())

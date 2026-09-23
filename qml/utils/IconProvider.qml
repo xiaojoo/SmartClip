@@ -52,6 +52,14 @@ QtObject {
         else if (kind === "win-max")       s = p('M4.2 4.2 H11.8 V11.8 H4.2 Z')
         else if (kind === "win-restore")   s = p('M6.2 4.2 H11.8 V9.8') + p('M4.2 6.2 H9.8 V11.8 H4.2 Z')
         else if (kind === "plus")          s = p('M8 3.6 L8 12.4 M3.6 8 L12.4 8')
+        /*
+         * 终端：一个 > 提示符加一条下划线（各家终端都是这个记号）。
+         *
+         * 两笔都压在 1.7 的线上，16 的格子里 <1.5:1 的细线等于没有，
+         * 所以下划线的 y 和 > 的下端点对齐在同一行（10.6），
+         * 中间留 1.6 的空 —— 再近就要并成一条了。
+         */
+        else if (kind === "terminal")      s = p('M3.4 4.6 L6.2 7.6 L3.4 10.6') + p('M7.8 10.6 L12.6 10.6')
         else if (kind === "refresh")       s = p('M14.4 9.4 A6.4 6.4 0 1 1 12.9 4.6') + p('M15.2 3.4 L15.2 6.8 L11.7 6.3')
         else if (kind === "search")        s = co(6.2, 6.2, 4.1) + p('M9.4 9.4 L13.8 13.8')
         else if (kind === "gear")          s = p('M8 4.9 A3.1 3.1 0 1 0 8 11.1 A3.1 3.1 0 1 0 8 4.9') + (function(){ var t = ""; for (var a = 0; a < 360; a += 45) t += '<line x1="13.2" y1="8" x2="15.4" y2="8" stroke="' + c + '" stroke-width="1.6" stroke-linecap="round" transform="rotate(' + a + ' 8 8)"/>'; return t })()

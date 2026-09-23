@@ -35,6 +35,9 @@ find_package(Qt6 6.5 REQUIRED COMPONENTS Core Gui Network Qml Quick QuickControl
 # 内置的 QScintilla（编辑器内核，见 third/qscintilla/CMakeLists.txt）
 add_subdirectory(third/qscintilla)
 
+# 底部终端面板（src/TerminalEngine.cpp）的仿真内核：纯 C99 的 VT 转义解析 + 字符网格
+add_subdirectory(third/libvterm)
+
 # ---------------------------------------------------------------------------
 # 本源文件清单
 #
@@ -91,6 +94,14 @@ set(SMARTCLIP_SOURCES
     # 翻译（LLM 客户端 + 桌面卡片，见 src/Translate.h）：
     src/Translate.h
     src/Translate.cpp
+    # 底部终端面板（见 src/TerminalEngine.h）：ConPTY 搬字节 + libvterm 仿真网格
+    # + 一个自绘的字符网格视图（TerminalView 是 QQuickPaintedItem，不是原生子窗口）
+    src/TerminalPty.h
+    src/TerminalPty.cpp
+    src/TerminalEngine.h
+    src/TerminalEngine.cpp
+    src/TerminalView.h
+    src/TerminalView.cpp
     # 剪贴板内容汇总（见 src/Summarize.h）：分批问模型分类归并 -> 落成待审草稿
     #（QML 单例 Sum，和翻译 / 校验共用 LlmClient 那一套配置）
     src/Summarize.h
@@ -114,6 +125,8 @@ set(SMARTCLIP_SOURCES
     src/SelfTestTools.cpp
     # 汇总自检（`--summarize-test` 只跑它：区间取原文 / 回复解析 / 草稿采纳 / 归档）：
     src/SelfTestSummarize.cpp
+    # 终端自检（`--terminal-test` 只跑它：转义解析灌字节 + 真 PowerShell 走一遍）：
+    src/SelfTestTerminal.cpp
 )
 
 qt_add_executable(SmartClip ${SMARTCLIP_SOURCES})
@@ -179,6 +192,7 @@ qt_add_qml_module(SmartClip
         qml/components/SettingsPanel.qml
         qml/components/StatusBar.qml
         qml/components/TabStrip.qml
+        qml/components/TerminalPanel.qml
         qml/components/ToolButton.qml
         qml/components/TopBar.qml
         qml/components/WindowControls.qml
@@ -305,6 +319,7 @@ target_link_libraries(SmartClip PRIVATE
     Qt6::Core Qt6::Gui Qt6::Network Qt6::Qml Qt6::Quick Qt6::QuickControls2 Qt6::QuickWidgets
     Qt6::Sql Qt6::Widgets Qt6::PrintSupport
     qscintilla
+    libvterm
     dwmapi
     # 朗读（src/Speech.cpp）：SAPI 那套的 CoCreateInstance / CoTaskMemFree 在这
     # 个库里（sapi.h 自己也有 #pragma comment(lib) 兜着，这里显式写一遍更清楚）。

@@ -220,4 +220,22 @@ int runSummarize(ClipboardStore *store, Summarizer *sum = nullptr, QObject *qmlR
 int summarizePassed();
 int summarizeFailed();
 
+/*
+ * 底部终端那一节的自检（`--terminal-test`，见 runTerminal）：两层。
+ * 第一层不起 shell，直接往引擎灌转义序列读网格（宽字符占两列、真彩色、换行、
+ * 回滚、备用屏、清屏、DSR 查询有没有答）；第二层真起 PowerShell 跑真命令，
+ * 验"字节 -> 网格"整条链路 + 中文不乱码 + resize 之后对面按新宽度排版 +
+ * Ctrl+C 打得断 + 起停收尸。不 mock：这一层要抓的正是 mock 抓不到的那些。
+ */
+bool terminalTestEnabled(int argc, char **argv);
+
+/*
+ * qmlRoot 传 Main.qml 的根对象时多跑一节：真把面板开出来、往真 shell 里打中文和彩色，
+ * 然后抓下渲染结果，**按格子坐标**去图上数墨和颜色（网格记的颜色在图上找不到 = 红）。
+ * 这一节会显示主窗口（和 --tool-test / --summarize-test 同一个取舍）。
+ */
+int runTerminal(QObject *qmlRoot = nullptr, EditorController *cmd = nullptr);
+int terminalPassed();
+int terminalFailed();
+
 }  // namespace SelfTest

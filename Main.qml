@@ -335,6 +335,18 @@ Rectangle {
     readonly property real folderTreeMaxWidth: 600
 
     /*
+     * 底部终端面板（见 qml/components/TerminalPanel.qml）。
+     *
+     * 和上面左树那两条一个路子：高度是"用户拖出来的那个值"，收起时槽位给 0，
+     * 值本身留着，再展开还是原样。
+     */
+    property bool terminalHidden: true
+    property real terminalHeight: 260
+    /* 最大化 = 把中间那一行整个让给面板（和 VS Code 面板那个上箭头一个意思） */
+    property bool terminalMaximized: false
+    readonly property real terminalMinHeight: 120
+
+    /*
      * 树里文件的排序：true = 最新在前。
      *
      * 文件名就是时分秒（073100.md），所以"按名字倒序"天然就是时间倒序；
@@ -504,6 +516,24 @@ Rectangle {
     /* 拖动分隔线之后把宽度记下来（拖动过程中不写，见 splitterMouse.onReleased） */
     function rememberTreeWidth() {
         Cmd.remember("treeWidth", String(Math.round(folderTreeWidth)))
+    }
+
+    /*
+     * 收起 / 展开底部终端面板（Ctrl+` 和图标条那一格都走这里）。
+     *
+     * 展开之后把焦点交给终端 —— 不抢的话敲键盘还是打在编辑器上，
+     * 面板开出来却什么都输不进去，看着就像没生效。
+     * forceActiveFocus 要等这一槽布局算完才有意义，所以推到下一个事件循环。
+     */
+    function toggleTerminalPanel() {
+        terminalHidden = !terminalHidden
+        Cmd.remember("termHidden", terminalHidden ? "1" : "0")
+        if (!terminalHidden)
+            Qt.callLater(function () { terminal.focusTerminal() })
+    }
+
+    function rememberTerminalHeight() {
+        Cmd.remember("termHeight", String(Math.round(terminalHeight)))
     }
 
     function setNewestFirst(on) {
@@ -2335,6 +2365,7 @@ Rectangle {
         if (act === "zoomOut") { applyToPanes(function (v) { v.zoomOut() }); return }
         if (act === "zoomReset") { applyToPanes(function (v) { v.zoomReset() }); return }
         if (act === "toggleWrap") { toggleWrap(); return }
+        if (act === "toggleTerminal") { toggleTerminalPanel(); return }
         if (act === "toggleLineNumbers") { toggleLineNumbers(); return }
         if (act === "toggleWhitespace") { toggleWhitespace(); return }
         if (act === "toggleIndentGuides") {
@@ -2753,6 +2784,18 @@ Rectangle {
                                        Math.min(folderTreeMaxWidth, treeW))
         folderTreeHidden = Cmd.recall("treeHidden", "0") === "1"
         newestFirst = Cmd.recall("treeNewestFirst", "1") === "1"
+
+        /*
+         * 底部终端面板：高度照上次的样子回来，但**默认永远是收起的**。
+         *
+         * 故意不记开合状态：这是个会起 shell 的面板，开机就弹一个终端出来
+         * 不是"恢复上次状态"，是打扰 —— 而且上一次那个 shell 早没了，
+         * 展开只会是一个全新的会话。
+         */
+        var termH = parseFloat(Cmd.recall("termHeight", "260"))
+        if (!isNaN(termH))
+            terminalHeight = Math.max(terminalMinHeight, Math.min(700, termH))
+        terminalHidden = true
 
         /*
          * Markdown 预览那个偏好（上次退出时看的是预览还是源码）。
@@ -3536,6 +3579,25 @@ Rectangle {
             Layout.fillWidth: true; Layout.fillHeight: true
             spacing: 0
 
+            /*
+             * 必须显式给 0。
+             *
+             * Quick Layouts 在没写 Layout.minimumHeight 时拿 **implicitHeight** 当最小值，
+             * 而这一行的 implicitHeight 是子项撑出来的（编辑区 / 左树那几百像素）——
+             * 于是底部面板要 260 也拿不到：中间那一行死活不缩，面板被挤成 0 高
+             * （实测：wanted=260 而 height=0）。
+             */
+            Layout.minimumHeight: 0
+
+            /*
+             * 终端面板"最大化"时整行让给它（和 VS Code 面板那个上箭头一个意思）。
+             *
+             * 用 visible 而不是把高度算成 0：Quick Layouts 会把不可见的项整个跳过，
+             * 这样面板就能拿到中间那一行的全部空间，而不用去和编辑区的
+             * 最小高度（implicitHeight 会被当成 Layout 的下限）抢。
+             */
+            visible: !window.terminalMaximized
+
             // ---- 左侧工具窗口图标条（已取消边框） ----
             Rectangle {
                 id: navStrip
@@ -3565,7 +3627,8 @@ Rectangle {
                         model: [ { k: "folder", active: true }, { k: "screenshot", active: false },
                                  { k: "note", active: false },
                                  { k: "translate", active: false },
-                                 { k: "ocr", active: false } ]
+                                 { k: "ocr", active: false },
+                                 { k: "terminal", active: false } ]
                         delegate: Rectangle {
                             id: navCell
                             required property var modelData
@@ -3577,6 +3640,7 @@ Rectangle {
                                                          || modelData.k === "note"
                                                          || modelData.k === "translate"
                                                          || modelData.k === "ocr"
+                                                         || modelData.k === "terminal"
 
                             /*
                              * 这一格算不算"当前打开的工具窗口"。
@@ -3591,13 +3655,17 @@ Rectangle {
                              * 新便签是**在桌面上**出现的（不在主窗口里），
                              * 这一格亮着就是"外面有那么几块"的唯一提示。
                              */
-                            readonly property bool selected: modelData.k === "folder"
-                                                             ? !window.folderTreeHidden
-                                                             : (modelData.k === "note"
-                                                                ? Notes.visibleCount > 0
-                                                                : (modelData.k === "translate"
-                                                                   ? Trans.visibleCount > 0
-                                                                   : modelData.active))
+                            readonly property bool selected: {
+                                if (modelData.k === "folder")
+                                    return !window.folderTreeHidden
+                                if (modelData.k === "note")
+                                    return Notes.visibleCount > 0
+                                if (modelData.k === "translate")
+                                    return Trans.visibleCount > 0
+                                if (modelData.k === "terminal")
+                                    return !window.terminalHidden
+                                return modelData.active
+                            }
 
                             /*
                              * 悬停态：整格填强调蓝 + 图标转白。
@@ -3650,6 +3718,8 @@ Rectangle {
                                     else if (modelData.k === "ocr")
                                         /* 挑一份文档认成笔记（见「文件 → 识别文档…」那条，同一个入口） */
                                         window.importDocumentDialog()
+                                    else if (modelData.k === "terminal")
+                                        window.toggleTerminalPanel()
                                 }
                             }
 
@@ -3663,13 +3733,19 @@ Rectangle {
                              */
                             AppToolTip {
                                 hovered: navHit.containsMouse && navCell.acts
-                                text: modelData.k === "folder"
-                                      ? (window.folderTreeHidden ? "显示项目树" : "收起项目树")
-                                      : (modelData.k === "screenshot"
-                                         ? "截图"
-                                         : (modelData.k === "translate"
-                                            ? "翻译"
-                                            : (modelData.k === "ocr" ? "识别文档" : "便签")))
+                                text: {
+                                    if (modelData.k === "folder")
+                                        return window.folderTreeHidden ? "显示项目树" : "收起项目树"
+                                    if (modelData.k === "screenshot")
+                                        return "截图"
+                                    if (modelData.k === "translate")
+                                        return "翻译"
+                                    if (modelData.k === "ocr")
+                                        return "识别文档"
+                                    if (modelData.k === "terminal")
+                                        return "终端"
+                                    return "便签"
+                                }
                                 /* 贴着窗口左沿放：默认的"居中在格子上"会往左出界 */
                                 x: 2
                                 y: -implicitHeight - 3
@@ -3853,6 +3929,47 @@ Rectangle {
                 onDocTabActivated: window.exitDiffMode()
                 onDiffCopyPatchRequested: Cmd.copyText(Differ.unifiedDiff())
             }
+        }
+
+        /*
+         * 底部终端面板：夹在中间那一行和状态栏之间。
+         *
+         * 收起时槽位给 0（不是把组件删掉）—— 会话还得活着，不然每次展开都重新
+         * 起一个 shell，之前跑的东西全没了。
+         */
+        TerminalPanel {
+            id: terminal
+
+            Layout.fillWidth: true
+            /*
+             * 三条边距全部照抄同级那两张卡片，不手算常量：
+             *   左 34 = 图标条宽度（实测左树卡片起于 x=34）
+             *   右 5  = 编辑区卡片那条 Layout.rightMargin: 5（实测卡片右边缘 1454，
+             *           窗口 1460，中间正好 5px 底色）
+             *   上 3  = splitterGap 那条缝（实测树与编辑区之间 293..295 是 3px 窗口底色）
+             * 收起时槽位给 0（不是把组件删掉）—— 会话还得活着，不然每次展开都重新
+             * 起一个 shell，之前跑的东西全没了。
+             */
+            Layout.leftMargin: 34
+            Layout.rightMargin: 5
+            Layout.topMargin: 3
+            Layout.preferredHeight: window.terminalHidden ? 0
+                                    : (window.terminalMaximized
+                                       ? Math.max(window.terminalMinHeight,
+                                                  contentRoot.height - topBar.height
+                                                  - statusBar.height - 3)
+                                       : window.terminalHeight)
+            opened: !window.terminalHidden
+            maximized: window.terminalMaximized
+
+            onDraggedTo: (h) => {
+                window.terminalMaximized = false
+                window.terminalHeight = Math.max(window.terminalMinHeight,
+                                                 Math.min(700, h))
+            }
+            onDragFinished: window.rememberTerminalHeight()
+            onCloseRequested: window.toggleTerminalPanel()
+            onMaximizeToggled: window.terminalMaximized = !window.terminalMaximized
         }
 
         /*

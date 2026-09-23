@@ -316,6 +316,8 @@ const ShortcutEntry kShortcutTable[] = {
     {"zoomOut",       "缩小",       "视图", "Ctrl+-"},
     {"zoomReset",     "重置缩放",   "视图", "Ctrl+0"},
     {"toggleWrap",    "自动换行",   "视图", "Alt+Z"},
+    /* 底部终端面板（见 qml/components/TerminalPanel.qml）；和 VS Code 同一个键 */
+    {"toggleTerminal", "终端面板",  "视图", "Ctrl+`"},
 };
 
 }  // namespace

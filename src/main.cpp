@@ -13,6 +13,7 @@
 #include "StickyNotes.h"
 #include "StickyNoteStore.h"
 #include "Summarize.h"
+#include "TerminalView.h"
 #include "Translate.h"
 #include "TrayIcon.h"
 #include "WindowHelper.h"
@@ -448,6 +449,9 @@ int main(int argc, char *argv[]) {
      * QQuickWidget 内部有引擎，这里用它的 rootContext 挂上下文属性。
      */
     qmlRegisterType<EditorViewItem>("SmartClip.Editor", 1, 0, "EditorView");
+
+    /* 底部终端面板的正文（自绘字符网格，见 src/TerminalView.h） */
+    qmlRegisterType<TerminalView>("SmartClip.Terminal", 1, 0, "TerminalView");
 
     /*
      * 用 QML 单例而不是上下文属性。
@@ -959,6 +963,26 @@ int main(int argc, char *argv[]) {
         });
         app.exec();
         llm.shutdown();
+        return result < 0 ? 9 : result;
+    }
+
+    /*
+     * 底部终端那一节（`--terminal-test`）：见 src/SelfTestTerminal.cpp。
+     *
+     * 超时给到 120 秒：这一节要真起三回 PowerShell、还要灌 1200 行刷屏，
+     * 机器忙的时候光提示符就得好几秒 —— 给短了会误报成自检失败。
+     */
+    if (SelfTest::terminalTestEnabled(argc, argv)) {
+        int result = -1;
+        QTimer::singleShot(200, &app, [&]() {
+            result = SelfTest::runTerminal(quick->rootObject(), &editorController);
+            app.quit();
+        });
+        QTimer::singleShot(120000, &app, []() {
+            qWarning("终端自检超时，强制退出");
+            ::exit(9);
+        });
+        app.exec();
         return result < 0 ? 9 : result;
     }
 
