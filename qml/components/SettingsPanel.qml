@@ -68,6 +68,25 @@ Window {
     property string section: "shortcuts"
 
     /*
+     * 「另存为…」要一个带输入框的弹框。那张卡片（AskCard）挂在 Main.qml 上，
+     * 组件自己叫不出来 —— 所以由 Main 把函数递进来：askText(标题, 提示, 初值, 回调)。
+     * 没传就不显示这个按钮能做的事（点了没反应是死控件，见下面 onClicked 里那句 return）。
+     */
+    property var askText: null
+    /* 「另存为…」失败的原因（名字撞了内置档、名字里有非法字符等） */
+    property string schemeSaveErr: ""
+
+    /*
+     * 自检用：配色方案这一栏到底建出来没有。
+     *
+     * Repeater 长出来的 delegate 从外面 findChild 找不到（这个工程踩过两次，
+     * 见 TerminalPanel 的 firstView / StickyNotes 那几处），所以只能由组件自己
+     * 报数 —— 否则"整栏没渲染"和"渲染了但只有一条"在自检里长得一模一样。
+     */
+    readonly property int schemeRowCount: schemeListRepeater.count
+    readonly property bool schemeNavShown: navItems.some(function (n) { return n.key === "scheme" })
+
+    /*
      * 换栏目 = 回到顶部。
      *
      * 右栏从"直接铺满"改成了 Flickable（见下面 content 的说明）：上一栏滚到一半
@@ -148,10 +167,10 @@ Window {
         function onRunFinished(count) { root.reloadSummarize() }
     }
 
-    readonly property color bgColor:      Theme.c("#2b2d30", Theme.light)
-    readonly property color sidebarColor: Theme.c("#26282b", Theme.light)
-    readonly property color headerColor:  Theme.c("#33363a", Theme.light)
-    readonly property color borderColor:  Theme.c("#4b4d4f", Theme.light)
+    readonly property color bgColor:      Theme.c("#2b2d30", Theme.rev)
+    readonly property color sidebarColor: Theme.c("#26282b", Theme.rev)
+    readonly property color headerColor:  Theme.c("#33363a", Theme.rev)
+    readonly property color borderColor:  Theme.c("#4b4d4f", Theme.rev)
     /*
      * 面板最外圈那一道边框。
      *
@@ -160,15 +179,15 @@ Window {
      * 整个框像是没有边界。所以外框单独提一档亮、加粗到 2px，
      * 宽度统一收在 frameWidth 上（背景圆角和标题栏圆角都跟着它走）。
      */
-    readonly property color frameColor:   Theme.c("#5c6066", Theme.light)
+    readonly property color frameColor:   Theme.c("#5c6066", Theme.rev)
     readonly property int frameWidth:     2
-    readonly property color rowHover:     Theme.c("#34373b", Theme.light)
-    readonly property color rowSel:       Theme.c("#2f3a44", Theme.light)
-    readonly property color textColor:    Theme.c("#c8ccd1", Theme.light)
-    readonly property color textBright:   Theme.c("#e8e8e8", Theme.light)
-    readonly property color mutedColor:   Theme.c("#8a9098", Theme.light)
+    readonly property color rowHover:     Theme.c("#34373b", Theme.rev)
+    readonly property color rowSel:       Theme.c("#2f3a44", Theme.rev)
+    readonly property color textColor:    Theme.c("#c8ccd1", Theme.rev)
+    readonly property color textBright:   Theme.c("#e8e8e8", Theme.rev)
+    readonly property color mutedColor:   Theme.c("#8a9098", Theme.rev)
     readonly property color accentColor:  "#4c96d8"
-    readonly property color warnColor:    Theme.c("#c8503c", Theme.light)
+    readonly property color warnColor:    Theme.c("#c8503c", Theme.rev)
 
     readonly property int rowHeight: 26
 
@@ -241,6 +260,12 @@ Window {
     /* 栏目表：左边"操作步骤"那一列 */
     readonly property var navItems: [        { key: "shortcuts", label: "快捷键", icon: "gear" },
         { key: "storage",   label: "存储",   icon: "folder" },
+        /*
+         * 配色方案：选一套、另存为一份、直接改文件。
+         * 单开一栏是因为这套东西的**主用法在文件里**（改 json 立刻生效），
+         * 藏在别的栏目里没人会去找；卡片顶上那句路径就是入口。
+         */
+        { key: "scheme",    label: "配色方案", icon: "palette" },
         /*
          * 这一栏不叫「翻译」而叫「模型」：它配的是**一个** LLM，翻译卡片和
          * 编辑区校验都用它（见这一栏开头那段、还有「校验」里那句"见左边…"）。
@@ -591,6 +616,39 @@ Window {
     }
 
     /*
+     * 右栏里那种小按钮（配色方案那一节的"另存为… / 打开文件夹 / 重新加载"）。
+     * 界面里没有第二个地方用得上这种"一行里摆两三个动作"的形状，
+     * 所以就近声明，不去污染 qml/components 那一层。
+     */
+    component PanelButton: Rectangle {
+        id: btn
+        property string label: ""
+        property bool accent: false
+        signal clicked
+        implicitWidth: btnLabel.implicitWidth + 22
+        implicitHeight: 26
+        radius: 5
+        color: accent ? root.accentColor
+                      : (btnHit.containsMouse ? root.rowHover : "transparent")
+        border.width: 1
+        border.color: accent ? root.accentColor : root.borderColor
+        Text {
+            id: btnLabel
+            anchors.centerIn: parent
+            text: btn.label
+            font.pixelSize: 12
+            color: btn.accent ? "#ffffff" : root.textBright
+        }
+        MouseArea {
+            id: btnHit
+            anchors.fill: parent
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onClicked: btn.clicked()
+        }
+    }
+
+    /*
      * 背景：窗口本身透明（color: "transparent"），圆角和边框由这块画。
      * Popup 时代它是 background 属性，换成顶层 Window 之后就是第一个子项。
      */
@@ -642,7 +700,7 @@ Window {
                     provider: icons
                     kind: "gear"
                     size: 15
-                    tint: Theme.c("#9aa0a8", Theme.light)
+                    tint: Theme.c("#9aa0a8", Theme.rev)
                 }
     
                 Text {
@@ -662,14 +720,14 @@ Window {
                     anchors.rightMargin: 5
                     anchors.verticalCenter: parent.verticalCenter
                     radius: 5
-                    color: closeHit.containsMouse ? Theme.c("#c8503c", Theme.light) : "transparent"
+                    color: closeHit.containsMouse ? Theme.c("#c8503c", Theme.rev) : "transparent"
     
                     AppIcon {
                         anchors.centerIn: parent
                         provider: icons
                         kind: "close"
                         size: 13
-                        tint: closeHit.containsMouse ? "#ffffff" : Theme.c("#9aa0a8", Theme.light)
+                        tint: closeHit.containsMouse ? "#ffffff" : Theme.c("#9aa0a8", Theme.rev)
                     }
     
                     MouseArea {
@@ -762,7 +820,7 @@ Window {
                                     kind: navRow.modelData.icon
                                     size: 14
                                     tint: navRow.active ? root.accentColor
-                                                        : (navRow.hot ? root.textBright : Theme.c("#9aa0a8", Theme.light))
+                                                        : (navRow.hot ? root.textBright : Theme.c("#9aa0a8", Theme.rev))
                                 }
     
                                 Text {
@@ -980,7 +1038,7 @@ Window {
                                         width: 168
                                         height: 20
                                         radius: 4
-                                        color: keyRow.capturing ? Theme.c("#1e2023", Theme.light) : "transparent"
+                                        color: keyRow.capturing ? Theme.c("#1e2023", Theme.rev) : "transparent"
                                         border.width: keyRow.capturing ? 1 : 0
                                         border.color: root.accentColor
     
@@ -1167,7 +1225,7 @@ Window {
                                     width: 76
                                     height: 22
                                     radius: 4
-                                    color: okHit.containsMouse ? Theme.c("#3a3e42", Theme.light) : Theme.c("#33363a", Theme.light)
+                                    color: okHit.containsMouse ? Theme.c("#3a3e42", Theme.rev) : Theme.c("#33363a", Theme.rev)
                                     border.width: 1
                                     border.color: okHit.containsMouse ? root.accentColor : root.borderColor
     
@@ -1549,7 +1607,7 @@ Window {
                                              */
                                             onTextChanged: if (!activeFocus) cursorPosition = 0
                                             background: Rectangle {
-                                                color: Theme.c("#26282b", Theme.light)
+                                                color: Theme.c("#26282b", Theme.rev)
                                                 border.color: root.borderColor
                                                 border.width: 1
                                                 radius: 4
@@ -1655,7 +1713,7 @@ Window {
                                     onEditingFinished: Llm.localExe = text
                                     onTextChanged: if (!activeFocus) cursorPosition = 0
                                     background: Rectangle {
-                                        color: Theme.c("#26282b", Theme.light)
+                                        color: Theme.c("#26282b", Theme.rev)
                                         border.color: root.borderColor
                                         border.width: 1
                                         radius: 4
@@ -1709,7 +1767,7 @@ Window {
                                     onEditingFinished: Llm.localModel = text
                                     onTextChanged: if (!activeFocus) cursorPosition = 0
                                     background: Rectangle {
-                                        color: Theme.c("#26282b", Theme.light)
+                                        color: Theme.c("#26282b", Theme.rev)
                                         border.color: root.borderColor
                                         border.width: 1
                                         radius: 4
@@ -1763,7 +1821,7 @@ Window {
                                     onEditingFinished: Llm.localMmproj = text
                                     onTextChanged: if (!activeFocus) cursorPosition = 0
                                     background: Rectangle {
-                                        color: Theme.c("#26282b", Theme.light)
+                                        color: Theme.c("#26282b", Theme.rev)
                                         border.color: root.borderColor
                                         border.width: 1
                                         radius: 4
@@ -1815,7 +1873,7 @@ Window {
                                     validator: IntValidator { bottom: 1; top: 65535 }
                                     onEditingFinished: Llm.localPort = parseInt(text)
                                     background: Rectangle {
-                                        color: Theme.c("#26282b", Theme.light)
+                                        color: Theme.c("#26282b", Theme.rev)
                                         border.color: root.borderColor
                                         border.width: 1
                                         radius: 4
@@ -1967,7 +2025,7 @@ Window {
                                         width: 96
                                         height: 24
                                         radius: 4
-                                        color: engCell.active ? Theme.c("#2f3a44", Theme.light)
+                                        color: engCell.active ? Theme.c("#2f3a44", Theme.rev)
                                                               : (engHit.containsMouse ? root.rowHover
                                                                                       : "transparent")
                                         border.width: 1
@@ -2024,7 +2082,7 @@ Window {
                                     onEditingFinished: Llm.pinOcrRunner = text
                                     onTextChanged: if (!activeFocus) cursorPosition = 0
                                     background: Rectangle {
-                                        color: Theme.c("#26282b", Theme.light)
+                                        color: Theme.c("#26282b", Theme.rev)
                                         border.color: root.borderColor
                                         border.width: 1
                                         radius: 4
@@ -2097,7 +2155,7 @@ Window {
                                     width: 138
                                     height: 24
                                     radius: 4
-                                    color: docEngCell.active ? Theme.c("#2f3a44", Theme.light)
+                                    color: docEngCell.active ? Theme.c("#2f3a44", Theme.rev)
                                                              : (docEngHit.containsMouse ? root.rowHover
                                                                                         : "transparent")
                                     border.width: 1
@@ -2162,7 +2220,7 @@ Window {
                                     height: 24
                                     radius: 4
                                     anchors.verticalCenter: parent.verticalCenter
-                                    color: tierCell.active ? Theme.c("#2f3a44", Theme.light)
+                                    color: tierCell.active ? Theme.c("#2f3a44", Theme.rev)
                                                            : (tierHit.containsMouse ? root.rowHover
                                                                                     : "transparent")
                                     border.width: 1
@@ -2220,7 +2278,7 @@ Window {
                                 onEditingFinished: Doc.pythonPath = text
                                 onTextChanged: if (!activeFocus) cursorPosition = 0
                                 background: Rectangle {
-                                    color: Theme.c("#26282b", Theme.light)
+                                    color: Theme.c("#26282b", Theme.rev)
                                     border.color: root.borderColor
                                     border.width: 1
                                     radius: 4
@@ -2293,7 +2351,7 @@ Window {
                                 onEditingFinished: Doc.runner = text
                                 onTextChanged: if (!activeFocus) cursorPosition = 0
                                 background: Rectangle {
-                                    color: Theme.c("#26282b", Theme.light)
+                                    color: Theme.c("#26282b", Theme.rev)
                                     border.color: root.borderColor
                                     border.width: 1
                                     radius: 4
@@ -2382,7 +2440,7 @@ Window {
                         Text {
                             width: parent.width
                             wrapMode: Text.WordWrap
-                            color: Check.llmReady ? root.accentColor : Theme.c("#d7a85b", Theme.light)
+                            color: Check.llmReady ? root.accentColor : Theme.c("#d7a85b", Theme.rev)
                             font.pixelSize: 11
                             text: Check.modelSummary
                         }
@@ -2465,7 +2523,7 @@ Window {
                                     height: 8
                                     radius: 4
                                     anchors.verticalCenter: parent.verticalCenter
-                                    color: fmtRow.available ? Theme.c("#7bc47f", Theme.light) : root.mutedColor
+                                    color: fmtRow.available ? Theme.c("#7bc47f", Theme.rev) : root.mutedColor
                                 }
 
                                 Text {
@@ -2474,7 +2532,7 @@ Window {
                                     text: fmtRow.tool
                                           + (fmtRow.available ? "" : "（没找到）")
                                     color: fmtRow.available ? root.mutedColor
-                                                            : Theme.c("#d7a85b", Theme.light)
+                                                            : Theme.c("#d7a85b", Theme.rev)
                                     font.pixelSize: 11
                                     elide: Text.ElideRight
                                 }
@@ -2517,7 +2575,7 @@ Window {
                                     }
                                     onTextChanged: if (!activeFocus) cursorPosition = 0
                                     background: Rectangle {
-                                        color: Theme.c("#26282b", Theme.light)
+                                        color: Theme.c("#26282b", Theme.rev)
                                         border.color: root.borderColor
                                         border.width: 1
                                         radius: 4
@@ -2638,7 +2696,7 @@ Window {
                                 rightPadding: 7
                                 onEditingFinished: root.sumFrom = text
                                 background: Rectangle {
-                                    color: Theme.c("#26282b", Theme.light)
+                                    color: Theme.c("#26282b", Theme.rev)
                                     border.color: root.borderColor
                                     border.width: 1
                                     radius: 4
@@ -2664,7 +2722,7 @@ Window {
                                 rightPadding: 7
                                 onEditingFinished: root.sumTo = text
                                 background: Rectangle {
-                                    color: Theme.c("#26282b", Theme.light)
+                                    color: Theme.c("#26282b", Theme.rev)
                                     border.color: root.borderColor
                                     border.width: 1
                                     radius: 4
@@ -3040,6 +3098,190 @@ Window {
                                     }
                                 }
                             }
+                        }
+                    }
+
+                    /* ============ 配色方案 ============ */
+                    Column {
+                        id: schemeColumn
+                        anchors.top: parent.top
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.margins: 14
+                        spacing: 10
+                        visible: root.section === "scheme"
+
+                        Text {
+                            text: "配色方案"
+                            color: root.textBright
+                            font.pixelSize: 14
+                            font.bold: true
+                        }
+
+                        Text {
+                            width: parent.width
+                            wrapMode: Text.WordWrap
+                            color: root.mutedColor
+                            font.pixelSize: 12
+                            text: "点一行换一套。方案就是一个 json 文件，"
+                                  + "改完存盘界面立刻跟着变，不用重启；"
+                                  + "内置的 Dark / Light 不可改，想改先「另存为…」一份自己的。"
+                        }
+
+                        Rectangle {
+                            width: parent.width
+                            height: schemeListCol.height + 28
+                            radius: 6
+                            color: root.rowHover
+                            border.width: 1
+                            border.color: root.borderColor
+
+                            Column {
+                                id: schemeListCol
+                                anchors.left: parent.left
+                                anchors.right: parent.right
+                                anchors.margins: 14
+                                anchors.verticalCenter: parent.verticalCenter
+                                spacing: 6
+
+                                Repeater {
+                                    id: schemeListRepeater
+                                    model: Theme.schemeNames
+                                    delegate: Rectangle {
+                                        id: schemeRow
+                                        required property var modelData
+                                        readonly property bool on: Theme.scheme === modelData
+                                        readonly property bool builtin: modelData === "Dark"
+                                                                      || modelData === "Light"
+                                        width: parent.width
+                                        height: 34
+                                        radius: 5
+                                        color: on ? root.rowSel
+                                                  : (schemeRowHit.containsMouse ? root.frameColor
+                                                                                : "transparent")
+                                        border.width: 1
+                                        border.color: on ? root.accentColor : root.borderColor
+
+                                        Row {
+                                            anchors.left: parent.left
+                                            anchors.leftMargin: 10
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            spacing: 8
+                                            Text {
+                                                anchors.verticalCenter: parent.verticalCenter
+                                                text: schemeRow.modelData
+                                                color: root.textBright
+                                                font.pixelSize: 13
+                                            }
+                                            Text {
+                                                anchors.verticalCenter: parent.verticalCenter
+                                                text: schemeRow.builtin ? "内置 · 只读" : "用户文件"
+                                                color: root.mutedColor
+                                                font.pixelSize: 11
+                                            }
+                                        }
+                                        MouseArea {
+                                            id: schemeRowHit
+                                            anchors.fill: parent
+                                            hoverEnabled: true
+                                            cursorShape: Qt.PointingHandCursor
+                                            onClicked: Theme.setScheme(schemeRow.modelData)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        /*
+                         * 方案文件里有什么毛病就摊在这里说：手改 json 的人第一眼要看见的
+                         * 就是"哪一行、哪个键、为什么没生效"。少了这一块，改错了只会
+                         * 表现为"我改了没变"，永远查不到。
+                         */
+                        Rectangle {
+                            width: parent.width
+                            height: schemeErrCol.height + 24
+                            radius: 6
+                            visible: Theme.schemeError.length > 0
+                            color: "#2a1416"
+                            border.width: 1
+                            border.color: root.warnColor
+
+                            Column {
+                                id: schemeErrCol
+                                anchors.left: parent.left
+                                anchors.right: parent.right
+                                anchors.margins: 12
+                                anchors.verticalCenter: parent.verticalCenter
+                                spacing: 4
+
+                                Text {
+                                    width: parent.width
+                                    text: "方案文件有地方没生效"
+                                    color: root.warnColor
+                                    font.pixelSize: 12
+                                    font.bold: true
+                                }
+                                Repeater {
+                                    model: Theme.schemeError.split("\n")
+                                    Text {
+                                        width: parent.width
+                                        wrapMode: Text.WordWrap
+                                        text: modelData
+                                        color: root.textColor
+                                        font.pixelSize: 11
+                                    }
+                                }
+                            }
+                        }
+
+                        Row {
+                            spacing: 8
+                            PanelButton {
+                                label: "另存为…"
+                                accent: true
+                                onClicked: {
+                                    if (!root.askText)
+                                        return
+                                    var suggest = Theme.scheme
+                                    if (suggest === "Dark" || suggest === "Light")
+                                        suggest = suggest + " Copy"
+                                    root.askText("另存为配色方案",
+                                                 "方案名（会写成 名字.json；不能用 Dark / Light）",
+                                                 suggest,
+                                                 function (name) {
+                                        root.schemeSaveErr = Theme.saveSchemeAs(name)
+                                    })
+                                }
+                            }
+                            PanelButton {
+                                label: "打开方案文件夹"
+                                onClicked: Cmd.revealInExplorer(Theme.schemesDir())
+                            }
+                            PanelButton {
+                                label: "重新加载"
+                                onClicked: {
+                                    root.schemeSaveErr = ""
+                                    Theme.reloadSchemes()
+                                }
+                            }
+                        }
+
+                        Text {
+                            width: parent.width
+                            wrapMode: Text.WordWrap
+                            visible: root.schemeSaveErr.length > 0
+                            text: root.schemeSaveErr
+                            color: root.warnColor
+                            font.pixelSize: 11
+                        }
+
+                        Text {
+                            width: parent.width
+                            wrapMode: Text.WordWrap
+                            text: Theme.schemesDir()
+                            color: root.mutedColor
+                            font.pixelSize: 11
+                            textFormat: Text.PlainText
                         }
                     }
 

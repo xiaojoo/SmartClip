@@ -2558,6 +2558,31 @@ void runRenderChecks(QObject *qmlRoot, EditorController *cmd)
         /* 两整套都打出来：以后调这套色照这一行对，不用再去猜 libvterm 的值 */
         tout(QStringLiteral("     （ANSI 深色档 libvterm 自带：%1）").arg(darkRow));
         tout(QStringLiteral("     （ANSI 浅色档 Theme.cpp：%1）").arg(lightRow));
+
+        /*
+         * 终端那 16 色到底是不是"从方案文件里读的"。写一份只带 terminal 段的方案，
+         * 3 号必须变成文件里写的那个值，切回去又得是原值 —— 只测内置那张表的话，
+         * "全套"这句话是空的：界面上选了方案、终端其实还写死在代码里。
+         */
+        {
+            const QString saved = th->scheme();
+            const QString path = th->schemesDir() + QStringLiteral("/_selftest_term.json");
+            QFile sf(path);
+            const bool wrote = sf.open(QIODevice::WriteOnly | QIODevice::Truncate)
+                              && sf.write(R"({"basedOn":"Dark","terminal":{"3":"#0f8f2f"}})") > 0;
+            sf.close();
+            const QColor before = view->ansiColorForTest(3);
+            th->setScheme(QStringLiteral("_selftest_term"));
+            const QColor fromFile = view->ansiColorForTest(3);
+            th->setScheme(saved);
+            QFile::remove(path);
+            const QColor back = view->ansiColorForTest(3);
+            tcheck(wrote && fromFile.name() == QStringLiteral("#0f8f2f")
+                       && back.name().compare(before.name(), Qt::CaseInsensitive) == 0,
+                   QStringLiteral("终端 16 色归方案管：文件里写的 terminal 段真的生效、切回去还原"),
+                   QStringLiteral("3 号：原来 %1 → 按文件 %2 → 切回来 %3（文件写成功=%4）")
+                       .arg(before.name(), fromFile.name(), back.name()).arg(wrote));
+        }
         /*
          * 这一条只量到**引擎换算**那一层，没量到像素 —— 试过，量不出来，记在这儿免得
          * 下次再烧一轮：往格子里喂一段 33 号色的 W（得先关掉 shell，否则 PSReadLine

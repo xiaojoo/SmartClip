@@ -22,7 +22,7 @@ ScrollBar {
         implicitWidth: 8
         implicitHeight: 8
         radius: 4
-        color: Theme.c("#565a60", Theme.light)
+        color: Theme.c("#565a60", Theme.rev)
         opacity: 0.9
     }
 }

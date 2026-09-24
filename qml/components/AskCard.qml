@@ -42,12 +42,12 @@ import SmartClip.Globals 1.0
 Popup {
     id: root
 
-    readonly property color cardColor:   Theme.c("#3c3f41", Theme.light)
-    readonly property color borderColor: Theme.c("#4b4d4f", Theme.light)
-    readonly property color textColor:   Theme.c("#e8e8e8", Theme.light)
-    readonly property color mutedColor:  Theme.c("#9aa0a6", Theme.light)
-    readonly property color hoverColor:  Theme.c("#46484a", Theme.light)
-    readonly property color pressedColor: Theme.c("#2f3234", Theme.light)
+    readonly property color cardColor:   Theme.c("#3c3f41", Theme.rev)
+    readonly property color borderColor: Theme.c("#4b4d4f", Theme.rev)
+    readonly property color textColor:   Theme.c("#e8e8e8", Theme.rev)
+    readonly property color mutedColor:  Theme.c("#9aa0a6", Theme.rev)
+    readonly property color hoverColor:  Theme.c("#46484a", Theme.rev)
+    readonly property color pressedColor: Theme.c("#2f3234", Theme.rev)
     readonly property color accentColor: "#4c96d8"
 
     /* 标题（加粗那一行）和说明（可以带 \n） */
@@ -263,7 +263,7 @@ Popup {
             width: contentColumn.width
             height: 30
             radius: 4
-            color: Theme.c("#2b2d2f", Theme.light)
+            color: Theme.c("#2b2d2f", Theme.rev)
             border.color: inputField.activeFocus ? root.accentColor : root.borderColor
 
             TextField {
@@ -313,7 +313,7 @@ Popup {
                     radius: 4
                     color: mouse.pressed ? root.pressedColor
                                          : (mouse.containsMouse ? root.hoverColor
-                                                                : (btn.modelData.primary ? Theme.c("#484c50", Theme.light) : "transparent"))
+                                                                : (btn.modelData.primary ? Theme.c("#484c50", Theme.rev) : "transparent"))
                     border.color: btn.modelData.primary ? root.accentColor : root.borderColor
 
                     Text {

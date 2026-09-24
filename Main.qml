@@ -2800,7 +2800,7 @@ Rectangle {
             themeCellY: themeCell.mapToItem(window.contentItem, 0, 0).y,
             navSlotWidth: navStripSlot.width,
             themeLight: Theme.light,
-            themeChrome: String(Theme.c("#313335", Theme.light)),
+            themeChrome: String(Theme.c("#313335", Theme.rev)),
             /*
              * 浅色档下"挨着的两层"各自实际解析成什么颜色。
              *
@@ -2814,8 +2814,8 @@ Rectangle {
             layerTabStrip: String(editor.tabStripColor),
             layerTabActive: String(editor.tabActiveBg),
             layerPaper: String(editor.editorBg),
-            layerSelection: String(Theme.c("#2f659c", Theme.light)),
-            layerNavSelected: String(Theme.c("#3a4a5a", Theme.light)),
+            layerSelection: String(Theme.c("#2f659c", Theme.rev)),
+            layerNavSelected: String(Theme.c("#3a4a5a", Theme.rev)),
             topBarHeight: topBar.height,
             statusBarHeight: statusBar.height,
             windowWidth: window.width,
@@ -3261,6 +3261,10 @@ Rectangle {
         view: window.view
         entries: window.shortcutItems
         onCommandRequested: (act) => window.dispatch(act)
+        /* 「配色方案」那一栏的"另存为…"要一个带输入框的弹框，卡片挂在窗口这一侧 */
+        askText: function (title, hint, value, then) {
+            window.askInput(title, hint, value, {}, then)
+        }
     }
 
     /*
@@ -3612,7 +3616,7 @@ Rectangle {
             anchors.fill: parent
 
             // 卡片之外那圈底（编辑区右侧 5px 间隙、左树面板左侧的留白）
-            color: Theme.c("#313335", Theme.light)
+            color: Theme.c("#313335", Theme.rev)
 
             /*
              * 圆角不在这里做。
@@ -3944,7 +3948,7 @@ Rectangle {
                 x: 0
                 y: topBar.y + topBar.height
                 height: Math.max(0, statusBar.y - topBar.y - topBar.height)
-                color: Theme.c("#313335", Theme.light)
+                color: Theme.c("#313335", Theme.rev)
                 // 已删除 border.color 和 border.width
 
                 IconProvider { id: stripIcons }
@@ -4021,11 +4025,11 @@ Rectangle {
                              */
                             readonly property bool hot: navHit.containsMouse
                             color: hot ? window.accentColor
-                                       : (selected ? Theme.c("#3a4a5a", Theme.light) : "transparent")
+                                       : (selected ? Theme.c("#3a4a5a", Theme.rev) : "transparent")
 
                             AppIcon { anchors.centerIn: parent; provider: stripIcons; kind: modelData.k
                                       tint: navCell.hot ? "#ffffff"
-                                                        : (navCell.selected ? window.accentColor : Theme.c("#9aa0a8", Theme.light))
+                                                        : (navCell.selected ? window.accentColor : Theme.c("#9aa0a8", Theme.rev))
                                       size: 16 }
                             MouseArea {
                                 id: navHit
@@ -4120,12 +4124,12 @@ Rectangle {
                         readonly property bool hot: navTermHit.containsMouse
                         readonly property bool selected: !window.terminalHidden
                         color: hot ? window.accentColor
-                                   : (selected ? Theme.c("#3a4a5a", Theme.light) : "transparent")
+                                   : (selected ? Theme.c("#3a4a5a", Theme.rev) : "transparent")
 
                         AppIcon { anchors.centerIn: parent; provider: stripIcons; kind: "terminal"
                                   tint: navTerminalCell.hot ? "#ffffff"
                                                             : (navTerminalCell.selected
-                                                               ? window.accentColor : Theme.c("#9aa0a8", Theme.light))
+                                                               ? window.accentColor : Theme.c("#9aa0a8", Theme.rev))
                                   size: 16 }
                         MouseArea {
                             id: navTermHit
@@ -4161,7 +4165,7 @@ Rectangle {
                         color: hot ? window.accentColor : "transparent"
                         AppIcon { anchors.centerIn: parent; provider: stripIcons
                                   kind: Theme.light ? "moon" : "gear"
-                                  tint: themeCell.hot ? "#ffffff" : Theme.c("#9aa0a8", Theme.light)
+                                  tint: themeCell.hot ? "#ffffff" : Theme.c("#9aa0a8", Theme.rev)
                                   size: 16 }
                         MouseArea {
                             id: themeHit
@@ -4207,7 +4211,7 @@ Rectangle {
         color: "transparent"
         radius: window.cornerRadius
         border.width: 1
-        border.color: Theme.c("#4b4d4f", Theme.light)
+        border.color: Theme.c("#4b4d4f", Theme.rev)
     }
 
     /*

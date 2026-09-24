@@ -35,16 +35,16 @@ Rectangle {
     signal clicked()
 
     readonly property bool hot: hit.containsMouse && root.enabled
-    readonly property color idleIcon: root.enabled ? Theme.c("#9aa0a8", Theme.light) : Theme.c("#5c6066", Theme.light)
-    readonly property color hotIcon: root.checked ? "#ffffff" : Theme.c("#e8e8e8", Theme.light)
+    readonly property color idleIcon: root.enabled ? Theme.c("#9aa0a8", Theme.rev) : Theme.c("#5c6066", Theme.rev)
+    readonly property color hotIcon: root.checked ? "#ffffff" : Theme.c("#e8e8e8", Theme.rev)
 
     implicitWidth: content.implicitWidth + 16
     implicitHeight: 28
     radius: 4
 
     color: !root.enabled ? "transparent"
-                          : root.checked ? Theme.c("#3d78b8", Theme.light)
-                                         : (root.hot ? Theme.c("#45484c", Theme.light) : "transparent")
+                          : root.checked ? Theme.c("#3d78b8", Theme.rev)
+                                         : (root.hot ? Theme.c("#45484c", Theme.rev) : "transparent")
 
     RowLayout {
         id: content
@@ -64,7 +64,7 @@ Rectangle {
             visible: root.label !== ""
             text: root.label
             font.pixelSize: 11
-            color: (root.hot || root.checked) ? root.hotIcon : Theme.c("#b4b8bf", Theme.light)
+            color: (root.hot || root.checked) ? root.hotIcon : Theme.c("#b4b8bf", Theme.rev)
         }
 
         AppIcon {
@@ -72,7 +72,7 @@ Rectangle {
             provider: root.provider
             kind: "chevron-down"
             size: 9
-            tint: (root.hot || root.checked) ? root.hotIcon : Theme.c("#7d838c", Theme.light)
+            tint: (root.hot || root.checked) ? root.hotIcon : Theme.c("#7d838c", Theme.rev)
         }
     }
 

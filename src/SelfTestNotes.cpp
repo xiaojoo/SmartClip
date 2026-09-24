@@ -637,8 +637,15 @@ int SelfTest::runNotes(ClipboardStore *store, TrayIcon *tray, EditorController *
                  * 反面对照（少了这条，上面那条能靠"接管光标"钉成常绿）：把读数钉到
                  * 菜单和面板**之外**，子面板必须收掉。收不掉就说明 hoverWatch 根本没在
                  * 跑，那"缝里不收"也就是空的。
+                 *
+                 * 先把读数放回**缝里那一拍**再挪出去：NoteMenu 有一道闸门
+                 * （menuHoverSeen —— "这次弹出之后光标没进过菜单就不收"），
+                 * 不先建立它，下面量到的是那道闸门而不是收不收的规则。
+                 * 上一版把这件事依赖在"上面那条缝检查顺手设过了"，实测就会红
+                 * （flyout 还挂着 opacity）。
                  */
                 const int outX = menuFly2.x() - 200, outY = menuFly2.y() + 600;
+                holdFor(gapX, gapY, 250);
                 holdFor(outX, outY, 400);
                 if (noteWin)
                     noteWin->setCursorPosForTest(-1, -1);   /* 交还给真实光标 */

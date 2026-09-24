@@ -40,14 +40,14 @@ Item {
 
     signal closed()
 
-    readonly property color borderColor: Theme.c("#4b4d4f", Theme.light)
-    readonly property color textColor: Theme.c("#d6d7da", Theme.light)
-    readonly property color mutedColor: Theme.c("#9aa0a6", Theme.light)
+    readonly property color borderColor: Theme.c("#4b4d4f", Theme.rev)
+    readonly property color textColor: Theme.c("#d6d7da", Theme.rev)
+    readonly property color mutedColor: Theme.c("#9aa0a6", Theme.rev)
     readonly property color accentColor: "#4c96d8"
     readonly property color barBg: "#26282c"
-    readonly property color delBg: Theme.c("#3a2224", Theme.light)
-    readonly property color addBg: Theme.c("#1e3524", Theme.light)
-    readonly property color modBg: Theme.c("#3a3320", Theme.light)
+    readonly property color delBg: Theme.c("#3a2224", Theme.rev)
+    readonly property color addBg: Theme.c("#1e3524", Theme.rev)
+    readonly property color modBg: Theme.c("#3a3320", Theme.rev)
 
     /* 两栏之间那条缝（和分栏那条同一个手感） */
     readonly property real handleSize: 10
@@ -191,9 +191,9 @@ Item {
      */
     function currentBandStats() {
         if (markedLeft.length > 0)
-            return leftPane.diffRowStats(markedLeft[0], Theme.c("#63572c", Theme.light))
+            return leftPane.diffRowStats(markedLeft[0], Theme.c("#63572c", Theme.rev))
         if (markedRight.length > 0)
-            return rightPane.diffRowStats(markedRight[0], Theme.c("#63572c", Theme.light))
+            return rightPane.diffRowStats(markedRight[0], Theme.c("#63572c", Theme.rev))
         return ({ band: 0, glyph: 0, paper: 0 })
     }
 
@@ -403,7 +403,7 @@ Item {
     Rectangle {
         anchors.fill: parent
         radius: 10
-        color: Theme.c("#1e1f22", Theme.light)
+        color: Theme.c("#1e1f22", Theme.rev)
     }
 
     ColumnLayout {
@@ -447,8 +447,8 @@ Item {
                     Layout.preferredWidth: optLabel.implicitWidth + 16
                     Layout.preferredHeight: 22
                     radius: 4
-                    color: optHit.containsMouse ? Theme.c("#3a3d41", Theme.light)
-                          : (Differ[modelData.key] ? Theme.c("#2c3f52", Theme.light) : "transparent")
+                    color: optHit.containsMouse ? Theme.c("#3a3d41", Theme.rev)
+                          : (Differ[modelData.key] ? Theme.c("#2c3f52", Theme.rev) : "transparent")
                     border.color: Differ[modelData.key] ? root.accentColor : root.borderColor
                     border.width: 1
 
@@ -456,7 +456,7 @@ Item {
                         id: optLabel
                         anchors.centerIn: parent
                         text: optChip.modelData.label
-                        color: Differ[optChip.modelData.key] ? Theme.c("#e8e8e8", Theme.light) : root.mutedColor
+                        color: Differ[optChip.modelData.key] ? Theme.c("#e8e8e8", Theme.rev) : root.mutedColor
                         font.pixelSize: 11
                     }
 
@@ -474,8 +474,8 @@ Item {
                 Layout.preferredWidth: syncLabel.implicitWidth + 16
                 Layout.preferredHeight: 22
                 radius: 4
-                color: syncHit.containsMouse ? Theme.c("#3a3d41", Theme.light)
-                      : (root.syncScroll ? Theme.c("#2c3f52", Theme.light) : "transparent")
+                color: syncHit.containsMouse ? Theme.c("#3a3d41", Theme.rev)
+                      : (root.syncScroll ? Theme.c("#2c3f52", Theme.rev) : "transparent")
                 border.color: root.syncScroll ? root.accentColor : root.borderColor
                 border.width: 1
 
@@ -483,7 +483,7 @@ Item {
                     id: syncLabel
                     anchors.centerIn: parent
                     text: "同步滚动"
-                    color: root.syncScroll ? Theme.c("#e8e8e8", Theme.light) : root.mutedColor
+                    color: root.syncScroll ? Theme.c("#e8e8e8", Theme.rev) : root.mutedColor
                     font.pixelSize: 11
                 }
 
@@ -500,7 +500,7 @@ Item {
                 Layout.preferredWidth: 76
                 Layout.preferredHeight: 22
                 radius: 4
-                color: l2rHit.containsMouse ? Theme.c("#3a3d41", Theme.light) : "transparent"
+                color: l2rHit.containsMouse ? Theme.c("#3a3d41", Theme.rev) : "transparent"
                 border.color: root.borderColor
                 border.width: 1
 
@@ -525,7 +525,7 @@ Item {
                 Layout.preferredWidth: 76
                 Layout.preferredHeight: 22
                 radius: 4
-                color: r2lHit.containsMouse ? Theme.c("#3a3d41", Theme.light) : "transparent"
+                color: r2lHit.containsMouse ? Theme.c("#3a3d41", Theme.rev) : "transparent"
                 border.color: root.borderColor
                 border.width: 1
 
@@ -550,7 +550,7 @@ Item {
                 Layout.preferredWidth: 76
                 Layout.preferredHeight: 22
                 radius: 4
-                color: patchHit.containsMouse ? Theme.c("#3a3d41", Theme.light) : "transparent"
+                color: patchHit.containsMouse ? Theme.c("#3a3d41", Theme.rev) : "transparent"
                 border.color: root.borderColor
                 border.width: 1
 
@@ -665,10 +665,10 @@ Item {
 
                     visible: hasDocument
                     fontPixelSize: root.styleSource ? root.styleSource.fontPixelSize : 12
-                    textColor: Theme.c("#d6d7da", Theme.light)
-                    paperColor: Theme.c("#1e1f22", Theme.light)
-                    gutterColor: Theme.c("#1e1f22", Theme.light)
-                    lineNumberColor: Theme.c("#606366", Theme.light)
+                    textColor: Theme.c("#d6d7da", Theme.rev)
+                    paperColor: Theme.c("#1e1f22", Theme.rev)
+                    gutterColor: Theme.c("#1e1f22", Theme.rev)
+                    lineNumberColor: Theme.c("#606366", Theme.rev)
                     paddingLeft: 2
                     paddingRight: 0
 
@@ -748,10 +748,10 @@ Item {
 
                     visible: hasDocument
                     fontPixelSize: root.styleSource ? root.styleSource.fontPixelSize : 12
-                    textColor: Theme.c("#d6d7da", Theme.light)
-                    paperColor: Theme.c("#1e1f22", Theme.light)
-                    gutterColor: Theme.c("#1e1f22", Theme.light)
-                    lineNumberColor: Theme.c("#606366", Theme.light)
+                    textColor: Theme.c("#d6d7da", Theme.rev)
+                    paperColor: Theme.c("#1e1f22", Theme.rev)
+                    gutterColor: Theme.c("#1e1f22", Theme.rev)
+                    lineNumberColor: Theme.c("#606366", Theme.rev)
                     paddingLeft: 2
                     paddingRight: 0
 
@@ -774,7 +774,7 @@ Item {
                     anchors.centerIn: parent
                     width: 1
                     height: parent.height
-                    color: Theme.c("#333840", Theme.light)
+                    color: Theme.c("#333840", Theme.rev)
                 }
 
                 property real pressX: 0
@@ -824,8 +824,8 @@ Item {
                         var kind = rows[i].kind
                         if (kind === "same")
                             continue
-                        ctx.fillStyle = kind === "del" ? Theme.c("#7a4448", Theme.light)
-                                    : kind === "add" ? Theme.c("#3f6b48", Theme.light) : Theme.c("#8a7a3c", Theme.light)
+                        ctx.fillStyle = kind === "del" ? Theme.c("#7a4448", Theme.rev)
+                                    : kind === "add" ? Theme.c("#3f6b48", Theme.rev) : Theme.c("#8a7a3c", Theme.rev)
                         /* 至少 1px，否则文件一大差异就全被压没了 */
                         ctx.fillRect(1, i * step, width - 2, Math.max(1, step))
                     }
@@ -868,7 +868,7 @@ Item {
             Text {
                 Layout.fillWidth: true
                 text: Differ.lastError !== "" ? Differ.lastError : leadHint()
-                color: Differ.lastError !== "" ? Theme.c("#e06c75", Theme.light) : root.mutedColor
+                color: Differ.lastError !== "" ? Theme.c("#e06c75", Theme.rev) : root.mutedColor
                 font.pixelSize: 11
                 elide: Text.ElideRight
             }
@@ -885,7 +885,7 @@ Item {
                 Layout.preferredWidth: 76
                 Layout.preferredHeight: 22
                 radius: 4
-                color: prevHit.containsMouse ? Theme.c("#3a3d41", Theme.light) : "transparent"
+                color: prevHit.containsMouse ? Theme.c("#3a3d41", Theme.rev) : "transparent"
                 border.color: root.borderColor
                 border.width: 1
 
@@ -909,7 +909,7 @@ Item {
                 Layout.preferredWidth: 76
                 Layout.preferredHeight: 22
                 radius: 4
-                color: nextHit.containsMouse ? Theme.c("#3a3d41", Theme.light) : "transparent"
+                color: nextHit.containsMouse ? Theme.c("#3a3d41", Theme.rev) : "transparent"
                 border.color: root.borderColor
                 border.width: 1
 

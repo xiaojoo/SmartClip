@@ -28,9 +28,9 @@ Popup {
     id: control
 
     /* 外观（自检读这三个，见 Main.qml 的 uiState） */
-    readonly property color tipBackground: Theme.c("#2b2d30", Theme.light)
-    readonly property color tipBorder: Theme.c("#4b4d4f", Theme.light)
-    readonly property color tipTextColor: Theme.c("#d6d7da", Theme.light)
+    readonly property color tipBackground: Theme.c("#2b2d30", Theme.rev)
+    readonly property color tipBorder: Theme.c("#4b4d4f", Theme.rev)
+    readonly property color tipTextColor: Theme.c("#d6d7da", Theme.rev)
 
     /* 提示文字 */
     property string text: ""

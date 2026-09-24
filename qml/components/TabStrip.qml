@@ -86,9 +86,9 @@ Rectangle {
 
     readonly property color accentColor: "#4c96d8"
     readonly property color tabActiveBg: Theme.light ? "#ffffff" : "#2b2d30"
-    readonly property color textBright: Theme.c("#e8e8e8", Theme.light)
-    readonly property color textMain: Theme.c("#bbbbbb", Theme.light)
-    readonly property color textMuted: Theme.c("#7d7d7d", Theme.light)
+    readonly property color textBright: Theme.c("#e8e8e8", Theme.rev)
+    readonly property color textMain: Theme.c("#bbbbbb", Theme.rev)
+    readonly property color textMuted: Theme.c("#7d7d7d", Theme.rev)
 
     /*
      * 这一条标签栏和顶上那条横向滚动条的几何（自检读它，见 src/SelfTest.cpp）。
@@ -257,7 +257,7 @@ Rectangle {
                         width: Math.max(120, Math.min(240, tabLabel.implicitWidth + 74))
                         radius: 5
                         color: active ? root.tabActiveBg
-                                      : (hot ? Theme.c("#3a3d41", Theme.light) : "transparent")
+                                      : (hot ? Theme.c("#3a3d41", Theme.rev) : "transparent")
 
                         /* 这一层压在 tabHit 之上，小叉才收得到点击（见原说明） */
                         RowLayout {
@@ -374,7 +374,7 @@ Rectangle {
             radius: 5
             visible: root.paneActions && root.markdownToggleVisible
             color: root.markdownPreview ? root.accentColor
-                                        : (mdHit.containsMouse ? Theme.c("#3a3d41", Theme.light)
+                                        : (mdHit.containsMouse ? Theme.c("#3a3d41", Theme.rev)
                                                                : "transparent")
 
             AppIcon {
@@ -406,7 +406,7 @@ Rectangle {
         anchors.right: parent.right
         anchors.bottom: parent.bottom
         height: 1
-        color: Theme.c("#4b4d4f", Theme.light)
+        color: Theme.c("#4b4d4f", Theme.rev)
         opacity: 0.65
     }
 }

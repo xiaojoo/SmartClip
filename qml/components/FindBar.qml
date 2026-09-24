@@ -44,12 +44,12 @@ Rectangle {
 
     signal closed()
 
-    readonly property color panelBg: Theme.c("#3c3f41", Theme.light)        /* 和下拉菜单一套 */
-    readonly property color panelBorder: Theme.c("#4b4d4f", Theme.light)
-    readonly property color borderColor: Theme.c("#3c3f44", Theme.light)
-    readonly property color fieldBg: Theme.c("#2b2d30", Theme.light)
-    readonly property color textColor: Theme.c("#d6d7da", Theme.light)
-    readonly property color mutedColor: Theme.c("#7d838c", Theme.light)
+    readonly property color panelBg: Theme.c("#3c3f41", Theme.rev)        /* 和下拉菜单一套 */
+    readonly property color panelBorder: Theme.c("#4b4d4f", Theme.rev)
+    readonly property color borderColor: Theme.c("#3c3f44", Theme.rev)
+    readonly property color fieldBg: Theme.c("#2b2d30", Theme.rev)
+    readonly property color textColor: Theme.c("#d6d7da", Theme.rev)
+    readonly property color mutedColor: Theme.c("#7d838c", Theme.rev)
     readonly property color accent: "#4c96d8"
 
     /* 匹配计数，例如 "3 / 12"；没查过就是空 */
@@ -220,7 +220,7 @@ Rectangle {
                 Layout.preferredHeight: 28
                 radius: 6
                 color: root.fieldBg
-                border.color: root.noMatch ? Theme.c("#c75450", Theme.light) : root.borderColor
+                border.color: root.noMatch ? Theme.c("#c75450", Theme.rev) : root.borderColor
 
                 TextField {
                     id: field
@@ -263,7 +263,7 @@ Rectangle {
                         Layout.rightMargin: 4
                         text: root.matchText
                         visible: text !== ""
-                        color: root.noMatch ? Theme.c("#e06c75", Theme.light) : root.mutedColor
+                        color: root.noMatch ? Theme.c("#e06c75", Theme.rev) : root.mutedColor
                         font.pixelSize: 11
                         verticalAlignment: Text.AlignVCenter
                     }

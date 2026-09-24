@@ -21,7 +21,7 @@ RowLayout {
     // 要操作的窗口，一般是 Main.qml 里的 ApplicationWindow
     property var host: null
 
-    property color idleColor:  Theme.c("#b4b8bf", Theme.light)
+    property color idleColor:  Theme.c("#b4b8bf", Theme.rev)
 
     /*
      * 悬停底色：项目里的强调蓝（和左侧图标条选中态、

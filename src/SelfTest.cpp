@@ -8102,6 +8102,111 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
                                                         .arg(collided.join(QStringLiteral("\\n")))));
     }
 
+    /*
+     * ======================================================================
+     * 配色方案文件（%APPDATA%/SmartClip/SmartClip/schemes/*.json）
+     * ======================================================================
+     *
+     * 钉四件事，都是"手改文件"这条路能不能信的关键：
+     *   1) 文件里没写的键必须退回 basedOn 那一档（不是退回深色）；
+     *   2) 某一个值写错 → 只有那一条不生效，其余照用，而且**错误要点名报出来**
+     *      （静默忽略的话，用户只会看到"我改了没变"，永远查不到是打错了）；
+     *   3) 整份 JSON 读不出来 → 一行都不生效，还是上一份的样子 + 报出错误；
+     *   4) 改完文件不切方案、不重启就生效（QFileSystemWatcher）。
+     *
+     * 用的是真目录里的一个临时方案名 _selftest，跑完删掉并把用户原来那档还原回去。
+     */
+    {
+        AppTheme *th = AppTheme::instance();
+        if (th) {
+            const QString savedScheme = th->scheme();
+            auto writeScheme = [th](const QByteArray &body) {
+                const QString path = th->schemesDir() + QStringLiteral("/_selftest.json");
+                QFile f(path);
+                if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate))
+                    return false;
+                f.write(body);
+                f.close();
+                return true;
+            };
+
+            writeScheme(R"({"basedOn":"Light","ui":{"#313335":"#ff0000"}})");
+            th->setScheme(QStringLiteral("_selftest"));
+            check(th->c(QStringLiteral("#313335")) == QStringLiteral("#ff0000")
+                      && th->c(QStringLiteral("#1e1f22")) == QStringLiteral("#ffffff"),
+                  QStringLiteral("方案文件：写进去的键生效，没写的键退回 basedOn 那一档"),
+                  QStringLiteral("#313335 → %1（该 #ff0000）/ #1e1f22 → %2（该 #ffffff，内置 Light 的值）")
+                      .arg(th->c(QStringLiteral("#313335")),
+                           th->c(QStringLiteral("#1e1f22"))));
+
+            writeScheme(R"({"basedOn":"Light","ui":{"#313335":"#12abc","#2b2d30":"#00ff00"}})");
+            th->reloadSchemes();
+            check(th->c(QStringLiteral("#2b2d30")) == QStringLiteral("#00ff00")
+                      && th->c(QStringLiteral("#313335")) == QStringLiteral("#f2f3f5")
+                      && th->schemeError().contains(QStringLiteral("#313335")),
+                  QStringLiteral("方案文件：某个色写错只丢那一条，其余照用，而且点名报错"),
+                  QStringLiteral("#2b2d30 → %1 / #313335 → %2（该退回内置 #f2f3f5）/ 错误=[%3]")
+                      .arg(th->c(QStringLiteral("#2b2d30")), th->c(QStringLiteral("#313335")),
+                           th->schemeError().trimmed()));
+
+            writeScheme("{ 这不是合法 JSON ");
+            th->reloadSchemes();
+            check(th->c(QStringLiteral("#2b2d30")) == QStringLiteral("#00ff00")
+                      && !th->schemeError().isEmpty(),
+                  QStringLiteral("方案文件整份读不出来时：一行都不生效，还是上一份的样子"),
+                  QStringLiteral("#2b2d30 还是 %1 / 错误=[%2]")
+                      .arg(th->c(QStringLiteral("#2b2d30")), th->schemeError().trimmed()));
+
+            /* 热加载：不 setScheme，只改文件，等监视器（150ms 防抖 + 余量） */
+            writeScheme(R"({"basedOn":"Light","ui":{"#313335":"#0000ff"}})");
+            bool hot = false;
+            for (int k = 0; k < 60 && !hot; ++k) {
+                QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+                QThread::msleep(20);
+                hot = th->c(QStringLiteral("#313335")) == QStringLiteral("#0000ff");
+            }
+            check(hot && th->schemeError().isEmpty(),
+                  QStringLiteral("改完方案文件不切方案、不重启就生效（文件监视），错也一并消掉"),
+                  QStringLiteral("等了约 %1 ms，#313335 → %2 / 错误=[%3]")
+                      .arg(60 * 20).arg(th->c(QStringLiteral("#313335")))
+                      .arg(th->schemeError().trimmed()));
+
+            th->setScheme(QStringLiteral("Dark"));
+            check(th->c(QStringLiteral("#313335")) == QStringLiteral("#313335")
+                      && th->ansiPalette().isEmpty(),
+                  QStringLiteral("切回内置 Dark：每个键都必须是恒等、终端退回 libvterm 那 16 色"),
+                  QStringLiteral("#313335 → %1 / ANSI 表长 %2").arg(th->c(QStringLiteral("#313335")))
+                      .arg(th->ansiPalette().size()));
+
+            /*
+             * 后端能切不等于界面上有这一栏。这里钉两件事：导航里有「配色方案」，
+             * 而且那一栏真的列出了方案（Repeater 的条目从外面 findChild 找不到，
+             * 所以由组件自己报数 —— 见 SettingsPanel 里 schemeRowCount 那段）。
+             * 它证明不了"像素上看得见"（那要吃真实渲染，和这套里另一族判据一样），
+             * 但"忘了加导航"、"列表是空的"这两种真会犯的错误当场红。
+             */
+            if (QObject *sp = qmlRoot->findChild<QObject *>("settingsPanel")) {
+                const QStringList names = th->schemeNames();
+                sp->setProperty("section", QStringLiteral("scheme"));
+                settle();
+                const bool nav = sp->property("schemeNavShown").toBool();
+                const int rows = sp->property("schemeRowCount").toInt();
+                check(nav && rows == names.size() && names.contains(QStringLiteral("Dark"))
+                          && names.contains(QStringLiteral("Light")),
+                      QStringLiteral("设置里有「配色方案」这一栏，而且列出了 Dark / Light"),
+                      QStringLiteral("导航有这一栏=%1 列出 %2 条 / 后端报 %3 条 [%4]")
+                          .arg(nav).arg(rows).arg(names.size()).arg(names.join("|")));
+            } else {
+                check(false, QStringLiteral("设置里有「配色方案」这一栏，而且列出了 Dark / Light"),
+                      QStringLiteral("找不到 settingsPanel，整栏无从谈起"));
+            }
+
+            QFile::remove(th->schemesDir() + QStringLiteral("/_selftest.json"));
+            th->setScheme(savedScheme);
+            settle();
+        }
+    }
+
     if (theme && themeWas)
         theme->setLight(true);   /* 还原用户那一档 */
 

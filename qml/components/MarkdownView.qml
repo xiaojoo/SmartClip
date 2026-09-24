@@ -70,7 +70,7 @@ Rectangle {
         body.select(0, body.length)
     }
 
-    readonly property color textColor: Theme.c("#d6d7da", Theme.light)
+    readonly property color textColor: Theme.c("#d6d7da", Theme.rev)
 
     color: "transparent"
     clip: true
@@ -224,7 +224,7 @@ Rectangle {
         width: Math.min(parent.width - 60, 420)
         visible: root.html === ""
         text: root.emptyHint
-        color: Theme.c("#7d7d7d", Theme.light)
+        color: Theme.c("#7d7d7d", Theme.rev)
         font.pixelSize: 13
         horizontalAlignment: Text.AlignHCenter
         wrapMode: Text.WordWrap
