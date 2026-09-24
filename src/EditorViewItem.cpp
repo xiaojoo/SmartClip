@@ -199,7 +199,7 @@ QColor themed(const char *darkHex) {
 /* 走主题表：浅色档这条要变成很浅的 #e5e6eb，不能是深底上那个重色 */
 QColor kGuideLine() { return themed("#333840"); }
 QColor kCaretLineBack() { return themed("#26282b"); }   // 当前行底色
-QColor kSelectionBack() { return themed("#2f659c"); }   // 选中底色
+QColor kSelectionBack() { return themed("#1653cb"); }   // 选中底色
 /* 语法配色：深色是 JetBrains 暗色系，浅色是 IntelliJ Light（表里那 11 行） */
 QColor paletteDefault() { return themed("#d6d7da"); }
 QColor paletteKeyword() { return themed("#cf8e6d"); }

@@ -92,7 +92,7 @@ const QHash<QString, QString> &builtinLightUi() {
         { QStringLiteral("#3d78b8"), QStringLiteral("#2f6f9f") },
         { QStringLiteral("#7fa8c8"), QStringLiteral("#4a7fa5") },
         { QStringLiteral("#214283"), QStringLiteral("#1a4d8f") },
-        { QStringLiteral("#2f659c"), QStringLiteral("#a8cdf5") },  // 编辑器选中底（A 档他嫌浅，2026-09-23 改挑 B 档）
+        { QStringLiteral("#1653cb"), QStringLiteral("#a8cdf5") },  // 编辑器选中底（2026-09-24：他先给 #2b6be8，又说"再深一点"→ 按 HSL 亮度 ×0.82 推到 #1653cb；浅色档仍是 #a8cdf5）
         // ---- 语义：错 / 警 / 增删 ----
         { QStringLiteral("#c8503c"), QStringLiteral("#c0342a") },
         { QStringLiteral("#e06c75"), QStringLiteral("#cc4b51") },
@@ -207,7 +207,7 @@ const QHash<QString, QString> &uiDoc() {
         { QStringLiteral("#2f3a44"), QStringLiteral("列表选中行") },
         { QStringLiteral("#2c3f52"), QStringLiteral("更强的选中") },
         { QStringLiteral("#0e639c"), QStringLiteral("强调色 / 链接（深色档）") },
-        { QStringLiteral("#2f659c"), QStringLiteral("编辑器选中底") },
+        { QStringLiteral("#1653cb"), QStringLiteral("编辑器选中底") },
         { QStringLiteral("#c8503c"), QStringLiteral("错误 / 危险") },
         { QStringLiteral("#e06c75"), QStringLiteral("错误文字另一种") },
         { QStringLiteral("#7a4448"), QStringLiteral("diff 删除行的底") },

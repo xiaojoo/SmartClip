@@ -8228,6 +8228,38 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
                       .arg(th->ansiPalette().size()));
 
             /*
+             * 编辑器选中底（2026-09-24 一路是 #2f659c → 他给 #2b6be8 → 再说"加深"，
+             * 按 HSL 亮度 ×0.82 推到 #1653cb）。
+             * 这条钉的是**三处必须同步**：原生侧那句 themed("#1653cb")、查表里的键、
+             * QML 报出来的 layerSelection。改了字面量忘了改表的键，深色档看着一切正常、
+             * 浅色档从此不再翻色 —— 而浅色档没人天天看，能一路带到下个版本。
+             */
+            {
+                const QColor selDark(th->c(QStringLiteral("#1653cb")));
+                /* 树里选中那一行的字用的是字面量 #ffffff —— 它必须一直不翻色 */
+                const QColor whiteDark(th->c(QStringLiteral("#ffffff")));
+                const QColor shownDark(uiState().value(QLatin1String("layerSelection")).toString());
+                th->setScheme(QStringLiteral("Light"));
+                settle();
+                const QColor selLight(th->c(QStringLiteral("#1653cb")));
+                const QColor whiteLight(th->c(QStringLiteral("#ffffff")));
+                const QColor shownLight(uiState().value(QLatin1String("layerSelection")).toString());
+                th->setScheme(QStringLiteral("Dark"));
+                settle();
+                check(selDark == QColor(QStringLiteral("#1653cb"))
+                          && selLight == QColor(QStringLiteral("#a8cdf5"))
+                          && shownDark == QColor(QStringLiteral("#1653cb"))
+                          && shownLight == QColor(QStringLiteral("#a8cdf5"))
+                          && whiteDark == QColor(QStringLiteral("#ffffff"))
+                          && whiteLight == QColor(QStringLiteral("#ffffff")),
+                      QStringLiteral("编辑器选中底 = #1653cb（浅色档 #a8cdf5）：原生侧、查表、界面读数三处对得上；"
+                                     "#ffffff 两档都不许翻色（树里选中行的字靠它）"),
+                      QStringLiteral("查表 深=%1 浅=%2 / 界面读数 深=%3 浅=%4 / 白 深=%5 浅=%6")
+                          .arg(selDark.name(), selLight.name(), shownDark.name(), shownLight.name(),
+                               whiteDark.name(), whiteLight.name()));
+            }
+
+            /*
              * 页签条这两处**从"按角色写死"改回查方案表**，两档内置下的像素必须一个
              * 数都没变（深色本来就是 #1e1f22 / #2b2d30，浅色那对"灰面压白卡"是靠
              * #1e1f22@tabstrip 这条新键保住的）。不钉这一条的话，"改成查表"很容易

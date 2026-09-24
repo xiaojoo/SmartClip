@@ -152,7 +152,14 @@ Rectangle {
 
         Label {
             text: modelData.label !== undefined ? modelData.label : ""
-            color: root.isFolder ? textBright : textColor
+            /*
+             * 蓝底那一行（rowHighlight = 这份文件正开在编辑器里）的字单独一档：
+             * #214283 上灰字 #bbbbbb 对比只有 5.04，分组行的 #e8e8e8 是 7.89，
+             * 2026-09-24 他要"选中改成白色"—— 白字压上去 9.67。
+             * 这里用字面量 #ffffff 而不走 Theme.c：白色是这套里**故意不进查表**的
+             * 那几个值之一（浅色档选中底是 #1a4d8f，一样是深底，白字两边都成立）。
+             */
+            color: root.rowHighlight ? "#ffffff" : (root.isFolder ? textBright : textColor)
             font.pixelSize: 12
             elide: Text.ElideRight
             Layout.fillWidth: true
@@ -168,7 +175,7 @@ Rectangle {
         Label {
             text: root.isFolder ? (root.skipped ? "未索引" : (modelData.files + " 个文件"))
                                 : (modelData.entries + " 条")
-            color: textMuted
+            color: root.rowHighlight ? "#ffffff" : textMuted
             font.pixelSize: 11
             Layout.alignment: Qt.AlignVCenter
         }

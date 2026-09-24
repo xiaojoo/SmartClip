@@ -2982,7 +2982,7 @@ Rectangle {
             layerTabStrip: String(editor.tabStripColor),
             layerTabActive: String(editor.tabActiveBg),
             layerPaper: String(editor.editorBg),
-            layerSelection: String(Theme.c("#2f659c", Theme.rev)),
+            layerSelection: String(Theme.c("#1653cb", Theme.rev)),
             layerNavSelected: String(Theme.c("#3a4a5a", Theme.rev)),
             topBarHeight: topBar.height,
             statusBarHeight: statusBar.height,
