@@ -12,6 +12,7 @@
 
 #include "TerminalEngine.h"
 #include "TerminalView.h"
+#include "Theme.h"
 
 #include <QCoreApplication>
 #include <QCursor>
@@ -338,6 +339,25 @@ void runRealShellChecks()
     tcheck(echoed, QStringLiteral("Write-Output 的标记出现在网格里"),
            QStringLiteral("耗时 %1 ms").arg(clock.elapsed()));
 
+    /*
+     * 早退版对照：刚起来、只跑过两条命令的 shell 上试 Ctrl+C。
+     *
+     * 最小复现程序（build/probe-ctrlc.cpp）证明裸 0x03 在这台机器上**能**打断
+     * ConPTY 里的 PowerShell，而后面那一版（刷屏 1200 行 + ESC[3J + 改成 50x12
+     * 之后）打断不掉，差别只可能在"shell 被折腾过"。这一条把这个变量单独拎出来量：
+     * 它绿、后面那条红，就是前面某一步弄坏了输入，不是 Ctrl+C 没接对。
+     */
+    run(QStringLiteral("Start-Sleep 20"));
+    QThread::msleep(1200);
+    e->sendBytes("\x03");
+    QThread::msleep(1500);
+    run(QStringLiteral("Write-Output (\"EA\"+\"RLY\")"));
+    const bool earlyInterrupt = waitUntil(
+        [&e] { return allText(e).contains(QLatin1String("EARLY")); }, 8000);
+    tout(QStringLiteral("     （分段量）刚起来的 shell 上 Ctrl+C：EARLY 出现=%1，格子 %2x%3，"
+                       "shell 还在跑=%4 —— 和最小复现程序（同一条裸 0x03 能打断）对照")
+             .arg(earlyInterrupt).arg(e->cols()).arg(e->rows()).arg(e->running()));
+
     /* 环境块：我们拼的 TERM 要真的落到子进程环境里 */
     run(QStringLiteral("Write-Output $env:TERM"));
     tcheck(waitUntil([&e] { return allText(e).contains(QLatin1String("xterm-256color")); }, 10000),
@@ -406,18 +426,67 @@ void runRealShellChecks()
     tcheck(resized, QStringLiteral("resize 到 50 列之后对面按 50 列报宽度"),
            QStringLiteral("cols=%1 rows=%2").arg(e->cols()).arg(e->rows()));
 
-    /* Ctrl+C：跑一个 30 秒的命令，按打断，提示符要在几秒内回来 */
+    /*
+     * Ctrl+C：跑一个 30 秒的命令，按打断。
+     *
+     * 判法换了。原来盯的是"最后一行有没有 PS ...>"—— 提示符落在第几行受重排、
+     * 滚动、面板高度影响，那条红得说不清是打断失败还是判据挑错了地方。
+     * 现在问一件用户真正关心的事：**打断之后下一条命令还跑不跑**。
+     *
+     * 标记要拼出来（"AFT" + "ERINT"）：直接写 AFTERINT 的话，敲进去的那行命令
+     * 自己就含这个串，shell 卡着不动也能被判成"通过"。
+     */
+    /*
+     * 这条判据红着是有原因的，四条路都试过、都量过（2026-09-23）：
+     *   1) 裸 0x03 写进伪控制台输入端 —— 屏上连 ^C 都没出现；
+     *   2) win32-input-mode 编码成真 KEY_EVENT（CSI ? 9001 h + CSI 67;46;3;1;4;0_）
+     *      —— 和 1 一模一样，没区别；
+     *   3) FreeConsole + AttachConsole(shell pid) + CTRL_C_EVENT —— **两个 API 都返回成功**，
+     *      shell 既不停也不死；
+     *   4) 同上，但子进程用 CREATE_NEW_PROCESS_GROUP 起、发 CTRL_BREAK_EVENT(带 pid)
+     *      —— 还是返回成功、还是没反应。
+     *   另外把 Start-Sleep 换成原生命令 ping -n 30 也断不掉 —— 不是托管 sleep 的锅。
+     *
+     * 结论：不是"我们发的东西不对"，是这台机器上 ConPTY 子进程压根不理会控制台
+     * 控制事件。下一步该先用一个不带 Qt 的最小 ConPTY 复现程序把这件事钉死，
+     * 再决定改哪儿 —— 所以这条先红着，不拿豁免糊。
+     */
     run(QStringLiteral("Start-Sleep 30"));
-    QThread::msleep(400);
-    QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
-    e->sendBytes("\x03");
+    QThread::msleep(600);
+    e->sendBytes("");
+    /*
+     * 这里必须**真的等一会儿**再敲第二条：屏上那句旧提示符本来就在（"PS " 一直在
+     * 第 10 行），拿它当"打断完成了"是假判据；而 \x03 之后立刻灌下一条，
+     * PowerShell 会把这段输入连同中断一起吞掉（实测那样永远等不到 AFTERINT）。
+     */
+    QThread::msleep(1500);
+    for (int k = 0; k < 30; ++k)
+        QCoreApplication::processEvents();
+    const bool sawCaretC = allText(e).contains(QLatin1String("^C"));
+    run(QStringLiteral("Write-Output (\"AFT\" + \"ERINT\")"));
     const bool interrupted = waitUntil(
-        [&e] {
-            const QString last = e->lineText(e->rows() - 1);
-            return last.contains(QLatin1String("PS ")) && last.contains(QLatin1Char('>'));
-        },
-        8000);
-    tcheck(interrupted, QStringLiteral("Ctrl+C 打得断 Start-Sleep（提示符回来了）"));
+        [&e] { return allText(e).contains(QLatin1String("AFTERINT")); }, 8000);
+    tout(QStringLiteral("     打断之后的整屏（%1 行）：").arg(e->rows()));
+    for (int r = 0; r < e->rows(); ++r) {
+        QString row = e->lineText(r);
+        while (!row.isEmpty() && row.endsWith(QLatin1Char(' ')))
+            row.chop(1);
+        tout(QStringLiteral("       [%1] %2").arg(r).arg(row));
+    }
+
+    /* 整屏导出来看：判据只说"没断"，说不出它卡在提示符、Y/N 问句还是回显里 */
+    tout(QStringLiteral("     打断之后的整屏（%1 行）：").arg(e->rows()));
+    for (int r = 0; r < e->rows(); ++r) {
+        QString row = e->lineText(r);
+        while (!row.isEmpty() && row.endsWith(QLatin1Char(' ')))
+            row.chop(1);
+        tout(QStringLiteral("       [%1] %2").arg(r).arg(row));
+    }
+
+    tcheck(interrupted, QStringLiteral("Ctrl+C 打得断 Start-Sleep（打断后下一条命令真能跑）"),
+           QStringLiteral("屏上出现过 ^C=%1；AFTERINT 出现=%2；shell 还在跑=%3；格子 %4x%5")
+               .arg(sawCaretC).arg(interrupted).arg(e->running())
+               .arg(e->cols()).arg(e->rows()));
 
     /* exit：进程自己退了，状态要跟着变 */
     bool gotExit = false;
@@ -1441,41 +1510,75 @@ void runRenderChecks(QObject *qmlRoot, EditorController *cmd)
                        .arg(view->historyRows()).arg(track->property("visible").toBool()));
         }
         /*
-         * 位置条的圆角（用户报的第 1 条）。量的是**这一条自己渲染出来的像素**，
-         * 不是 Rectangle.radius 那个属性值 —— 属性写了不代表画出来圆了。
+         * 位置条的像素（用户报的第 1 条 + 2026-09-24 那句"不要有背景"）。
+         * 量的是**这两个 item 自己渲染出来的像素**，不是 Rectangle 的属性值 ——
+         * 属性写了不代表画出来那样。
          *
          * 为什么不用桌面抓屏对号：第一次那么量，坐标算到 (2633,809) 打出来是 #ffffff，
          * 抓下来一看才发现那块区域是剪贴板缩略图网格（一张背景本来就黑的图），尺子读的不是我们。
-         * grabToImage 只渲染这一个 item：半径 4 = 半个短边，角尖落在圆外 = 清出来的黑底，
-         * 往里 4px 才是轨道色；半径要是 0，角尖就是实打实的轨道色 —— 分得出来。
-         * （屏幕上那个角尖露出来的是卡片底色 #1e1f22，这里量的是"item 自己圆没圆"。）
+         * grabToImage 只渲染这一个 item，遮挡与它无关。
+         *
+         * 两件事分开钉：
+         *   1) 轨道必须**透明** —— 贴底（scrollUp=0）时滑块在最下面，轨道上沿那 4px
+         *      就是纯轨道，alpha 还满着就说明又铺回底色了；
+         *   2) 滑块自己是圆的（半径 3 = 半个短边）：角尖落在圆外、往里才见色。
+         *      原来这条量的是轨道的圆角，轨道既然不画底，圆角就没意义了，挪到滑块上。
          */
         if (auto *rb = qobject_cast<QQuickItem *>(track);
             rb && view->scrollUp() == 0 && view->historyRows() > 0) {
-            auto res = rb->grabToImage();
-            bool ready = false;
-            QObject::connect(res.data(), &QQuickItemGrabResult::ready, [&] { ready = true; });
-            waitUntil([&] { return ready; }, 3000);
-            const QImage t = res->image();
-            const QColor trackColor(QStringLiteral("#2a2d2e"));
-            auto closeTo = [&](QRgb p) {
-                return qAlpha(p) > 200 && qAbs(qRed(p) - trackColor.red()) <= 6
-                       && qAbs(qGreen(p) - trackColor.green()) <= 6
-                       && qAbs(qBlue(p) - trackColor.blue()) <= 6;
-            };
             const int dpr = qRound(view->window()->devicePixelRatio());
-            const QPoint corner(0, 0);
-            const QPoint inner(4 * dpr, 4 * dpr);
-            const bool has = t.width() > inner.x() && t.height() > inner.y();
-            tcheck(has && !closeTo(t.pixel(corner)) && closeTo(t.pixel(inner)),
-                   QStringLiteral("位置条那个角真的是圆的（角尖落在圆外、往里 4px 才是轨道色）"),
-                   QStringLiteral("轨道图 %1x%2 角尖=%3 往里 4px=%4 轨道色=%5")
-                       .arg(t.width()).arg(t.height())
-                       .arg(has ? QString::fromLatin1(QColor(t.pixel(corner)).name(QColor::HexArgb).toLatin1())
-                                : QStringLiteral("图太小"))
-                       .arg(has ? QString::fromLatin1(QColor(t.pixel(inner)).name(QColor::HexArgb).toLatin1())
-                                : QStringLiteral("-"))
-                       .arg(trackColor.name()));
+            auto grabOne = [dpr](QQuickItem *item, QImage *out) {
+                auto res = item->grabToImage();
+                bool ready = false;
+                QObject::connect(res.data(), &QQuickItemGrabResult::ready, [&] { ready = true; });
+                waitUntil([&] { return ready; }, 3000);
+                *out = res->image();
+                return !out->isNull() && out->width() >= 5 * dpr && out->height() >= 5 * dpr;
+            };
+            /* QColor(QRgb) 会把 alpha 丢掉（0x00000000 打出来是 #ff000000，看着像不透明的黑）
+               —— 这条判据量的就是 alpha，必须走 setRgba 把那一档带出来 */
+            auto hex = [](QRgb p) {
+                QColor c;
+                c.setRgba(p);
+                return c.name(QColor::HexArgb);
+            };
+
+            QImage trackImg;
+            const bool gotTrack = grabOne(rb, &trackImg);
+            const QPoint trackMid(4 * dpr, 4 * dpr);
+            const bool trackClear = gotTrack && qAlpha(trackImg.pixel(trackMid)) < 40;
+            tcheck(trackClear,
+                   QStringLiteral("位置条轨道不许有底色（贴底时轨道上沿是透明的）"),
+                   QStringLiteral("轨道图 %1x%2 上沿那一点=%3（该是 alpha<40）")
+                       .arg(trackImg.width()).arg(trackImg.height())
+                       .arg(gotTrack ? hex(trackImg.pixel(trackMid))
+                                     : QStringLiteral("图没抓到")));
+
+            QQuickItem *thumbItem = nullptr;
+            for (QObject *ch : rb->children()) {
+                auto *ci = qobject_cast<QQuickItem *>(ch);
+                if (ci && ci->property("color").isValid() && ci->property("radius").isValid()
+                    && ci->height() < rb->height()) {
+                    thumbItem = ci;
+                    break;
+                }
+            }
+            const QColor thumbColor(QStringLiteral("#4b4d4f"));
+            auto isThumb = [&](QRgb p) {
+                return qAlpha(p) > 200 && qAbs(qRed(p) - thumbColor.red()) <= 8
+                       && qAbs(qGreen(p) - thumbColor.green()) <= 8
+                       && qAbs(qBlue(p) - thumbColor.blue()) <= 8;
+            };
+            QImage thumbImg;
+            const bool gotThumb = thumbItem && grabOne(thumbItem, &thumbImg);
+            const QPoint corner(0, 0), inner(3 * dpr, 6 * dpr);
+            tcheck(gotThumb && !isThumb(thumbImg.pixel(corner)) && isThumb(thumbImg.pixel(inner)),
+                   QStringLiteral("滑块那个角真的是圆的（角尖落在圆外、往里才是滑块色）"),
+                   QStringLiteral("滑块图 %1x%2 角尖=%3 往里=%4 滑块色=%5 找到滑块=%6")
+                       .arg(thumbImg.width()).arg(thumbImg.height())
+                       .arg(gotThumb ? hex(thumbImg.pixel(corner)) : QStringLiteral("-"))
+                       .arg(gotThumb ? hex(thumbImg.pixel(inner)) : QStringLiteral("-"))
+                       .arg(thumbColor.name()).arg(thumbItem != nullptr));
         }
         view->scrollToEnd();
         QCoreApplication::processEvents();
@@ -2056,8 +2159,10 @@ void runRenderChecks(QObject *qmlRoot, EditorController *cmd)
         QCoreApplication::sendEvent(view, &rc);
         for (int k = 0; k < 20; ++k)
             QCoreApplication::processEvents();
-        /* 那个 Popup 的 parent 是**离屏 QQuickWindow**（QQuickWidget 那块窗没有 QObject
-         * 父），不在控件树里 —— 从 host 往下找永远找不到，得从窗口找。 */
+        /* QQuickWidget 里那些 QML 对象的 **QObject 父**挂在那块离屏窗口上，不在
+         * QWidget 树里 —— 从 host 控件往下 findChild 永远找不到，得从窗口找。
+         * （注意这跟 Popup 的 `parent` 属性是两件事：那个要的是 Item，2026-09-24
+         * 之前一直赋值失败，见下面 hostHeight 那条。） */
         QObject *menu = view->window() ? view->window()->findChild<QObject *>("terminalMenu")
                                           : nullptr;
         if (!menu && panel)
@@ -2098,6 +2203,21 @@ void runRenderChecks(QObject *qmlRoot, EditorController *cmd)
                QStringLiteral("找得到菜单=%1 开了=%2 条目[%3] 全选生效=%4%5")
                    .arg(menu != nullptr).arg(opened).arg(labels.join("|")).arg(allWorks)
                    .arg(menuProbe));
+        /*
+         * 宿主到底挂上没有。DropdownMenu 的 hostHeight 写的是
+         * `root.parent ? root.parent.height : 800` —— parent 没挂上时它静默退化成
+         * 800，于是贴边夹取、子栏可用空间那一整套账全部白算，而界面上只看得到
+         * 一条 "Unable to assign QQuickWidgetOffscreenWindow to QQuickItem"
+         * （parent 那一句原来写的是 `Window.window`，QQuickWidget 里那是离屏
+         * QWindow、不是 Item，赋值一直失败）。钉"读到的是窗口真实高度"，
+         * 退化回 800 时这条立刻红。
+         */
+        const double menuHostH = menu ? menu->property("hostHeight").toDouble() : -1.0;
+        const double winH = qmlRoot->property("height").toDouble();
+        tcheck(menu && qAbs(menuHostH - winH) < 1.0,
+               QStringLiteral("终端右键菜单的宿主是窗口本体（不是退化那个 800）"),
+               QStringLiteral("菜单读到的宿主高 %1 / 窗口高 %2")
+                   .arg(menuHostH).arg(winH));
     }
 
     const qreal heightBeforeCollapse = panel->property("wantedHeight").toReal();
@@ -2400,6 +2520,56 @@ void runRenderChecks(QObject *qmlRoot, EditorController *cmd)
                QStringLiteral("取消选择 %1 个像素 → 全选 %2 个（ΔE<=12）；选区长度=%3，"
                               "同一次抓图里纸色 %4 个")
                    .arg(before).arg(after).arg(selLen).arg(paper));
+    }
+
+    /*
+     * 浅色档 ANSI 调色板：直接问引擎"某一号现在是什么 RGB"。
+     * libvterm 自带的 3 号是 #e0e000（纯黄，PowerShell 提示符那条路径就用它），
+     * 浅色档必须换成 #9a6700；切回深色必须**16 格逐字退回** —— 两条一起量才说明
+     * "浅色换了、深色没被动过"。
+     *
+     * 为什么放在整个终端自检最后：它要来回切主题档，而切档之后的**像素**判据会读到
+     * 还没重画的旧色 —— 图标条那一格（#f2f2f2）就是被它打成 #ffffff 的，实测。
+     * 这一段只问引擎里的颜色、不抓像素，所以放末尾安全。
+     */
+    if (AppTheme::instance() && view) {
+        AppTheme *th = AppTheme::instance();
+        const bool wasLight = th->light();
+        auto rowOf = [view]() {
+            QString s;
+            for (int i = 0; i < 16; ++i)
+                s += view->ansiColorForTest(i).name() + QLatin1Char(' ');
+            return s.trimmed();
+        };
+        const QString darkRow = rowOf();
+        th->setLight(true);
+        QCoreApplication::processEvents();
+        const QString lightRow = rowOf();
+        th->setLight(wasLight);
+        QCoreApplication::processEvents();
+        const QString backRow = rowOf();
+        const QString d3 = darkRow.section(QLatin1Char(' '), 3, 3);
+        const QString l3 = lightRow.section(QLatin1Char(' '), 3, 3);
+        tcheck(d3 == QStringLiteral("#e0e000") && l3 == QStringLiteral("#9a6700")
+                   && darkRow.compare(backRow, Qt::CaseInsensitive) == 0,
+               QStringLiteral("终端浅色档换掉那套 ANSI 色、切回深色 16 格逐字退回原值"),
+               QStringLiteral("3 号：深色 %1 → 浅色 %2；切回来整套逐字相同=%3")
+                   .arg(d3, l3).arg(darkRow.compare(backRow, Qt::CaseInsensitive) == 0));
+        /* 两整套都打出来：以后调这套色照这一行对，不用再去猜 libvterm 的值 */
+        tout(QStringLiteral("     （ANSI 深色档 libvterm 自带：%1）").arg(darkRow));
+        tout(QStringLiteral("     （ANSI 浅色档 Theme.cpp：%1）").arg(lightRow));
+        /*
+         * 这一条只量到**引擎换算**那一层，没量到像素 —— 试过，量不出来，记在这儿免得
+         * 下次再烧一轮：往格子里喂一段 33 号色的 W（得先关掉 shell，否则 PSReadLine
+         * 一次重绘就把 W 抹了，实测 inGrid 从 1 变 0），格子里确实有；但 grabToImage
+         * 抓回来的图 379756 个像素里只有 174 个像正文色 —— 那块 item 的画布是在
+         * updatePaintNode 里建的，自检窗口没在屏幕上露出就一帧都不渲，抓到的是空图。
+         * 桌面抓图在这条套件里也一直报"窗口不可见或被盖住"。
+         *
+         * 所以"白底上那档黄有没有变深"这一眼仍归人验。像素那一层并非没证据：他报来的
+         * 截图里提示符路径就是**渲染出来的** #e0e000 —— 那正好说明"表 → 格子换算 →
+         * paint"这条链是通的，改表就会改到屏幕上。
+         */
     }
 
     if (theme && themeWas)

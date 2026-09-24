@@ -596,21 +596,58 @@ int SelfTest::runNotes(ClipboardStore *store, TrayIcon *tray, EditorController *
                 const int gapY = subFly2.y() + 8;
                 noteOut(QStringLiteral("（把光标放进主栏和面板之间那条缝：%1,%2）")
                             .arg(gapX).arg(gapY));
+                /*
+                 * 光标读数走 StickyNoteWindow::setCursorPosForTest 接管，不跟真鼠标抢：
+                 * 这条判据要 400ms 里光标一直停在缝里，而缝只有 6px 宽 —— 机器上有人
+                 * 动鼠标时实测 400ms 能漂出 500px，10ms 钉回去一次都还漂 34 次，
+                 * hoverWatch 那一拍抓到的是飞行途中的位置，于是判据红、功能没坏。
+                 * 接管之后量的才是它本来要量的那件事："给定光标在这一点，规则收不收"。
+                 *
+                 * 真光标同时挪去屏幕左下角待着：那儿没有我们的东西，别顺手触发
+                 * hover 事件（onEntered 那一路还是事件驱动的，得让它安静）。
+                 */
+                auto *noteWin = qobject_cast<StickyNoteWindow *>(
+                    notes->windowForId(menuNote->id()));
+                noteCheck(noteWin != nullptr,
+                          QStringLiteral("缝这一节拿得到便签窗口（要接管光标读数）"));
                 const QPoint keep = QCursor::pos();
-                QCursor::setPos(gapX, gapY);
-                /* 等过 NoteMenu 那个 hoverWatch 的 160ms（收/不收都是它拍板的） */
-                QElapsedTimer waited;
-                waited.start();
-                while (waited.elapsed() < 400) {
-                    QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
-                    QThread::msleep(10);
-                }
+                if (QScreen *scr = QGuiApplication::primaryScreen())
+                    QCursor::setPos(scr->availableGeometry().x() + 20,
+                                    scr->availableGeometry().bottom() - 20);
+                auto holdFor = [noteWin](int x, int y, int ms) {
+                    if (!noteWin)
+                        return;
+                    noteWin->setCursorPosForTest(x, y);
+                    QElapsedTimer t;
+                    t.start();
+                    while (t.elapsed() < ms) {
+                        QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+                        QThread::msleep(10);
+                    }
+                };
+                holdFor(gapX, gapY, 400);
                 const QVariantMap still = notes->menuState(menuNote->id());
                 noteCheck(still.value(QStringLiteral("flyout")).toString()
                               == QLatin1String("opacity"),
                           QStringLiteral("菜单：鼠标经过那条缝时子面板不会闪掉"),
-                          QStringLiteral("flyout=%1")
-                              .arg(still.value(QStringLiteral("flyout")).toString()));
+                          QStringLiteral("flyout=%1（读数钉在 %2,%3；真光标 %4,%5）")
+                              .arg(still.value(QStringLiteral("flyout")).toString())
+                              .arg(gapX).arg(gapY).arg(QCursor::pos().x()).arg(QCursor::pos().y()));
+                /*
+                 * 反面对照（少了这条，上面那条能靠"接管光标"钉成常绿）：把读数钉到
+                 * 菜单和面板**之外**，子面板必须收掉。收不掉就说明 hoverWatch 根本没在
+                 * 跑，那"缝里不收"也就是空的。
+                 */
+                const int outX = menuFly2.x() - 200, outY = menuFly2.y() + 600;
+                holdFor(outX, outY, 400);
+                if (noteWin)
+                    noteWin->setCursorPosForTest(-1, -1);   /* 交还给真实光标 */
+                const QVariantMap gone = notes->menuState(menuNote->id());
+                noteCheck(gone.value(QStringLiteral("flyout")).toString().isEmpty(),
+                          QStringLiteral("反面对照：光标读数在菜单外时，子面板该收掉"),
+                          QStringLiteral("flyout=[%1]（读数落在 %2,%3）")
+                              .arg(gone.value(QStringLiteral("flyout")).toString())
+                              .arg(outX).arg(outY));
                 QCursor::setPos(keep);
                 settle();
             }
@@ -623,11 +660,10 @@ int SelfTest::runNotes(ClipboardStore *store, TrayIcon *tray, EditorController *
             /*
              * 开菜单之前先把光标挪走。
              *
-             * 上一条检查故意把光标留在了"主栏和面板之间那条缝"里（1709,985），
-             * 这儿换到屏幕右缘开菜单时，光标会落在**要么主栏、要么面板**上 ——
-             * 哪个都可能把菜单收掉（点开之后那一瞬间的 hover / 失焦判断）。
-             * 这是自检自己的竞态，不是功能问题；挪到屏幕左下角（那儿没东西）
-             * 就干净了。
+             * 上面那两条（缝里不收 / 钉到外面要收）都会把光标按到菜单附近再放回去，
+             * 而这一条要换到**屏幕右缘**重开一次菜单：光标落点可能正好压在重开之后的
+             * 主栏或面板上，那一瞬间的 hover / 失焦判断就可能把菜单收掉。
+             * 这是自检自己的竞态，不是功能问题；挪到屏幕左下角（那儿没东西）就干净了。
              */
             const QPoint away = QCursor::pos();
             QCursor::setPos(area.x() + 20, area.bottom() - 20);

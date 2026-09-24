@@ -131,6 +131,17 @@ public:
     QColor defaultBg() const { return m_defaultBg; }
 
     /*
+     * 16 色 ANSI 调色板。表短于 16、或某一项是**无效 QColor**，那一格就退回
+     * libvterm 自带那份（构造时抄下来的 m_basePalette）—— 所以深色档传空表
+     * 进来等于什么都没改，这是"切回深色逐格不变"那条自检的依据。
+     *
+     * 改了调色板之后**不用**重画历史：格子颜色是 cellAt() 现问 libvterm 换算的，
+     * 下一次重画自然按新表出（见 fillCell 里那两句 convert_color_to_rgb）。
+     */
+    void setAnsiPalette(const QVector<QColor> &colors);
+    QColor ansiColor(int index) const;
+
+    /*
      * 自检用：不经过伪控制台，直接把一段"终端输出字节流"喂进网格。
      * 这样能脱离界面、脱离 shell 验转义解析（见 src/SelfTestTerminal.cpp）。
      */
@@ -186,6 +197,9 @@ private:
     QByteArray m_titleFrag;   // OSC 是分段送来的，攒到 final 为止
     QColor m_defaultFg { QStringLiteral("#d4d4d4") };
     QColor m_defaultBg { QStringLiteral("#1e1f22") };
+    /* libvterm 自带的 16 色，构造时抄一份下来，好让"退回默认"这件事有地方退 */
+    VTermColor m_basePalette[16] = {};
+    bool m_basePaletteTaken = false;
     bool m_contentsDirty = false;
     /* 见 suppressHistoryBriefly：按内容对上才丢，对不上立刻停止丢 */
     QStringList m_histDropQueue;

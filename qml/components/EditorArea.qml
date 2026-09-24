@@ -139,9 +139,13 @@ Rectangle {
 
     readonly property color barBg: Theme.c("#1e1f22", Theme.light)
     readonly property color editorBg: Theme.c("#1e1f22", Theme.light)
+    /* 自检要用：页签条自己的底（mainTabStrip 是本文件里的 id，外面够不着，
+       所以在这儿转一道给 Main.qml 的 uiState） */
+    readonly property color tabStripColor: mainTabStrip.color
     readonly property color borderColor: Theme.c("#4b4d4f", Theme.light)
     readonly property color tabBg: Theme.c("#45484c", Theme.light)
-    readonly property color tabActiveBg: Theme.c("#2b2d30", Theme.light)
+    /* 同 TabStrip：浅色档这两个深色值都翻成 #ffffff 会撞车，按角色写 */
+    readonly property color tabActiveBg: Theme.light ? "#ffffff" : "#2b2d30"
     readonly property color textBright: Theme.c("#e8e8e8", Theme.light)
     readonly property color textMain: Theme.c("#bbbbbb", Theme.light)
     readonly property color textMuted: Theme.c("#7d7d7d", Theme.light)

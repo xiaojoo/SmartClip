@@ -140,6 +140,18 @@ public:
     Q_INVOKABLE QPoint cursorPos() const;
 
     /*
+     * 自检用：把上面那个读数**接管**成一个受控的点（x 或 y 给负数 = 取消接管，
+     * 回到真实的 QCursor::pos）。
+     *
+     * 为什么要接管：菜单那条"光标在缝里不许收子面板"的判据要 400ms 里让光标
+     * 一直待在缝里，而缝只有 6px 宽 —— 人手在动鼠标时，实测 400ms 里能漂出
+     * 500px，10ms 钉回去一次都还漂 34 次，hoverWatch 那一拍抓到的是飞行途中
+     * 的位置，于是判据红了、功能没坏。接管之后量的才是"给定光标位置，规则判什么"，
+     * 而那正是 hoverWatch 唯一依赖的输入。
+     */
+    Q_INVOKABLE void setCursorPosForTest(int x, int y);
+
+    /*
      * 左/右键此刻在系统层面按着没有（给便签菜单的"点别处才收"用）。
      *
      * 菜单是不接激活的置顶窗口：在别处点一下既不让它失焦，Qt 也收不到那一下
@@ -402,6 +414,10 @@ protected:
 
 private:
     void applyWindowFlags();
+
+    /* cursorPos() 的自检接管开关（见 setCursorPosForTest 那段） */
+    QPoint m_cursorForTest;
+    bool m_cursorForTestOn = false;
 
     /*
      * 一摞便签：拖动 / 改大小时把整摞带上（只在 beginDrag / beginResize 量过

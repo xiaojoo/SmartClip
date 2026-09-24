@@ -72,12 +72,20 @@ Rectangle {
      */
     signal tabActivated(var pane, int index)
 
-    color: Theme.c("#1e1f22", Theme.light)
+/*
+ * 页签条这一处**不按 hex 查表**，按角色写死。
+ *
+ * 表里 #1e1f22（条子底）和 #2b2d30（选中那一枚的底）在浅色档都翻成 #ffffff ——
+ * 同一个深色值在这儿担着两个角色（条子底 / 卡片底），全局按 hex 映射必然撞车，
+ * 结果就是"选中的 tab 背景没有了"（2026-09-23 他圈的这条）。
+ * 浅色档照他参考图那套来：灰面 #f2f3f5 上压一张白卡片 #ffffff。
+ */
+    color: Theme.light ? "#f2f3f5" : "#1e1f22"
     topLeftRadius: roundTopLeft ? cornerRadius : 0
     topRightRadius: roundTopRight ? cornerRadius : 0
 
     readonly property color accentColor: "#4c96d8"
-    readonly property color tabActiveBg: Theme.c("#2b2d30", Theme.light)
+    readonly property color tabActiveBg: Theme.light ? "#ffffff" : "#2b2d30"
     readonly property color textBright: Theme.c("#e8e8e8", Theme.light)
     readonly property color textMain: Theme.c("#bbbbbb", Theme.light)
     readonly property color textMuted: Theme.c("#7d7d7d", Theme.light)

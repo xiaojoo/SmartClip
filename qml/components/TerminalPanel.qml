@@ -46,6 +46,13 @@ Rectangle {
      */
     visible: root.opened
 
+    /*
+     * 右键菜单那块 Popup 的宿主（窗口根 Item，由 Main.qml 传进来）。
+     * 为什么要在外面传：见下面 termMenu 那句 parent 的说明 —— QQuickWidget 里
+     * `Window.window` 给的是离屏 QWindow，赋给 Popup.parent（要 Item）会失败。
+     */
+    property Item menuHost: null
+
     readonly property real headerHeight: 30
     readonly property color borderColor: Theme.c("#3c3f41", Theme.light)
     /* 和左树 / 编辑区那两张卡片同一套（实测 FolderTree、EditorArea 都是 10 + #1e1f22） */
@@ -481,9 +488,14 @@ Rectangle {
                             anchors.bottom: parent.bottom
                             anchors.bottomMargin: 2
                             visible: view.historyRows > 0
-                            /* 8 宽 → 半径 4 = 整个短边，两端才是真半圆（不圆就是方块） */
-                            radius: width / 2
-                            color: Theme.c("#2a2d2e", Theme.light)
+                            /*
+                             * 轨道**不许有底色**（用户 2026-09-24："终端的滚动条不要有背景"）：
+                             * 以前这里铺一条 #2a2d2e，白底上就是一条灰带子压在正文右边。
+                             * 只留滑块那一段可见 —— 和 ThinScrollBar 那条一个做法
+                             * （qml/utils/ThinScrollBar.qml 里 background: Item {}）。
+                             * 半径也不用写了：没有底就没有"圆不圆"这件事，滑块自己有半径。
+                             */
+                            color: "transparent"
 
                             Rectangle {
                                 id: thumb
@@ -496,10 +508,21 @@ Rectangle {
                                 y: (sb.height - height) * (view.historyRows - view.scrollUp)
                                    / Math.max(1, view.historyRows)
                                 radius: width / 2
-                                color: Theme.c("#4a4d50", Theme.light)
+                                /*
+                                 * 和**内容区那条**同一个值：#4b4d4f（浅色档 #c9cdd4）、
+                                 * 悬停 #5f6266（见 EditorViewItem::scrollBarStyleSheet 的
+                                 * %1 / %2）。原来这里写的是 #4a4d50，深色档差 1 个色阶
+                                 * 看不出来，浅色档变成 #e5e6eb —— 比编辑区那条浅一整档，
+                                 * 两条并排一眼就见分晓。
+                                 */
+                                color: sbHit.containsMouse
+                                       ? Theme.c("#5f6266", Theme.light)
+                                       : Theme.c("#4b4d4f", Theme.light)
                             }
 
                             MouseArea {
+                                id: sbHit
+                                hoverEnabled: true
                                 anchors.fill: parent
                                 cursorShape: Qt.PointingHandCursor
 
@@ -571,7 +594,19 @@ Rectangle {
     DropdownMenu {
         id: termMenu
 
-        parent: root.Window.window
+        /*
+         * Popup 的 parent 要的是一个 **Item**，而 `Window.window` 在 QQuickWidget
+         * 里给的是那块离屏窗口（QQuickWidgetOffscreenWindow，是 QWindow 不是 Item）——
+         * 于是这句一直赋值失败，界面上每开一次终端右键菜单就报一条
+         * "Unable to assign QQuickWidgetOffscreenWindow to QQuickItem"。
+         *
+         * 失败不是无害的：DropdownMenu 里凡是按宿主算的账（maxMenuHeight /
+         * usableBottom / openFor 的贴边夹取）拿不到 parent 就全部走退化分支，
+         * 菜单可以伸到窗口外面而没人管。所以宿主由面板的 menuHost 传进来
+         * （Main.qml 给的是窗口那个根 Item，和 ddMenu 的 `parent: window` 同一个对象），
+         * 这里留一个兜底 = 面板自己，免得哪天忘了传又变成 null。
+         */
+        parent: root.menuHost ? root.menuHost : root
         /* 自检按名字找它那块原生窗（和 ddMenu 一个路子） */
         objectName: "terminalMenu"
 

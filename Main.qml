@@ -2559,10 +2559,19 @@ Rectangle {
             submenuHeight: ddMenu.submenuHeight,
             submenuContentHeight: ddMenu.subEntriesHeight,
             submenuScrollable: ddMenu.submenuScrollable,
+            /* 往上翻了没有 + 面板自己的上下沿（不翻时 panelTop == submenuTop） */
+            submenuFlipped: ddMenu.submenuFlipped,
+            submenuPanelTop: ddMenu.submenuPanelTop,
+            submenuBottom: ddMenu.submenuBottom,
+            submenuRoomBelow: ddMenu.submenuRoomBelow,
+            submenuRoomAbove: ddMenu.submenuRoomAbove,
+            submenuNaturalHeight: ddMenu.submenuNaturalHeight,
+            menuUsableBottom: ddMenu.usableBottom,
             submenuInset: ddMenu.submenuInset,
             submenuTop: ddMenu.submenuTop,
             submenuRowY: ddMenu.submenuRowY,
             menuPaneWidth: ddMenu.paneWidth,
+            menuItemHeight: ddMenu.itemHeight,
             menuPaneGap: ddMenu.paneGap,
             menuTotalWidth: ddMenu.width,
             menuTotalHeight: ddMenu.height,
@@ -2578,6 +2587,23 @@ Rectangle {
              */
             menuX: window.menuTopLeft().x,
             menuY: window.menuTopLeft().y,
+            /*
+             * 诊断用：同一个弹窗顶边的三种读数，摆在一起才看得出它们是**三个坐标系**。
+             *
+             *   menuPlacedY  openFor 定下来的宿主内容区坐标（算剩余空间只能用这个）
+             *   menuRawY     Popup.y —— open() **之前**和上面同一个数，之后被 Qt 改成
+             *                屏幕坐标（实测宿主 y=30 时它读 635，宿主内容区顶边在屏幕 605）
+             *   menuY        background.mapToGlobal 反推的宿主内位置（现算，不会过期）
+             *
+             * 自检"子栏不许压成 0 高"那条红就是拿第二个数当第一个数用踩出来的。
+             */
+            menuPlacedY: ddMenu.placedY,
+            menuPlacedX: ddMenu.placedX,
+            menuRawX: ddMenu.x,
+            menuRawY: ddMenu.y,
+            menuRawH: ddMenu.height,
+            subEntriesH: ddMenu.subEntriesHeight,
+            openCapNow: ddMenu.openCap,
             /*
              * 这次菜单锚在哪个控件上（宽度 / 高度 / 名字）。
              *
@@ -2775,6 +2801,21 @@ Rectangle {
             navSlotWidth: navStripSlot.width,
             themeLight: Theme.light,
             themeChrome: String(Theme.c("#313335", Theme.light)),
+            /*
+             * 浅色档下"挨着的两层"各自实际解析成什么颜色。
+             *
+             * 查表机制有个固有缺陷：两个不同的深色值可以映射到同一个浅色值，
+             * 于是本来靠明度差分开的两层在白色档里塌成一片（页签条底 #1e1f22
+             * 和选中页签底 #2b2d30 都翻成 #ffffff，就是"选中 tab 没背景"那次）。
+             * 这里报的是**界面上真正在用的那层**（不是查表前的原始值），
+             * 所以按角色写死过的位置也查得到。判据见 src/SelfTest.cpp 的 layerPairs。
+             */
+            layerChrome: String(contentRoot.color),
+            layerTabStrip: String(editor.tabStripColor),
+            layerTabActive: String(editor.tabActiveBg),
+            layerPaper: String(editor.editorBg),
+            layerSelection: String(Theme.c("#2f659c", Theme.light)),
+            layerNavSelected: String(Theme.c("#3a4a5a", Theme.light)),
             topBarHeight: topBar.height,
             statusBarHeight: statusBar.height,
             windowWidth: window.width,
@@ -3830,6 +3871,9 @@ Rectangle {
         TerminalPanel {
             id: terminal
 
+            /* 终端那块右键菜单的宿主：和下面 ddMenu 的 `parent: window` 同一个对象
+               （面板自己够不到窗口根 Item，见 TerminalPanel.qml 里 menuHost 的说明） */
+            menuHost: window
             Layout.fillWidth: true
             /*
              * 三条边距全部照抄同级那两张卡片，不手算常量：

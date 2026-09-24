@@ -101,6 +101,12 @@ public:
     Q_INVOKABLE void dbgResetPaintStats() { m_paints = 0; m_fullPaints = 0; }
     Q_INVOKABLE int dbgPaints() const { return m_paints; }
     Q_INVOKABLE int dbgFullPaints() const { return m_fullPaints; }
+    /*
+     * 自检用：问某一号 ANSI 色**现在**换算成什么 RGB。
+     * 判"浅色档那套黄有没有生效"只能这么问 —— 扫屏幕像素的话，得先凑出一段
+     * 用 3 号色的输出、还得躲开光标，而调色板本身就是一个数，直接读它最省。
+     */
+    Q_INVOKABLE QColor ansiColorForTest(int index) const { return m_engine->ansiColor(index); }
     /* 自检/几何记录器用：画布实际多大（黑块判据就是"画布有没有跟上 item"） */
     QSize canvasSizeForLog() const { return m_canvas.size(); }
     /*
@@ -216,6 +222,8 @@ protected:
 private:
     void rebuildFont();
     void relayout();
+    /* 按当前主题档把 ANSI 16 色推给引擎（浅色一套，深色退回 libvterm 自带） */
+    void applyAnsiPalette();
     void checkScreenForBlack();
     void drawRow(QPainter *painter, int viewRow, int docRow);
     /* 视图里第 i 行 -> 文档行号（负数 = 回滚区） */

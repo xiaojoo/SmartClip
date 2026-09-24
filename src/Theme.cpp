@@ -146,3 +146,39 @@ QString AppTheme::c(const QString &darkHex, bool lightMode) const {
     const auto it = lightTable().constFind(keyOf(darkHex));
     return it == lightTable().constEnd() ? darkHex : *it;
 }
+
+QVector<QColor> AppTheme::ansiPalette() const {
+    if (!m_light)
+        return {};        /* 深色档：空表 = 引擎退回 libvterm 自带那一份 */
+
+    /*
+     * 白底上能读出来的一套。右边那列是 libvterm 自带的值，**实测**从引擎里问出来的
+     * （自检末尾那行"ANSI 深色档 libvterm 自带"就是它，改色照那一行对），抄在这儿是
+     * 为了一眼看出改了什么：0~7 那几个在白底上要么刺眼（#e0e000）要么发灰（#e0e0e0）。
+     * 8~15（"亮"档）在白底上只能往**深**里走，不然和 0~7 分不开 —— 这是浅色终端的
+     * 通行做法（VS Code Light+ / Windows Terminal One Light 同样）。
+     */
+    static const char *kLight[16] = {
+        "#303133",  // 0  ← #000000
+        "#b3261e",  // 1  ← #e00000
+        "#0a7a3a",  // 2  ← #00e000
+        "#9a6700",  // 3  ← #e0e000  PowerShell 提示符那条路径就是这一号
+        "#0b57d0",  // 4  ← #0000e0
+        "#a3179b",  // 5  ← #e000e0
+        "#0e7490",  // 6  ← #00e0e0
+        "#6b7280",  // 7  ← #e0e0e0
+        "#9aa0a6",  // 8  ← #808080
+        "#e04b3a",  // 9  ← #ff4040
+        "#2ea05a",  // 10 ← #40ff40
+        "#c98a00",  // 11 ← #ffff40
+        "#4285f4",  // 12 ← #4040ff
+        "#d062c6",  // 13 ← #ff40ff
+        "#35a3b5",  // 14 ← #40ffff
+        "#303133",  // 15 ← #ffffff
+    };
+    QVector<QColor> out;
+    out.reserve(16);
+    for (const char *hex : kLight)
+        out << QColor(QLatin1String(hex));
+    return out;
+}

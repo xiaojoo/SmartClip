@@ -421,8 +421,16 @@ QRect StickyNoteWindow::screenBounds() const {
 }
 
 QPoint StickyNoteWindow::cursorPos() const {
+    /* 自检接管中就用那个受控的点（见 StickyNotes.h 的 setCursorPosForTest） */
+    if (m_cursorForTestOn)
+        return m_cursorForTest;
     /* 屏幕坐标（QCursor::pos 就是这个口径，和菜单的 anchorX/anchorY 一致） */
     return QCursor::pos();
+}
+
+void StickyNoteWindow::setCursorPosForTest(int x, int y) {
+    m_cursorForTestOn = x >= 0 && y >= 0;
+    m_cursorForTest = QPoint(x, y);
 }
 
 bool StickyNoteWindow::mouseAnyDown() const {

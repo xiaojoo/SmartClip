@@ -214,17 +214,60 @@ Popup {
      * 伸出宿主下沿，展开时就得把整块弹窗往上挪 —— 而"露着的时候挪位置"在 Windows
      * 上就是 DWM 重放旧画面那一帧（闪），那份账本文件开头躲的就是它。
      * 宁可子栏自己滚，也不挪窗口。
-     *
-     * 写成现算的只读绑定（不是 openSubmenu 里赋一次值）：宿主高度、弹窗 y、
-     * 那一行的位置任何一个变了，它都跟着走。
      */
-    readonly property real submenuRoomBelow: root.parent
-        ? root.parent.height - 4 - (root.y + submenuTop) : maxMenuHeight
     /*
-     * 这里**不留下限**（不是"至少也给人家 168"）：留了下限，弹窗总高就会顶穿宿主
+     * 弹窗顶边**在宿主内容区里的位置** —— openFor / openAtPoint 定下来多少就是多少，
+     * 算"这一行往下还剩多少"只能用这个数。它写成普通属性（不是绑定），兜底挪位置时
+     * 一起改写；宿主高度、那一行的位置则照常跟着绑定走。
+     *
+     * 为什么不能就地读 root.y：它在 open() **之前**确实是宿主坐标，可 Qt 把弹窗摆到
+     * 屏幕上之后会**按自己的记账把它改掉**（见下面 onHostGeometryChanged 那段）。
+     * 实测：宿主内容区顶边在屏幕 605，弹窗摆在宿主 y=30 处，root.y 读到的是 635
+     * （= 屏幕值）。拿 635 去算剩余空间 = 900-4-(635+367) 恒为负，再被 Math.max(0, …)
+     * 收成 0 —— 子栏整块不出现（hover「语言」右边一片空白），而且每一枪子菜单都要
+     * "露着的时候挪一次窗口"（自检那条兜底计数 = 1）。
+     *
+     * 也不能改成 mapToGlobal 现算：那是函数调用，QML 的绑定只按依赖失效，**没有
+     * 任何东西变了就重算**，实测缓存住开窗前的 0，照样算出 0 高。所以只能自己记账：
+     * 开的时候写一次，兜底挪位置时再写一次。
+     */
+    property real placedY: 2
+    /* x 同一本账：见 placedY —— open() 之后 root.x 也已经被 Qt 换成屏幕坐标了 */
+    property real placedX: 2
+    /* 弹窗内坐标里，宿主可用范围的下沿（再往下就出界 = 得挪窗口 = 那一帧闪） */
+    readonly property real usableBottom: root.parent
+        ? Math.max(0, root.parent.height - 4 - placedY) : maxMenuHeight
+    /* 那一行（submenuTop）往下还剩多少 */
+    readonly property real submenuRoomBelow: Math.max(0, usableBottom - submenuTop)
+    /* 这一栏想长多高：内容自己撑出来的高，封顶到全局上限 */
+    readonly property real submenuNaturalHeight: Math.min(subEntriesHeight, maxMenuHeight)
+    /* 往上翻能拿到多少：面板底边贴住那一行的底边，往上最长到弹窗自己顶上（0） */
+    readonly property real submenuRoomAbove: Math.min(submenuTop + itemHeight, usableBottom)
+    /*
+     * 往下放不下**整栏**、而且上面比下面更宽 —— 就改成往上翻：面板底边对齐
+     * "那一行的底边"，往上长。系统菜单和 JetBrains 都是这个行为。
+     *
+     * 阈值原来写的是"往下连一行（28px）都放不下"，太死：换行符那一栏只有 3 项
+     * 92px，窗口矮的时候那一行往下剩 45px —— 够放一行、放不下整栏，那条判据不
+     * 触发，画出来就是一栏只露一行半（用户 2026-09-24 那张截图）。现在按
+     * "整栏摆得下摆不下"判，再看哪边空间大；两边都不如往下时仍走往下
+     * （往下长是默认，不无故往上跑）。
+     *
+     * 为什么可以往上翻而不违反"开出来之后不许挪"：翻上去只把面板往弹窗**内部**
+     * 收（顶边最低到 0），弹窗自己的顶边一动不动；往下则照旧夹在 usableBottom 里。
+     * 所以两种摆法弹窗总高都不超过 usableBottom，展开那一下永远不用挪窗口。
+     *
+     * 原来这里只有"往下 + 缩高 + 出滚动条"一条路：窗口压到 420 高时那一行往下只剩
+     * 21px，画出来就是一小条比一行还短的板（实测 19px，里面连一条条目都放不下）。
+     */
+    readonly property bool submenuFlipped: submenuOpened
+                                           && submenuNaturalHeight > submenuRoomBelow
+                                           && submenuRoomAbove > submenuRoomBelow
+    readonly property real submenuBottom: submenuFlipped
+        ? submenuRoomAbove : submenuTop + submenuHeight
+    /*
+     * 不留下限（不是"至少也给人家 168"）：留了下限，弹窗总高就会顶穿宿主
      * 下沿，展开那一下就得把窗口往上挪 —— 挪一下就是 DWM 重放旧画面那一帧。
-     * 真挤到一点空间都不剩（宿主很矮、又是最后一行），就是这一栏暂时不出来，
-     * 把主栏滚一滚，行位置一变空间就回来了。
      */
     readonly property real submenuCap: Math.max(0, Math.min(maxMenuHeight, submenuRoomBelow))
 
@@ -320,7 +363,11 @@ Popup {
     readonly property bool submenuOpened: subEntries !== undefined && subEntries !== null
                                           && subEntries.length > 0
     readonly property real submenuHeight: submenuOpened
-                                          ? Math.min(subEntriesHeight, submenuCap) : 0
+        ? Math.min(submenuNaturalHeight,
+                   submenuFlipped ? submenuRoomAbove : submenuRoomBelow)
+        : 0
+    /* 面板自己的顶边：不翻的时候就是那一行的位置，翻了就是往上顶出来的那个数 */
+    readonly property real submenuPanelTop: submenuBottom - submenuHeight
     readonly property bool submenuScrollable: subEntriesHeight > submenuHeight + 1
     readonly property bool submenuHasIcons: paneHasIcons(subEntries)
 
@@ -346,8 +393,9 @@ Popup {
     /*
      * 弹窗尺寸 = 两块面板的**外接矩形**。
      *
-     * 宽度：开着子菜单时两栏并排；高度：子栏顶边在 submenuTop，所以是
-     * max(主栏高, submenuTop + 子栏高) —— 子栏从中间某一行往下伸，
+     * 宽度：开着子菜单时两栏并排；高度：取子栏那块面板的**下沿**（submenuBottom，
+     * 不翻时就是 submenuTop + 子栏高，翻了就是往上长出来的下沿），所以是
+     * max(主栏高, 子栏下沿) —— 子栏从中间某一行往下伸，
      * 比主栏矮/高都正常，不再强行"一样高"。
      *
      * 写的是 implicit*，不是 width / height：Popup 打开时自己会去摆
@@ -356,7 +404,7 @@ Popup {
      * （实测：子菜单那一栏已经画出来，弹窗还是 244 宽）。
      */
     implicitWidth: submenuOpened ? paneWidth * 2 + paneGap : paneWidth
-    implicitHeight: Math.max(menuHeight, submenuOpened ? submenuTop + submenuHeight : 0)
+    implicitHeight: Math.max(menuHeight, submenuOpened ? submenuBottom : 0)
 
     /*
      * 弹窗自己**不画底**：两块面板各画各的（见 contentItem）。
@@ -487,6 +535,8 @@ Popup {
 
         root.x = px
         root.y = py
+        placedX = px
+        placedY = py
         root.open()
     }
 
@@ -528,6 +578,8 @@ Popup {
 
         root.x = Math.round(Math.max(2, Math.min(p.x, host.width - worstW - 4)))
         root.y = Math.round(Math.max(2, Math.min(p.y, host.height - worstH - 4)))
+        placedX = root.x
+        placedY = root.y
         root.open()
     }
 
@@ -574,22 +626,33 @@ Popup {
          * `subEntries = items` 在同一个 JS 回合里，那两个数还是"只有主栏"时的旧值。
          * 2026-09-22 就踩在这儿 —— 兜底按旧高度把 y 从 31 顶到 441，而子栏的当场
          * 上限（submenuCap）是按 y 算的，被这个错 y 一压直接缩成 0：屏幕上右边那块
-         * 根本出不来。所以按"这一句之后会落到多少"现算一遍再夹。
+         * 根本出不来。所以按"这一句之后会落到多少"现算一遍再夹（submenuBottom 是普通
+         * 只读绑定，会跟着 submenuTop 这次赋值重算；Popup 的 implicit* 要等下一拍 polish）。
+         *
+         * 夹取比的也是 placedY 不是 root.y —— 后者开出来之后已经被 Qt 改写成屏幕坐标
+         * 了（见 placedY 那段），拿它和宿主高度比会恒成立，每一枪子菜单都挪一次窗口。
          */
-        var willSubH = Math.min(subEntriesHeight, Math.max(0, Math.min(maxMenuHeight,
-                            host ? host.height - 4 - (root.y + submenuTop) : maxMenuHeight)))
-        var willH = Math.max(menuHeight, submenuTop + willSubH)
+        var willH = Math.max(menuHeight, submenuBottom)
         var willW = submenuInset + paneWidth
-        if (host && root.y + willH > host.height - 4) {
+        if (host && placedY + willH > host.height - 4) {
             const ny = Math.max(2, host.height - willH - 4)
-            if (root.opened && ny !== root.y)
+            if (root.opened && ny !== placedY)
                 ++openShifts
+            placedY = ny
             root.y = ny
         }
-        if (host && root.x + willW > host.width - 4) {
+        /*
+         * x 这一侧以前直接拿 root.x 比：那句和 y 犯的是同一个错 —— open() 之后
+         * root.x 已经是**屏幕**坐标了，于是"宿主宽 - 两栏宽 - 4"这一比，只要窗口摆得
+         * 靠右就必然成立，整块菜单被横向挪回窗口中间（用户 2026-09-24 那张图：
+         * 点「视图」里的语言，菜单跑到离 视图 栏 580 多 px 的地方，而且"偶发" ——
+         * 换到屏幕左边就不犯，因为那时屏幕 x 小、没过阈值）。
+         */
+        if (host && placedX + willW > host.width - 4) {
             const nx = Math.max(2, host.width - willW - 4)
-            if (root.opened && nx !== root.x)
+            if (root.opened && nx !== placedX)
                 ++openShifts
+            placedX = nx
             root.x = nx
         }
         return true
@@ -684,6 +747,20 @@ Popup {
             return false
         hoverEntry(item)
         return submenuOpened
+    }
+
+    /*
+     * 自检用：把主栏滚到某个位置，以及问"某一此刻**真正**画在哪儿"。
+     *
+     * 后者走的是现算的地图（mapToItem），不经过 openSubmenu 里那句
+     * "fromItem.y - list.contentY + panePadding" 的算术。用户报"点语言/编码这类
+     * 子菜单时锚点会跳，偶发"（2026-09-24，附的图里子面板比它那一行低了 ~180px），
+     * 要分清是"算术用到了过期的 contentY"还是"行真的挪了"，只能拿地图当基准对。
+     */
+    function dbgScrollMain(y) { list.contentY = y }
+    function dbgRowTopFor(act) {
+        var item = entryItemFor(act)
+        return item ? item.mapToItem(contentArea, 0, 0).y : -1
     }
 
     /*
@@ -790,8 +867,9 @@ Popup {
             visible: root.submenuOpened
             /* 右边那块面板：和主菜单之间留着 paneGap 那条缝 */
             x: root.submenuInset
-            /* 顶边 = 父级那一条所在的行（用户要的效果：从那条旁边伸出来） */
-            y: root.submenuTop
+            /* 顶边：默认 = 父级那一条所在的行（从那条旁边伸出来）；
+               那一行往下放不下不到一行时改成往上翻，顶边就是 submenuPanelTop */
+            y: root.submenuPanelTop
             width: root.paneWidth
             height: root.submenuHeight
 

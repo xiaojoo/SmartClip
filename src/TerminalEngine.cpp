@@ -99,6 +99,16 @@ TerminalEngine::TerminalEngine(QObject *parent) : QObject(parent)
     vterm_screen_set_damage_merge(m_screen, VTERM_DAMAGE_ROW);
     vterm_screen_reset(m_screen, 1);
 
+    /*
+     * 抄下 libvterm 自带的 16 色：浅色档要换一套能读出来的，换回深色时得有个
+     * 地方退（见 setAnsiPalette）。reset 之后问才是这份表的初值。
+     */
+    if (VTermState *st = vterm_obtain_state(m_vt)) {
+        for (int i = 0; i < 16; ++i)
+            vterm_state_get_palette_color(st, i, &m_basePalette[i]);
+        m_basePaletteTaken = true;
+    }
+
     vterm_output_set_callback(m_vt, &TerminalEngine::onTerminalOutput, this);
 
     m_pty = new TerminalPty(this);
@@ -392,6 +402,42 @@ void TerminalEngine::setDefaultColors(const QColor &fg, const QColor &bg)
     m_defaultBg = bg;
     m_contentsDirty = true;
     emit contentsChanged();
+}
+
+void TerminalEngine::setAnsiPalette(const QVector<QColor> &colors)
+{
+    VTermState *st = m_vt ? vterm_obtain_state(m_vt) : nullptr;
+    if (!st)
+        return;
+    for (int i = 0; i < 16; ++i) {
+        const QColor c = i < colors.size() ? colors.at(i) : QColor();
+        if (c.isValid()) {
+            VTermColor col;
+            vterm_color_rgb(&col, static_cast<uint8_t>(c.red()),
+                            static_cast<uint8_t>(c.green()), static_cast<uint8_t>(c.blue()));
+            vterm_state_set_palette_color(st, i, &col);
+        } else if (m_basePaletteTaken) {
+            vterm_state_set_palette_color(st, i, &m_basePalette[i]);
+        }
+    }
+    /*
+     * 不用重发历史：格子颜色是 fillCell 里现问 libvterm 换算的（每次重画都换一遍），
+     * 改了表下一次 paint 就按新色出。这里只管把"该重画了"说一声。
+     */
+    m_contentsDirty = true;
+    emit contentsChanged();
+}
+
+QColor TerminalEngine::ansiColor(int index) const
+{
+    const VTermState *st = m_vt ? vterm_obtain_state(m_vt) : nullptr;
+    if (!st || index < 0 || index > 255)
+        return {};
+    /* 这两个 getter 都是 void 返回，问不动的只有索引越界（上面已经挡了） */
+    VTermColor col = {};
+    vterm_state_get_palette_color(st, index, &col);
+    vterm_state_convert_color_to_rgb(st, &col);
+    return QColor(col.rgb.red, col.rgb.green, col.rgb.blue);
 }
 
 // ---------------------------------------------------------------- 回调

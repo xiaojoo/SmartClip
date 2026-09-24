@@ -4588,6 +4588,14 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
         QMetaObject::invokeMethod(qmlRoot, "openSubmenuFor", Q_RETURN_ARG(QVariant, opened),
                                   Q_ARG(QVariant, QVariant(QStringLiteral("menu:语言"))));
         check(opened.toBool(), QStringLiteral("openSubmenuFor(menu:语言) 展开了子菜单"));
+        /*
+         * 必须先 settle() 再读尺寸：弹窗的 width / height 是 Qt 自己在下一拍 polish
+         * 时按 implicit* 摆的（见 DropdownMenu 为什么写 implicitWidth / implicitHeight
+         * 而不是 width）。不等这一拍，读到的 height 还是"只有主栏"时的旧值，
+         * 下面那条"下沿不越过宿主底边"就会拿旧高度当现状 —— 实测同一份代码两次
+         * 跑出 866 和 896 两个数，红得毫无道理。
+         */
+        settle();
 
         const QVariantMap ui = uiState();
         const double subH = ui.value(QStringLiteral("submenuHeight")).toDouble();
@@ -4612,12 +4620,25 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
               QStringLiteral("弹窗宽度 = 两块面板 + 中间那条缝"),
               QStringLiteral("弹窗宽 %1").arg(totalW));
         /*
-         * 顶边对齐"父级那一条所在的行"，不是贴到菜单顶上 ——
+         * 面板顶边对齐"父级那一条所在的行"，不是贴到菜单顶上 ——
          * "语言"在"视图"菜单里靠下（y 远大于 0），所以这两条一量就能分清。
+         *
+         * 往下放不下不到一行时改成**往上翻**（底边对齐那一行的底边），那时顶边
+         * 就不是行位置了 —— 窗口 900 高这一档量不到翻，翻的那一档在
+         * "压矮主窗口"那一节钉。
          */
-        check(qAbs(subTop - subRowY) < 0.5,
+        const double rowH = ui.value(QStringLiteral("menuItemHeight")).toDouble();
+        const double usable = ui.value(QStringLiteral("menuUsableBottom")).toDouble();
+        const double panelTop = ui.value(QStringLiteral("submenuPanelTop")).toDouble();
+        const double panelBottom = ui.value(QStringLiteral("submenuBottom")).toDouble();
+        const bool flipped = ui.value(QStringLiteral("submenuFlipped")).toBool();
+        check(flipped
+                  ? qAbs(panelBottom - qMin(subRowY + rowH, usable)) < 0.5
+                  : qAbs(panelTop - subRowY) < 0.5,
               QStringLiteral("子菜单顶边 = 父级那一条所在的行（没被夹到菜单顶上）"),
-              QStringLiteral("子栏顶边 %1 / 那一行 %2").arg(subTop).arg(subRowY));
+              QStringLiteral("翻上去=%1 面板顶 %2 / 底 %3 / 那一行 %4 / 行高 %5 / 可用底 %6")
+                  .arg(flipped).arg(panelTop).arg(panelBottom)
+                  .arg(subRowY).arg(rowH).arg(usable));
         check(subRowY > 100.0, QStringLiteral("对的是菜单靠下的那一条（不是第一行）"),
               QStringLiteral("行 y %1").arg(subRowY));
         out() << "        [诊断] 宿主高" << ui.value(QStringLiteral("menuHostHeight")).toDouble()
@@ -4627,16 +4648,35 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
               << " 子栏上限" << ui.value(QStringLiteral("submenuCap")).toDouble()
               << " 弹窗高" << totalH
               << " 该有" << ui.value(QStringLiteral("menuImplicitHeight")).toDouble()
-              << " 开子栏=" << ui.value(QStringLiteral("submenuOpened")).toBool() << Qt::endl;
-        check(totalH > mainH + 0.5,
-              QStringLiteral("弹窗往下长高，把从中间那一行伸出来的子栏装下"),
-              QStringLiteral("弹窗高 %1 / 该有 %2 / 主栏高 %3 / 子栏顶 %4 高 %5 上限 %6 / 菜单 y %7")
-                  .arg(totalH)
-                  .arg(ui.value(QStringLiteral("menuImplicitHeight")).toDouble())
-                  .arg(mainH).arg(subTop).arg(subH)
-                  .arg(ui.value(QStringLiteral("submenuCap")).toDouble())
-                  .arg(ui.value(QStringLiteral("menuY")).toDouble()));
+              << " 开子栏=" << ui.value(QStringLiteral("submenuOpened")).toBool()
+              << " Popup.y" << ui.value(QStringLiteral("menuRawY")).toDouble()
+              << " Popup.h" << ui.value(QStringLiteral("menuRawH")).toDouble()
+              << " 子栏内容高" << ui.value(QStringLiteral("subEntriesH")).toDouble()
+              << " openCap" << ui.value(QStringLiteral("openCapNow")).toDouble()
+              << Qt::endl;
+        /*
+         * 原来这条写的是"弹窗往下长高，把子栏装下"，量不出来是必然的：
+         * 语言子菜单 27 项、内容总高 764px，而它那一行在 367 —— 要装下得 1131px，
+         * 宿主一共才 900。几何上做不到的事，代码做到才是错。
+         *
+         * 设计真正承诺的是两件事（2026-09-22 那段"宁可子栏自己滚，也不挪窗口"）：
+         *   1) 子栏不许被压成 0 高 —— 压成 0 就是 hover 上去右边一片空白，
+         *      那是真 bug（根因：算"这一行往下还剩多少"用的是 Popup.y，而弹窗是
+         *      独立原生窗，open() 之后那个数被 Qt 改写成屏幕坐标了 —— 实测宿主内容区
+         *      顶边在屏幕 605，弹窗摆在宿主 y=30 处，Popup.y 读到的是 635。拿 635 去
+         *      算剩余空间恒为负，兜底还每一枪都挪一次窗口。改成自己记的 placedY）；
+         *   2) 装不下的时候必须出滚动条。
+         * 弹窗下沿不出界由下面那条"仍在宿主窗口里"钉。
+         */
         const double subCap = ui.value(QStringLiteral("submenuCap")).toDouble();
+        check(subH >= 40.0,
+              QStringLiteral("子栏哪怕伸不出去也留着可见的一段（不许压成 0）"),
+              QStringLiteral("子栏高 %1 / 上限 %2 / 内容 %3 / 那一行 %4")
+                  .arg(subH).arg(subCap).arg(subContentH).arg(subTop));
+        check(subContentH > subH + 1.0
+                  ? ui.value(QStringLiteral("submenuScrollable")).toBool() : true,
+              QStringLiteral("子栏装不下时出滚动条（而不是被裁掉）"),
+              QStringLiteral("内容 %1 vs 画出来 %2").arg(subContentH).arg(subH));
         check(subContentH > 700, QStringLiteral("语言子菜单条目总高 > 700px（27 项）"),
               QStringLiteral("实际 %1").arg(subContentH));
         /*
@@ -4647,11 +4687,16 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
          *     不然子栏从中间某一行伸出去会顶穿宿主下沿，展开时就得挪整块弹窗，
          *     而"露着的时候挪位置"就是 DWM 重放旧画面那一帧（闪）。
          * 所以子栏该量的是 min(内容高, submenuCap)，不是 min(内容高, 全局上限)。
+         *
+         * 这一档（窗口 900 高）那一行往下还有 500 来 px，走的是"贴着行往下长"；
+         * 只剩不到一行时会改成往上翻，那条公式由"压矮主窗口"那一节钉。
          */
-        check(qAbs(subH - qMin(subContentH, subCap)) < 1.0,
-              QStringLiteral("子菜单画出来的高 = min(内容高, 那一行往下的空间)"),
-              QStringLiteral("画出来 %1 / 内容 %2 / 当场 %3")
-                  .arg(subH).arg(subContentH).arg(subCap));
+        const double globalCap = ui.value(QStringLiteral("menuMaxHeight")).toDouble();
+        const double subRoom = flipped ? qMin(subRowY + rowH, usable) : subCap;
+        check(qAbs(subH - qMin(qMin(subContentH, globalCap), subRoom)) < 1.0,
+              QStringLiteral("子菜单画出来的高 = min(内容高, 全局上限, 那一栏摆得下的空间)"),
+              QStringLiteral("画出来 %1 / 内容 %2 / 全局 %3 / 摆得下 %4 / 翻上去=%5")
+                  .arg(subH).arg(subContentH).arg(globalCap).arg(subRoom).arg(flipped));
         /* 弹窗总高不许顶穿宿主下沿：顶穿了 = 展开时要挪窗口 = 那一帧闪 */
         check(ui.value(QStringLiteral("menuY")).toDouble() + totalH
                       <= ui.value(QStringLiteral("menuHostHeight")).toDouble() - 4.0 + 1.0,
@@ -4659,6 +4704,16 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
               QStringLiteral("菜单 y %1 + 总高 %2 / 宿主高 %3")
                   .arg(ui.value(QStringLiteral("menuY")).toDouble())
                   .arg(totalH).arg(ui.value(QStringLiteral("menuHostHeight")).toDouble()));
+        /*
+         * "弹窗该有多大"和"实际多大"必须是同一个数：上面几条算的都是**该有**的尺寸，
+         * 真撑出来的窗口要是没跟着长（Popup 的 width/height 由 Qt 下一拍按 implicit*
+         * 摆，见 DropdownMenu 为什么写 implicitWidth），子栏就会被裁掉一半，
+         * 而上面那些判据一个都不会红 —— 实测漏点：不加 settle() 时读到 896 vs 866。
+         */
+        check(qAbs(totalH - ui.value(QStringLiteral("menuImplicitHeight")).toDouble()) < 1.0,
+              QStringLiteral("弹窗真实尺寸会跟着内容长（不是停在只开主栏那一拍）"),
+              QStringLiteral("实际 %1 / 该有 %2")
+                  .arg(totalH).arg(ui.value(QStringLiteral("menuImplicitHeight")).toDouble()));
 
         /*
          * 鼠标往右挪进子菜单：进的是子菜单里第一条，**不能**把子菜单收掉。
@@ -4672,6 +4727,97 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
                                   Q_ARG(QVariant, QVariant(0)));
         check(stillOpen.toBool() && uiState().value(QStringLiteral("submenuOpened")).toBool(),
               QStringLiteral("鼠标移进子菜单里第一条，子菜单不会自己收掉"));
+    }
+
+    /*
+     * 主栏滚起来之后，子面板的锚点还跟不跟着那一行走。
+     *
+     * 用户 2026-09-24 报："视图里点语言这类子菜单，锚点变了，偶发"，附的图里子面板
+     * 比它那一行低了约 180px。openSubmenu 算行位置用的是
+     * "fromItem.y - list.contentY + panePadding" 这一套算术 —— 只要 contentY 在
+     * 那一刻还没跟上（滚动是动画/延迟生效的），算出来的就是**上一帧**的行位置。
+     * 所以这里把主栏滚 56px（两行），再拿 mapToItem 现算的真实位置当基准对：
+     * 算术过期就会当场差出 56。
+     */
+    {
+        QObject *menuObj = qmlRoot->findChild<QObject *>("dropdownMenu");
+        dispatch(QStringLiteral("menu:视图"));
+        settle();
+        if (menuObj) {
+            QMetaObject::invokeMethod(menuObj, "dbgScrollMain", Q_ARG(QVariant, 56));
+            settle();
+        }
+        QVariant scrolledOpen;
+        QMetaObject::invokeMethod(qmlRoot, "openSubmenuFor", Q_RETURN_ARG(QVariant, scrolledOpen),
+                                  Q_ARG(QVariant, QVariant(QStringLiteral("menu:语言"))));
+        settle();
+        double truth = -1;
+        if (menuObj) {
+            QVariant t;
+            QMetaObject::invokeMethod(menuObj, "dbgRowTopFor", Q_RETURN_ARG(QVariant, t),
+                                      Q_ARG(QVariant, QVariant(QStringLiteral("menu:语言"))));
+            truth = t.toDouble();
+        }
+        const QVariantMap sc = uiState();
+        const double sRowY = sc.value(QStringLiteral("submenuRowY")).toDouble();
+        const double sTop = sc.value(QStringLiteral("submenuPanelTop")).toDouble();
+        out() << "        [诊断] 滚 56 之后：行真实顶边 " << truth << " 面板算出来 " << sRowY
+              << " 面板顶边 " << sTop << Qt::endl;
+        check(scrolledOpen.toBool() && qAbs(sRowY - truth) < 1.0 && qAbs(sTop - truth) < 1.0,
+              QStringLiteral("主栏滚过之后子面板锚点跟着那一行（不是停在滚之前的位置）"),
+              QStringLiteral("行真实 %1 / 面板算出来 %2 / 面板顶边 %3")
+                  .arg(truth).arg(sRowY).arg(sTop));
+        QMetaObject::invokeMethod(qmlRoot, "closeMenu");
+        settle();
+    }
+
+    /*
+     * 宿主摆在屏幕右边时，展开子菜单不许把菜单横向挪走。
+     *
+     * 用户 2026-09-24 报"点视图里的语言这类子菜单，锚点变了，偶发"，图里整块菜单
+     * 跑到离「视图」栏 580 多 px 的地方。根因和 y 那本账是同一个：openSubmenu 的
+     * 贴边夹取拿 `root.x + 两栏宽 > 宿主宽` 比，而 open() 之后 root.x 已经是
+     * **屏幕**坐标 —— 窗口摆得靠右就必然过阈值，于是被"夹"回 host.width-两栏宽-4。
+     * "偶发"就是因为它取决于窗口当时在屏幕上的位置。
+     *
+     * 判据：先挪窗口（挪窗口本身会把菜单收掉，见上面那条），再开菜单、再展开子菜单，
+     * 两次的**真实落点**必须同一个 x，且兜底挪位计数不许涨。
+     */
+    {
+        QVariant moved;
+        QMetaObject::invokeMethod(qmlRoot, "moveHostForTest", Q_RETURN_ARG(QVariant, moved),
+                                  Q_ARG(QVariant, QVariant(900)), Q_ARG(QVariant, QVariant(0)));
+        settle();
+        dispatch(QStringLiteral("menu:视图"));
+        settle();
+        const QVariantMap before = uiState();
+        const double xBefore = before.value(QStringLiteral("menuX")).toDouble();
+        const int shiftsBefore = before.value(QStringLiteral("menuOpenShifts")).toInt();
+        QVariant opened;
+        QMetaObject::invokeMethod(qmlRoot, "openSubmenuFor", Q_RETURN_ARG(QVariant, opened),
+                                  Q_ARG(QVariant, QVariant(QStringLiteral("menu:语言"))));
+        settle();
+        const QVariantMap after = uiState();
+        const double xAfter = after.value(QStringLiteral("menuX")).toDouble();
+        out() << "        [诊断] 窗口挪到右边：开出来 x=" << xBefore
+              << " placedX=" << before.value(QStringLiteral("menuPlacedX")).toDouble()
+              << " rawX=" << before.value(QStringLiteral("menuRawX")).toDouble()
+              << " → 展开子菜单之后 x=" << xAfter
+              << " placedX=" << after.value(QStringLiteral("menuPlacedX")).toDouble()
+              << " rawX=" << after.value(QStringLiteral("menuRawX")).toDouble()
+              << " 兜底挪位 " << shiftsBefore << "→"
+              << after.value(QStringLiteral("menuOpenShifts")).toInt() << Qt::endl;
+        check(moved.toBool() && qAbs(xAfter - xBefore) < 1.0
+                  && after.value(QStringLiteral("menuOpenShifts")).toInt() == shiftsBefore,
+              QStringLiteral("窗口摆在屏幕右边时，展开子菜单不许把菜单横向挪走"),
+              QStringLiteral("开出来 x=%1 → 展开之后 x=%2（差 %3）；兜底挪了 %4 次")
+                  .arg(xBefore).arg(xAfter).arg(xAfter - xBefore)
+                  .arg(after.value(QStringLiteral("menuOpenShifts")).toInt() - shiftsBefore));
+        QMetaObject::invokeMethod(qmlRoot, "closeMenu");
+        settle();
+        QMetaObject::invokeMethod(qmlRoot, "moveHostForTest", Q_RETURN_ARG(QVariant, moved),
+                                  Q_ARG(QVariant, QVariant(-900)), Q_ARG(QVariant, QVariant(0)));
+        settle();
     }
 
     /* 子菜单里的条目照样能点：选一门语言，菜单自己也收掉 */
@@ -7421,13 +7567,17 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
              * —— 比宿主矮就说明宿主压得不够矮，上面两条是空的。
              */
             /*
-             * 这一枪钉的是"宿主很矮的时候，上限真的咬住了、而且弹窗不许顶穿宿主"。
+             * 这一枪钉的是"宿主很矮的时候，子栏既不许出一小条、也不许顶穿宿主"。
              *
              * 原来这条写的是反面的东西（"子菜单把窗口撑得比宿主还高"）—— 那是
              * "允许顶穿、靠挪窗口救"时代的写法。2026-09-22 改上限口径之后：主栏按
              * "锚点下面还剩多少"封一道顶（openCap），子栏按"它那一行往下还剩多少"
-             * 封一道顶（submenuCap，故意不留下限），两边都不许出界 —— 出界就得挪
-             * 窗口，挪一下就是 DWM 重放旧画面那一帧（闪）。
+             * 封一道顶（submenuCap），两边都不许出界 —— 出界就得挪窗口，挪一下
+             * 就是 DWM 重放旧画面那一帧（闪）。
+             *
+             * 2026-09-24 再加一条：往下连一行都放不下时不许只画一小条，改成往上翻
+             * （见 DropdownMenu.submenuFlipped）。翻上去只往弹窗**内部**收，
+             * 顶边最低到 0，所以"不许挪窗口"那条规矩一点没让。
              */
             const double popupH = nowAt.height();
             check(hostWidget && hostH < 600.0 && submenuUp
@@ -7444,28 +7594,105 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
                   QStringLiteral("菜单 y %1 + 弹窗高 %2 / 宿主高 %3")
                       .arg(ui.value(QStringLiteral("menuY")).toDouble()).arg(popupH).arg(hostH));
             /*
-             * "超过上限才限高 + 出滚动条"这一枪只有在这儿打得响：宿主压到 420
-             * → 上限 396，语言那一栏内容 764，必须被夹住。窗口 900 高时它装得下，
-             * 上面两节量到的都是"整块展开"（2026-09-22 换口径之后，限高这条
-             * 只剩这一处能证明还活着，别把它删了）。
+             * 宿主压到 420 高时，「语言」那一行往下只剩 21px（不到一行 = 28px），
+             * 这一档量的是**往上翻**那条路：面板底边对齐那一行的底边、往上长，
+             * 顶边最低到弹窗自己顶上（0），所以既不会出一小条，也不用挪窗口。
+             *
+             * 原来这里写的是"限高 + 出滚动条"（子栏 = min(内容, 那一行往下)）——
+             * 那条路走出来的就是 19px 一小条，比不出现还难看。
              */
             const double cap = ui.value(QStringLiteral("menuMaxHeight")).toDouble();
             const double subCap = ui.value(QStringLiteral("submenuCap")).toDouble();
             const double cappedSubH = ui.value(QStringLiteral("submenuHeight")).toDouble();
             const double cappedSubContentH =
                 ui.value(QStringLiteral("submenuContentHeight")).toDouble();
+            const bool cappedFlipped = ui.value(QStringLiteral("submenuFlipped")).toBool();
+            const double cRowY = ui.value(QStringLiteral("submenuRowY")).toDouble();
+            const double cRowH = ui.value(QStringLiteral("menuItemHeight")).toDouble();
+            const double cUsable = ui.value(QStringLiteral("menuUsableBottom")).toDouble();
+            const double cTop = ui.value(QStringLiteral("submenuPanelTop")).toDouble();
+            const double cBottom = ui.value(QStringLiteral("submenuBottom")).toDouble();
             out() << "        （压矮之后：宿主高 " << hostH << " / 上限 " << cap
-                  << " / 子栏当场 " << subCap << " / 子栏内容 " << cappedSubContentH
-                  << " / 画出来 " << cappedSubH << "）" << Qt::endl;
+                  << " / 那一行往下 " << subCap << " / 翻上去 " << cappedFlipped
+                  << " / 面板 " << cTop << ".." << cBottom
+                  << " / 画出来 " << cappedSubH << " / 内容 " << cappedSubContentH << "）"
+                  << Qt::endl;
             check(qAbs(cap - (hostH - 24.0)) <= 4.0,
                   QStringLiteral("菜单上限 = 宿主可用高度（宿主 - 24）"),
                   QStringLiteral("上限 %1 / 宿主高 %2").arg(cap).arg(hostH));
-            check(cappedSubContentH > subCap
-                      && qAbs(cappedSubH - subCap) < 1.0
+            check(cappedFlipped,
+                  QStringLiteral("压矮主窗口：那一行往下放不下不到一行 —— 走到往上翻"),
+                  QStringLiteral("往下剩 %1 / 一行 %2 / 内容 %3")
+                      .arg(subCap).arg(cRowH).arg(cappedSubContentH));
+            check(cappedSubH >= cRowH,
+                  QStringLiteral("往上翻之后子栏至少放得下一行（不再是一小条）"),
+                  QStringLiteral("画出来 %1 / 一行 %2").arg(cappedSubH).arg(cRowH));
+            check(qAbs(cBottom - qMin(cRowY + cRowH, cUsable)) < 0.5
+                      && cTop >= -0.5 && cBottom <= cUsable + 0.5
+                      && qAbs(cappedSubH - (cBottom - cTop)) < 1.0,
+                  QStringLiteral("往上翻：底边对齐那一行底边，整块不出可用范围"),
+                  QStringLiteral("面板 %1..%2 / 该是 ..%3 / 可用底 %4")
+                      .arg(cTop).arg(cBottom).arg(qMin(cRowY + cRowH, cUsable)).arg(cUsable));
+            check(cappedSubContentH > cappedSubH
                       && ui.value(QStringLiteral("submenuScrollable")).toBool(),
-                  QStringLiteral("压矮主窗口：内容超过当场可用空间才限高、才出滚动条"),
-                  QStringLiteral("画出来 %1 / 内容 %2 / 当场 %3 / 全局 %4")
-                      .arg(cappedSubH).arg(cappedSubContentH).arg(subCap).arg(cap));
+                  QStringLiteral("压矮主窗口：内容超过画出来的高才出滚动条"),
+                  QStringLiteral("画出来 %1 / 内容 %2").arg(cappedSubH).arg(cappedSubContentH));
+            QMetaObject::invokeMethod(qmlRoot, "closeMenu");
+            settle();
+        }
+        /* ---- 5. 换行符那一栏：往下放不下**整栏**（用户 2026-09-24 那张截图） ---- */
+        if (hostWidget) {
+            hostWidget->resize(900, 520);
+            settle();
+        }
+        dispatch(QStringLiteral("menu:视图"));
+        settle();
+        {
+            QVariant opened;
+            QMetaObject::invokeMethod(qmlRoot, "openSubmenuFor", Q_RETURN_ARG(QVariant, opened),
+                                      Q_ARG(QVariant, QVariant(QStringLiteral("menu:换行"))));
+            settle();
+            const QVariantMap ui = uiState();
+            const double eolRowY = ui.value(QStringLiteral("submenuRowY")).toDouble();
+            const double eolRowH = ui.value(QStringLiteral("menuItemHeight")).toDouble();
+            const double eolUsable = ui.value(QStringLiteral("menuUsableBottom")).toDouble();
+            const double eolBelow = ui.value(QStringLiteral("submenuRoomBelow")).toDouble();
+            const double eolAbove = ui.value(QStringLiteral("submenuRoomAbove")).toDouble();
+            const double eolNatural = ui.value(QStringLiteral("submenuNaturalHeight")).toDouble();
+            const double eolH = ui.value(QStringLiteral("submenuHeight")).toDouble();
+            const double eolTop = ui.value(QStringLiteral("submenuPanelTop")).toDouble();
+            const double eolMainH = ui.value(QStringLiteral("menuHeight")).toDouble();
+            out() << "        （换行符那一栏：宿主 520 / 那一行 " << eolRowY
+                  << " / 往下 " << eolBelow << " / 往上能拿 " << eolAbove
+                  << " / 整栏 " << eolNatural << " / 画出来 " << eolH
+                  << " / 翻上去 " << ui.value(QStringLiteral("submenuFlipped")).toBool() << "）"
+                  << Qt::endl;
+            check(opened.toBool() && ui.value(QStringLiteral("submenuOpened")).toBool(),
+                  QStringLiteral("换行符那一栏打得开"));
+            /* 这一行本身必须在看得见的位置上，否则上面几条量的是够不着的状态 */
+            check(eolRowY + eolRowH <= eolMainH + 0.5,
+                  QStringLiteral("换行符那一行在窗口里看得见（不是滚出去的那一条）"),
+                  QStringLiteral("行 %1 + 行高 %2 vs 主栏 %3")
+                      .arg(eolRowY).arg(eolRowH).arg(eolMainH));
+            check(eolBelow < eolNatural && eolAbove > eolBelow
+                      && ui.value(QStringLiteral("submenuFlipped")).toBool(),
+                  QStringLiteral("往下放不下整栏、上面更宽 —— 就该往上翻"),
+                  QStringLiteral("往下 %1 / 往上 %2 / 整栏 %3")
+                      .arg(eolBelow).arg(eolAbove).arg(eolNatural));
+            check(qAbs(eolH - eolNatural) < 1.0,
+                  QStringLiteral("翻上去之后整栏 3 项全露出来（不用滚）"),
+                  QStringLiteral("画出来 %1 / 整栏 %2").arg(eolH).arg(eolNatural));
+            check(eolTop >= -0.5 && eolTop + eolH <= eolUsable + 0.5,
+                  QStringLiteral("翻上去那一块不出可用范围"),
+                  QStringLiteral("面板 %1..%2 / 可用底 %3")
+                      .arg(eolTop).arg(eolTop + eolH).arg(eolUsable));
+            check(ui.value(QStringLiteral("menuY")).toDouble()
+                          + ui.value(QStringLiteral("menuTotalHeight")).toDouble()
+                      <= 520.0 - 4.0 + 1.0,
+                  QStringLiteral("换行符这一档弹窗也不顶穿宿主下沿"),
+                  QStringLiteral("菜单 y %1 + 弹窗高 %2 / 宿主高 520")
+                      .arg(ui.value(QStringLiteral("menuY")).toDouble())
+                      .arg(ui.value(QStringLiteral("menuTotalHeight")).toDouble()));
             QMetaObject::invokeMethod(qmlRoot, "closeMenu");
             settle();
         }
@@ -7817,6 +8044,62 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
         SelfTest::runTranslate(cards, llm, tray, speech);
         gPassed += SelfTest::translatePassed();
         gFailed += SelfTest::translateFailed();
+    }
+
+    /*
+     * 浅色档的"相邻两层不许同色"。
+     *
+     * 这条是给查表式主题兜底的：两个深色值映射到同一个浅色值时，编译不报错、
+     * 深色档也一切正常，只有切到白色才看得见 —— 页签选中那枚没背景就是这么来的
+     * （#1e1f22 和 #2b2d30 都翻成 #ffffff）。量的是界面上真正生效的那层属性，
+     * 不是查表前的原始值，所以"按角色写死"过的位置也照样查得到。
+     *
+     * 判据用三通道绝对差之和，阈值 12：比这更小的人眼分不出来（深色档里
+     * 最弱的一对也有几十分）。
+     */
+    {
+        struct Pair {
+            const char *upper;    // 压在上面的那层
+            const char *lower;    // 被压着的那层
+            const char *why;
+        };
+        static const Pair pairs[] = {
+            { "layerTabActive", "layerTabStrip", "选中的页签要压得住院栏条" },
+            { "layerSelection", "layerPaper",    "编辑器选区要和纸面分得开" },
+            { "layerNavSelected", "layerChrome", "图标条选中格要和窗口底分得开" },
+        };
+        if (theme)
+            theme->setLight(true);
+        const QVariantMap lightUi = uiState();
+        if (theme)
+            theme->setLight(themeWas);
+        auto ch = [&lightUi](const char *key, int which) -> int {
+            const QColor c(lightUi.value(QLatin1String(key)).toString());
+            return which == 0 ? c.red() : (which == 1 ? c.green() : c.blue());
+        };
+        QStringList collided;
+        QString detail;
+        for (const Pair &p : pairs) {
+            const int d = qAbs(ch(p.upper, 0) - ch(p.lower, 0))
+                          + qAbs(ch(p.upper, 1) - ch(p.lower, 1))
+                          + qAbs(ch(p.upper, 2) - ch(p.lower, 2));
+            detail += QStringLiteral("  %1 vs %2 = %3↔%4 差 %5\\n")
+                          .arg(QLatin1String(p.upper), QLatin1String(p.lower))
+                          .arg(lightUi.value(QLatin1String(p.upper)).toString(),
+                               lightUi.value(QLatin1String(p.lower)).toString())
+                          .arg(d);
+            if (d < 12)
+                collided += QStringLiteral("%1/%2（%3，差 %4）")
+                                .arg(QLatin1String(p.upper), QLatin1String(p.lower),
+                                     QLatin1String(p.why)).arg(d);
+        }
+        check(collided.isEmpty(),
+              QStringLiteral("浅色档：相邻两层不许塌成同一个颜色（查表撞车兜底）"),
+              QStringLiteral("%1 档下：%2").arg(QStringLiteral("白色"),
+                                               collided.isEmpty() ? detail.trimmed()
+                                                                  : QStringLiteral("撞车 %1 处：\\n%2")
+                                                        .arg(collided.size())
+                                                        .arg(collided.join(QStringLiteral("\\n")))));
     }
 
     if (theme && themeWas)

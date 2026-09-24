@@ -1,5 +1,7 @@
 #include "TerminalView.h"
 
+#include "Theme.h"
+
 /*
  * 枚举原生子窗口要用 windows.h，但**必须放在 vterm.h 之后**：
  * winerror.h 里有 `#define small 0`，而 libvterm 的 VTermScreenCellAttrs 有个
@@ -217,6 +219,14 @@ TerminalView::TerminalView(QQuickItem *parent) : QQuickItem(parent)
         emit sessionExited(code);
         update();
     });
+    /*
+     * 浅色档要换掉 ANSI 那 16 色：libvterm 的 3 号是 #e0e000 纯黄，而 PowerShell 5.1
+     * 提示符里那条路径用的正是这一号 —— 白底上基本读不出来（用户 2026-09-24 那句
+     * "终端浅色背景字体颜色改下，不要是黄色"）。深色档传空表 = 退回自带那份，
+     * 两张表都在 src/Theme.cpp（见 AppTheme::ansiPalette）。
+     */
+    if (AppTheme *th = AppTheme::instance())
+        connect(th, &AppTheme::lightChanged, this, &TerminalView::applyAnsiPalette);
 
     m_blink = new QTimer(this);
     m_blink->setInterval(530);
@@ -235,7 +245,15 @@ void TerminalView::componentComplete()
 {
     QQuickItem::componentComplete();
     m_engine->setDefaultColors(m_fg, m_bg);
+    applyAnsiPalette();
     relayout();
+}
+
+void TerminalView::applyAnsiPalette()
+{
+    m_engine->setAnsiPalette(AppTheme::instance() ? AppTheme::instance()->ansiPalette()
+                                                  : QVector<QColor> {});
+    update();
 }
 
 // ------------------------------------------------------------------ 外观

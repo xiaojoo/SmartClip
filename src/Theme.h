@@ -3,6 +3,7 @@
 #include <QColor>
 #include <QObject>
 #include <QString>
+#include <QVector>
 
 /*
  * 主题（QML 单例 Theme，注册见 src/main.cpp；色表在 src/Theme.cpp）。
@@ -66,6 +67,18 @@ public:
     QColor paper() const { return color(QStringLiteral("#1e1f22")); }
     QColor ink() const { return color(QStringLiteral("#d6d7da")); }
     QColor line() const { return color(QStringLiteral("#4b4d4f")); }
+
+    /*
+     * 终端那 16 色 ANSI 调色板。**只有浅色档返回东西**：深色档返回空表，
+     * 意思是"用 libvterm 自带那一份"，所以切回深色时每一格都和改造前一样
+     * （和上面那张表同一条性质）。
+     *
+     * 为什么非换不可：libvterm 的 3 号是 #e0e000 纯黄，而 PowerShell 5.1 的
+     * 提示符路径用的正是这一号 —— 白底上基本读不出来（用户 2026-09-24 那句
+     * "终端浅色背景字体颜色改下，不要是黄色"）。整套 16 色都按白底重挑了一遍，
+     * 不是只把 3 号调暗：那 16 个色是终端里**唯一**能出现在正文上的彩色。
+     */
+    QVector<QColor> ansiPalette() const;
 
     /* 落盘用的键（QSettings：ui/theme = "light" / "dark"） */
     static constexpr const char *kKey = "ui/theme";
