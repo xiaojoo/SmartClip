@@ -850,21 +850,21 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
               QStringLiteral("实际 %1 px（应为 %2 px）").arg(view->lineHeight()).arg(natural));
 
         /*
-         * 菜单里那一组"行高"（档位表在 js/EditorMenus.js 的 kLineHeightFactors）：
-         * 档位数、档位边界、以及**点下去真的会改行高** —— 三样一起钉。
-         * 条目清单由 Main.qml 的 settingsMenuActs 提供，和点"设置"弹出的那份
-         * 是同一个调用，所以断言看到的就是菜单里能点的。
+         * 行高那一组档位（表在 js/EditorMenus.js 的 kLineHeightFactors）：档位数、
+         * 档位边界、以及**点下去真的会改行高** —— 三样一起钉。
+         *
+         * 2026-09-24 顶栏「设置」菜单里那 7 档撤进了 设置 → 字体，所以条目清单
+         * 不再从菜单读（读了也没有），改成直接读档位表；下面那些 dispatch 照旧
+         * 走的是**同一批 act**（快捷键 / 设置页的 −/+ 用的就是它们）。
          */
         {
             QStringList factors;
-            const QVariantList items = settingsMenuActs();
-            for (const QVariant &item : items) {
-                const QString act = item.toString();
-                if (act.startsWith(QStringLiteral("lineHeight:")))
-                    factors << act.mid(int(qstrlen("lineHeight:")));
-            }
+            QVariant steps;
+            QMetaObject::invokeMethod(qmlRoot, "lineHeightSteps", Q_RETURN_ARG(QVariant, steps));
+            for (const QVariant &f : steps.toList())
+                factors << f.toString();
             check(factors.size() == 7,
-                  QStringLiteral("设置菜单里有 7 档行高（含\"跟随字体\"）"),
+                  QStringLiteral("行高有 7 档（含\"跟随字体\"=1.0）"),
                   QStringLiteral("实际 %1 档：%2")
                       .arg(factors.size()).arg(factors.join(QLatin1Char('/'))));
             check(factors.value(0) == QStringLiteral("1")
@@ -3787,7 +3787,8 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
         settle();
 
         /*
-         * 「帮助」那一栏：**点一下直接开"关于 SmartClip"**，不弹下拉菜单。
+         * 「关于」那一栏（2026-09-24 之前叫「帮助」）：**点一下直接开"关于 SmartClip"**，
+         * 不弹下拉菜单。
          *
          * 走 Main.qml 的 activateMenuTab（它转给 TopBar::activateTab）—— 和鼠标点
          * 那一栏是**同一个函数**。用户要的就是这一条：原来它弹两项（快捷键一览 /
@@ -3795,19 +3796,19 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
          */
         {
             QMetaObject::invokeMethod(qmlRoot, "activateMenuTab",
-                                      Q_ARG(QVariant, QVariant(QStringLiteral("帮助"))));
+                                      Q_ARG(QVariant, QVariant(QStringLiteral("关于"))));
             settle();
             const QVariantMap panel = uiState();
             check(panel.value(QStringLiteral("settingsOpened")).toBool()
                       && panel.value(QStringLiteral("settingsSection")).toString()
                              == QLatin1String("about"),
-                  QStringLiteral("点「帮助」直接开\"关于 SmartClip\"（不弹菜单）"),
+                  QStringLiteral("点「关于」直接开\"关于 SmartClip\"（不弹菜单）"),
                   QStringLiteral("打开=%1 栏目=%2")
                       .arg(panel.value(QStringLiteral("settingsOpened")).toBool())
                       .arg(panel.value(QStringLiteral("settingsSection")).toString()));
             /* 菜单不该跟着弹出来 */
             check(!uiState().value(QStringLiteral("menuOpened")).toBool(),
-                  QStringLiteral("点「帮助」不会弹出下拉菜单"));
+                  QStringLiteral("点「关于」不会弹出下拉菜单"));
             QMetaObject::invokeMethod(qmlRoot, "closeSettings");
             settle();
         }
@@ -3819,7 +3820,7 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
          * 图标），于是点「设置」菜单从最左边弹出来，整条偏移到应用图标底下去了
          * （用户报的"全部偏移菜单了"）。
          *
-         * 判据：菜单实际画在窗口里的左上角 x，要落在「设置」那一栏的宽度范围内 ——
+         * 判据：菜单实际画在窗口里的左上角 x，要落在「工具」那一栏的宽度范围内 ——
          * 菜单是独立原生窗口，锚点对不对只有把两边的坐标都拿出来比才知道。
          */
         {
@@ -3827,7 +3828,7 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
              * 先把**真实光标**摆到窗口右下角。
              *
              * 下拉菜单现在是"内容多高画多高"（见 DropdownMenu.maxMenuHeight），
-             * 「文件」「设置」一开就是 622 / 865 高，几乎盖满整窗。前面几节用
+             * 「文件」「工具」一开就是 622 / 865 高，几乎盖满整窗。前面几节用
              * QCursor::setPos 摆过光标，它要是恰好落在菜单里某一条"带子菜单"的
              * 行上，openFor 刚把右边那块复位掉，下一帧 hover 又把它叫出来 ——
              * "重新打开时右边没有子菜单那一栏"这条就是这么红的（菜单矮的时候
@@ -3844,14 +3845,14 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
              * y = 那一栏的下沿 + 3（也就是导航栏底下）。
              *
              * 原来这一段只比 x。2026-09-22 把菜单上限从固定的 460 换成"宿主可用高度"，
-             * 带子菜单的「视图」「设置」按最坏展开预留到 876，openFor 判定"下面放不下"
+             * 带子菜单的「视图」「工具」按最坏展开预留到 876，openFor 判定"下面放不下"
              * 就翻到锚点上方、又被夹回 y=2 —— x 一个都没错、检查全绿，屏幕上菜单却整块
              * 压在导航栏上（用户报的"设置/视图这两个下拉框锚点不对，要在导航栏下"）。
              * 所以两个轴一起比，一栏一栏比。
              */
             const QStringList tabs{ QStringLiteral("文件"), QStringLiteral("编辑"),
                                     QStringLiteral("搜索"), QStringLiteral("视图"),
-                                    QStringLiteral("设置") };
+                                    QStringLiteral("工具") };
             for (const QString &label : tabs) {
                 QVariant left, top;
                 QMetaObject::invokeMethod(qmlRoot, "topBarTabLeft",
@@ -3885,19 +3886,19 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
         {
             QVariant tabLeft;
             QMetaObject::invokeMethod(qmlRoot, "topBarTabLeft", Q_RETURN_ARG(QVariant, tabLeft),
-                                      Q_ARG(QVariant, QVariant(QStringLiteral("设置"))));
+                                      Q_ARG(QVariant, QVariant(QStringLiteral("工具"))));
             QMetaObject::invokeMethod(qmlRoot, "clickMenuTab",
-                                      Q_ARG(QVariant, QVariant(QStringLiteral("设置"))));
+                                      Q_ARG(QVariant, QVariant(QStringLiteral("工具"))));
             settle();
             const QVariantMap ui = uiState();
             const double menuLeft = ui.value(QStringLiteral("menuX")).toDouble();
             const double barLeft = tabLeft.toDouble();
             const double barWidth = ui.value(QStringLiteral("menuAnchorWidth")).toDouble();
             check(ui.value(QStringLiteral("menuOpened")).toBool(),
-                  QStringLiteral("点「设置」打开了下拉菜单"));
+                  QStringLiteral("点「工具」打开了下拉菜单"));
             check(barLeft >= 0 && menuLeft >= barLeft && menuLeft <= barLeft + barWidth + 1,
                   QStringLiteral("菜单挂在被点的那一栏下方（不是窗口最左边）"),
-                  QStringLiteral("菜单 x=%1，「设置」那一栏 %2..%3")
+                  QStringLiteral("菜单 x=%1，「工具」那一栏 %2..%3")
                       .arg(menuLeft).arg(barLeft).arg(barLeft + barWidth));
 
             /*
@@ -3957,13 +3958,14 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
          * 判据取的是**顺序**而不是时长：命令开始跑的那一刻，菜单还可见吗。
          * 可见 = 后面无论堵多久都白堵；不可见 = 该收的已经收干净了。
          *
-         * 点的是「设置 → 存储与保存位置…」那一条（act=storage）：走的是**同一份
+         * 点的是「工具 → 设置面板…」那一条（act=settings）：走的是**同一份
          * 委托、同一句 onClicked**（这一段代码不分菜单），但它的命令不会去建原生
-         * 对话框 —— 不然自检就挂在那儿了。
+         * 对话框 —— 不然自检就挂在那儿了。（原来点的是"存储与保存位置…"，那条
+         * 2026-09-24 从菜单里撤了，换成本来就在菜单里的这一条。）
          */
         {
             QMetaObject::invokeMethod(qmlRoot, "clickMenuTab",
-                                      Q_ARG(QVariant, QVariant(QStringLiteral("设置"))));
+                                      Q_ARG(QVariant, QVariant(QStringLiteral("工具"))));
             settle();
             check(uiState().value(QStringLiteral("menuOpened")).toBool(),
                   QStringLiteral("量的这一条：菜单开出来了"));
@@ -3977,7 +3979,7 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
                  */
                 QVariant found;
                 QMetaObject::invokeMethod(menu, "entryItemFor", Q_RETURN_ARG(QVariant, found),
-                                          Q_ARG(QVariant, QVariant(QStringLiteral("storage"))));
+                                          Q_ARG(QVariant, QVariant(QStringLiteral("settings"))));
                 item = found.value<QQuickItem *>();
             }
             check(item != nullptr, QStringLiteral("量的这一条：找得到那条菜单项的委托"));
@@ -8264,50 +8266,44 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
              *   1) 方案写了的项**界面按方案走**，没写的项照用注册表里用户自己设的那个；
              *   2) 方案永远不许把值写回注册表 —— 写脏了之后换掉方案那一项就回不去，
              *      而且"我自己设的字号"被偷偷改了，比看不见还难查；
-             *   3) 钉住的项在设置菜单里要**置灰**（不是消失），没钉的那几项不许跟着灰。
-             *      灰不灰只能从菜单条目本身读：置灰那条链的扳机是 QML 绑定，
-             *      接错了两种坏法（全灰 / 全不灰）光看生效字号分不出来。
+             *   3) 钉住的项在界面上要**看得见是钉住的**：设置 → 字体 那一栏挂标记 +
+             *      控件置灰（见下面那条"七行齐全"的判据），顶栏菜单里留下的那一条
+             *      （自动换行）也一样灰。菜单里那四组字号/字体条目已经撤掉了，
+             *      这条判据顺带钉住"它们真的不在菜单里了 + 有一条直达入口"。
              */
             {
                 auto readReg = [](const char *k) {
                     return QSettings().value(QLatin1String(k)).toString();
                 };
                 /*
-                 * 菜单条目 →它归 font 段哪一项管（不是字体那一族的返回空串）。
-                 * 判据要按这一项分：方案只钉 size 的话，只有字号那几条该灰，
-                 * 注释字号 / 字体 / 自动换行 该照常能点。
+                 * 顶栏「设置」菜单里那四组（字号 / 注释字号 / 字体 / 行高）已经撤进
+                 * 设置 → 字体（2026-09-24 他要的："这几个在导航栏里不显示了"）。
+                 * 这里钉两件事：
+                 *   1) 菜单里**真的没有**那四组的条目了，只剩一条直达入口 settingsFont；
+                 *   2) 留在菜单里的「自动换行」还认方案的钉住 —— 那条灰链的扳机是
+                 *      QML 绑定，接错了两种坏法（全灰 / 全不灰）光看生效值分不出来。
                  */
-                auto actFontKey = [](const QString &a) -> QString {
-                    if (a.startsWith(QLatin1String("fontSize:")))
-                        return QStringLiteral("size");
-                    if (a.startsWith(QLatin1String("commentFontSize:")))
-                        return QStringLiteral("commentSize");
-                    if (a.startsWith(QLatin1String("font:")))
-                        return QStringLiteral("family");
-                    if (a.startsWith(QLatin1String("lineHeight:")) || a == QLatin1String("lineHeightDown")
-                        || a == QLatin1String("lineHeightUp"))
-                        return QStringLiteral("lineHeight");
-                    if (a == QLatin1String("toggleWrap"))
-                        return QStringLiteral("wrap");
-                    return QString();
+                auto isFontAct = [](const QString &a) {
+                    return a.startsWith(QLatin1String("fontSize:"))
+                           || a.startsWith(QLatin1String("commentFontSize:"))
+                           || a.startsWith(QLatin1String("font:"))
+                           || a.startsWith(QLatin1String("lineHeight:"))
+                           || a == QLatin1String("lineHeightDown")
+                           || a == QLatin1String("lineHeightUp");
                 };
-                QStringList allFontActs;
-                for (const QVariant &v : settingsMenuActs())
-                    if (!actFontKey(v.toString()).isEmpty())
-                        allFontActs << v.toString();
-                auto greyFontActs = [&]() {
-                    QStringList res;
+                QStringList menuActs, menuFontActs;
+                for (const QVariant &v : settingsMenuActs()) {
+                    const QString a = v.toString();
+                    menuActs << a;
+                    if (isFontAct(a))
+                        menuFontActs << a;
+                }
+                auto wrapGreyed = [&]() {
                     for (const QVariant &v : settingsMenuLockedActs())
-                        if (!actFontKey(v.toString()).isEmpty())
-                            res << v.toString();
-                    return res;
+                        if (v.toString() == QLatin1String("toggleWrap"))
+                            return true;
+                    return false;
                 };
-                /*
-                 * 菜单里本来就有一两条是灰的（比如字号已经是默认档时"恢复默认字号"
-                 * 那条自己就不许点）。拿这份底色当对照，判据才是"方案多灰了哪几条"，
-                 * 而不是"字体那一族一条都不许灰"。
-                 */
-                const QStringList baseGrey = greyFontActs();
 
                 const QString storedSize = readReg("editor/fontSize");
                 const QString storedLine = readReg("editor/lineHeight");
@@ -8319,49 +8315,54 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
                 th->reloadSchemes();
                 settle();
                 QVariantMap u = uiState();
-                const QStringList greyed = greyFontActs();
                 /* 这一档方案钉的是 size 和 lineHeight 两项 */
-                const QStringList pinned { QStringLiteral("size"), QStringLiteral("lineHeight") };
-                QStringList missing;                            /* 钉了却没灰 */
-                QStringList extra;                              /* 没钉却跟着灰 */
-                for (const QString &a : allFontActs) {
-                    const bool shouldGrey = pinned.contains(actFontKey(a));
-                    if (shouldGrey && !greyed.contains(a) && !baseGrey.contains(a))
-                        missing += a;
-                    if (!shouldGrey && greyed.contains(a) && !baseGrey.contains(a))
-                        extra += a;
-                }
                 check(u.value(QLatin1String("fontPixelSize")).toInt() == 16
                           && qAbs(u.value(QLatin1String("lineHeightNow")).toDouble() - 1.5) < 0.01
                           && u.value(QLatin1String("fontLockedSize")).toBool()
                           && !u.value(QLatin1String("fontLockedWrap")).toBool()
-                          && missing.isEmpty() && extra.isEmpty()
+                          && menuFontActs.isEmpty()
+                          && menuActs.contains(QStringLiteral("settingsFont"))
+                          && !wrapGreyed()
                           && readReg("editor/fontSize") == storedSize
                           && readReg("editor/lineHeight") == storedLine,
-                      QStringLiteral("方案写了 font.size / lineHeight：界面按方案走、只灰这两族，"
-                                     "注册表那份一个字节都没被写脏"),
-                      QStringLiteral("生效字号=%1（该 16）行高=%2（该 1.5）钉住标记 size=%3 wrap=%4 "
-                                     "/ 该灰没灰=[%5] 没钉却跟着灰=[%6] / 注册表 fontSize %7→%8 行高 %9→%10")
+                      QStringLiteral("字号那四组已撤进 设置 → 字体：菜单只剩一条直达入口，"
+                                     "生效值仍按方案走，注册表一个字节没被写脏"),
+                      QStringLiteral("菜单里剩的字体条目=%1（该空）直达入口=%2 / 生效字号=%3（该 16）"
+                                     "行高=%4（该 1.5）钉住标记 size=%5 wrap=%6 自动换行也灰了=%7 / "
+                                     "注册表 fontSize %8→%9 行高 %10→%11")
+                          .arg(menuFontActs.join(QStringLiteral(",")))
+                          .arg(menuActs.contains(QStringLiteral("settingsFont")))
                           .arg(u.value(QLatin1String("fontPixelSize")).toInt())
                           .arg(u.value(QLatin1String("lineHeightNow")).toDouble())
                           .arg(u.value(QLatin1String("fontLockedSize")).toBool())
                           .arg(u.value(QLatin1String("fontLockedWrap")).toBool())
-                          .arg(missing.join(QStringLiteral(",")))
-                          .arg(extra.join(QStringLiteral(",")))
+                          .arg(wrapGreyed())
                           .arg(storedSize, readReg("editor/fontSize"))
                           .arg(storedLine, readReg("editor/lineHeight")));
 
-                /* 去掉 font 段：必须回到用户注册表那个值，灰的那几条也得跟着放开 */
+                /* 留在菜单里的那一条「自动换行」：钉了要灰，且不能连累别的项 */
+                writeScheme(R"({"basedOn":"Dark","font":{"wrap":true}})");
+                th->reloadSchemes();
+                settle();
+                u = uiState();
+                check(wrapGreyed() && u.value(QLatin1String("wrapNow")).toBool()
+                          && !u.value(QLatin1String("fontLockedSize")).toBool(),
+                      QStringLiteral("菜单里留下的「自动换行」认方案的钉住：钉了就灰，没钉的项不跟着灰"),
+                      QStringLiteral("条目灰=%1 生效换行=%2 字号也被钉=%3")
+                          .arg(wrapGreyed()).arg(u.value(QLatin1String("wrapNow")).toBool())
+                          .arg(u.value(QLatin1String("fontLockedSize")).toBool()));
+
+                /* 去掉 font 段：必须回到用户注册表那个值，灰的那条也得放开 */
                 writeScheme(R"({"basedOn":"Dark"})");
                 th->reloadSchemes();
                 settle();
                 u = uiState();
                 check(u.value(QLatin1String("fontPixelSize")).toInt() == storedPx
-                          && greyFontActs() == baseGrey,
-                      QStringLiteral("方案里没有 font 段：字号回到注册表那个值，菜单那排不灰"),
-                      QStringLiteral("生效字号=%1（该 %2）灰着的字体项=[%3]（底色=[%4]）")
+                          && !wrapGreyed(),
+                      QStringLiteral("方案里没有 font 段：字号回到注册表那个值，菜单那条也放开"),
+                      QStringLiteral("生效字号=%1（该 %2）自动换行还灰着=%3")
                           .arg(u.value(QLatin1String("fontPixelSize")).toInt()).arg(storedPx)
-                          .arg(greyFontActs().join(QStringLiteral(",")), baseGrey.join(QStringLiteral(","))));
+                          .arg(wrapGreyed()));
 
                 /* 类型写错：那一条不算，同段别的项照用，而且要点名 */
                 writeScheme(R"({"basedOn":"Dark","font":{"size":"16","wrap":true}})");

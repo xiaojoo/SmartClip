@@ -319,82 +319,6 @@ function viewMenu(view, ov) {
     ], ov)
 }
 
-/* 编辑器字号可选值（12 是出厂默认）。单位是**像素**，和 QML 的 font.pixelSize 一致 */
-var kFontSizes = [10, 11, 12, 13, 14, 16, 18, 20, 24]
-var kDefaultFontSize = 12
-
-/* 注释字号：比正文小一档看着舒服，也可以"跟随正文" */
-var kCommentFontSizes = [10, 11, 12, 13, 14, 16]
-
-/*
- * 正文字体家族。
- *
- * 名字必须用**英文家族名**：QScintilla 转发给 Scintilla 时走的是
- * QFont::family().toLatin1()，中文名（"新宋体"）会被压成问号，字体就失效了。
- * 新宋体 / 更纱黑体这类是"中英都覆盖的等宽字体"，中英混排时比 Consolas 整齐 ——
- * Scintilla 没法按"汉字/拉丁字母"分别设字体，只能整篇换。
- */
-var kFontFamilies = [
-    { label: "Consolas（默认）", family: "Consolas" },
-    { label: "Cascadia Mono", family: "Cascadia Mono" },
-    { label: "新宋体 NSimSun（中英等宽）", family: "NSimSun" },
-    { label: "更纱黑体 Sarasa Mono SC（装了才有）", family: "Sarasa Mono SC" },
-    { label: "Courier New", family: "Courier New" }
-]
-
-function fontSizeItems(view) {
-    var current = view ? view.fontPixelSize : kDefaultFontSize
-    var out = []
-    for (var i = 0; i < kFontSizes.length; ++i) {
-        out.push({
-            label: "字号 " + kFontSizes[i] + " px",
-            act: "fontSize:" + kFontSizes[i],
-            checked: current === kFontSizes[i] || (i === kFontSizes.length - 1
-                                                    && current > kFontSizes[i])
-        })
-    }
-    out.push({ separator: true })
-    out.push({
-        label: "恢复默认字号（" + kDefaultFontSize + " px）",
-        act: "fontSize:" + kDefaultFontSize,
-        icon: "refresh",
-        enabled: current !== kDefaultFontSize,
-        disabled: current === kDefaultFontSize
-    })
-    return out
-}
-
-/* 注释字号：0 = 跟随正文 */
-function commentFontSizeItems(view) {
-    var current = view ? view.commentFontPixelSize : 0
-    var out = [{
-        label: "跟随正文",
-        act: "commentFontSize:0",
-        checked: !current
-    }]
-    for (var i = 0; i < kCommentFontSizes.length; ++i) {
-        out.push({
-            label: kCommentFontSizes[i] + " px",
-            act: "commentFontSize:" + kCommentFontSizes[i],
-            checked: current === kCommentFontSizes[i]
-        })
-    }
-    return out
-}
-
-function fontFamilyItems(view) {
-    var current = view ? view.fontFamily : "Consolas"
-    var out = []
-    for (var i = 0; i < kFontFamilies.length; ++i) {
-        out.push({
-            label: kFontFamilies[i].label,
-            act: "font:" + kFontFamilies[i].family,
-            checked: current === kFontFamilies[i].family
-        })
-    }
-    return out
-}
-
 /*
  * 行高倍数（单位是"倍"，不是像素）。
  *
@@ -405,22 +329,8 @@ function fontFamilyItems(view) {
  */
 var kLineHeightFactors = [1.0, 1.15, 1.3, 1.5, 1.75, 2.0, 2.5]
 
-function lineHeightItems(view) {
-    var current = view ? view.lineHeightFactor : 1.0
-    /* 自然行高：菜单上顺手把"这一档大概多高"写出来，改字号后它自己跟着变 */
-    var base = view ? view.naturalLineHeight : 0
-    var out = []
-    for (var i = 0; i < kLineHeightFactors.length; ++i) {
-        var f = kLineHeightFactors[i]
-        var px = base > 0 ? "（" + Math.round(base * f) + " px）" : ""
-        out.push({
-            label: (i === 0 ? "跟随字体" : f + " 倍") + px,
-            act: "lineHeight:" + f,
-            checked: Math.abs(current - f) < 0.001
-        })
-    }
-    return out
-}
+/* 自检读的：档位表现在只喂"行高 − / +"和设置页，菜单里那份撤了，判据得有入口 */
+function lineHeightFactors() { return kLineHeightFactors }
 
 /*
  * 设置面板上"行高 − / 行高 +"用：在 kLineHeightFactors 里往前 / 往后走一格。
@@ -474,11 +384,12 @@ function rulerColumnItems(view) {
 }
 
 /*
- * 配色方案的 font 段钉住了某一项时，菜单上那一组置灰、组标题写明是谁定的。
+ * 配色方案的 font 段钉住了某一项时，菜单上那一条置灰、标题写明是谁定的。
  *
- * ov.fontLock 由 QML 侧拼进来（Main.qml 的 fontLock / TopBar.menuOv）：菜单构造器
- * 待在 js 里，够不着 Theme 单例，只能靠状态包带。包不在（别的调用点、直接
- * settingsMenu(view) 的旧写法）就一切照旧 —— 别因为读不到就把整排点亮死。
+ * 现在只剩「自动换行」还留在菜单里（字号那四组已经撤进 设置 → 字体），所以这里
+ * 只管那一条。ov.fontLock 由 QML 侧拼进来（Main.qml 的 fontLock / TopBar.menuOv）：
+ * 菜单构造器待在 js 里，够不着 Theme 单例，只能靠状态包带。包不在（别的调用点、
+ * 直接 settingsMenu(view) 的旧写法）就一切照旧 —— 别因为读不到就把那一条点不亮。
  */
 function fontLockOf(ov, key) {
     var f = ov && ov.fontLock
@@ -487,51 +398,23 @@ function fontLockOf(ov, key) {
 function lockHead(label, l) {
     return l && l.note ? label + "（" + l.note + "）" : label
 }
-function lockItems(list, l) {
-    if (!l)
-        return list
-    for (var i = 0; i < list.length; ++i)
-        if (list[i] && list[i].act !== undefined)
-            list[i].disabled = true
-    return list
-}
 
 function settingsMenu(view, ov) {
     var hasDoc = !!view && view.hasDocument
     var items = []
-    /* 图形化设置面板（快捷键 / 存储 / 关于），见 qml/components/SettingsPanel.qml */
-    items.push({ label: "打开设置面板…", act: "settings", icon: "gear" })
-    /* 剪贴板内容存哪儿、导入了哪些外部文件夹 —— 直接翻到"存储"那一栏 */
-    items.push({ label: "存储与保存位置…", act: "storage", icon: "folder" })
-    /* 方案钉住了哪几项：钉住的那一组整排置灰，组标题带上"由方案 X 定" */
-    var lSize = fontLockOf(ov, "size")
-    var lComment = fontLockOf(ov, "commentSize")
-    var lFamily = fontLockOf(ov, "family")
-    var lLine = fontLockOf(ov, "lineHeight")
-    items.push({ separator: true })
-    items.push({ label: lockHead("字号", lSize), icon: "zoom-reset", disabled: true })
-    var sizes = lockItems(fontSizeItems(view), lSize)
-    for (var i = 0; i < sizes.length; ++i)
-        items.push(sizes[i])
-
-    items.push({ separator: true })
-    items.push({ label: lockHead("注释字号", lComment), icon: "comment", disabled: true })
-    var commentSizes = lockItems(commentFontSizeItems(view), lComment)
-    for (var c = 0; c < commentSizes.length; ++c)
-        items.push(commentSizes[c])
-
-    items.push({ separator: true })
-    items.push({ label: lockHead("字体", lFamily), icon: "gear", disabled: true })
-    var families = lockItems(fontFamilyItems(view), lFamily)
-    for (var f = 0; f < families.length; ++f)
-        items.push(families[f])
-
-    items.push({ separator: true })
-    items.push({ label: lockHead("行高", lLine), icon: "line-height", disabled: true })
-    var heights = lockItems(lineHeightItems(view), lLine)
-    for (var h = 0; h < heights.length; ++h)
-        items.push(heights[h])
-
+    /*
+     * 图形化设置面板（快捷键 / 存储 / 关于），见 qml/components/SettingsPanel.qml。
+     * 2026-09-24 他要的两处改动：这条从"打开设置面板…"改成"设置面板"；
+     * 下面那条"存储与保存位置…"删掉（存储那一栏在设置面板里还在，
+     * 图标条那一格的右键菜单也还留着"存储位置"这个入口）。
+     */
+    items.push({ label: "设置面板", act: "settings", icon: "gear" })
+    /*
+     * 字号 / 注释字号 / 字体 / 行高 这四组**已经从菜单里撤掉了**（2026-09-24 他要的：
+     * "这几个在导航栏里不显示了，只要设置界面里的"）—— 它们现在住在 设置 → 字体，
+     * 那里能显示生效值、也能标出哪几项被配色方案钉住。菜单只留一条直达入口。
+     */
+    items.push({ label: "字体、字号、行高…", act: "settingsFont", icon: "font" })
     items.push({ separator: true })
     items.push({ label: "字数参考线列", icon: "indent", disabled: true })
     var cols = rulerColumnItems(view)
@@ -818,7 +701,11 @@ function tabLabels() {
      * items 现算的，而自检的 dispatch("menu:语言") / openSubmenuFor("menu:语言")
      * 也直接走 menuItems()，都不经过 hasMenu()。
      */
-    return ["文件", "编辑", "搜索", "视图", "设置", "帮助"]
+    /*
+     * 2026-09-24 他改的名：「设置」→「工具」、「帮助」→「关于」。
+     * 顶栏那一排只是**入口**，栏目本身没动（设置面板里还是那十栏）。
+     */
+    return ["文件", "编辑", "搜索", "视图", "工具", "关于"]
 }
 
 function hasMenu(label) {
@@ -833,7 +720,7 @@ function menuItems(label, view, ov) {
     if (label === "语言") return languageItems(view)
     if (label === "编码") return encodingItems(view)
     if (label === "换行") return eolItems(view)
-    if (label === "设置") return settingsMenu(view, ov)
-    if (label === "帮助") return helpMenu(ov)
+    if (label === "工具") return settingsMenu(view, ov)
+    if (label === "关于") return helpMenu(ov)
     return [{ label: "（暂无）", act: "none", disabled: true }]
 }

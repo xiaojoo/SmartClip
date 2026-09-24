@@ -107,9 +107,10 @@ Window {
     }
 
     /*
-     * 字体家族的候选。和 js/EditorMenus.js 的 kFontFamilies 是同一份东西，
-     * 那边是顶上「设置」菜单用的 —— 名字必须用**英文家族名**（Scintilla 走 toLatin1，
-     * 中文名会压成问号，字体就静默失效）。改这一列记得改那一列。
+     * 字体家族的候选。顶栏「设置」菜单里那组"字体"已经撤了（2026-09-24），这一份
+     * 就是唯一的一份；名字必须用**英文家族名**（Scintilla 走 QFont::family().toLatin1()，
+     * 中文名会被压成问号，字体就静默失效）。新宋体 / 更纱黑体这类中英都覆盖，
+     * 中英混排时比 Consolas 整齐 —— Scintilla 没法按字符分别设字体，只能整篇换。
      */
     readonly property var fontFamilyChoices: [
         { label: "Consolas", family: "Consolas" },

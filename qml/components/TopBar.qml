@@ -10,7 +10,7 @@ import "../../js/EditorMenus.js" as Menus
 /*
  * 顶部这一行（原生标题栏去掉后它就是窗口最顶上的一行）：
  *
- *   [S] SmartClip │ 文件 编辑 搜索 … 帮助        [🔍 搜索剪贴内容]  [− □ ×]
+ *   [S] SmartClip │ 文件 编辑 搜索 … 关于        [🔍 搜索剪贴内容]  [− □ ×]
  *
  * 菜单项和工具栏按钮是同一套命令（见 js/EditorMenus.js 与 Main.qml 的
  * dispatch），菜单里额外显示快捷键、勾选状态和禁用状态。
@@ -43,7 +43,7 @@ Rectangle {
     signal openMenu(Item anchor, var items)
     signal searchChanged(string text)
     /*
-     * 点了「帮助」那一栏。
+     * 点了「关于」那一栏（2026-09-24 之前它叫「帮助」）。
      *
      * 它**没有下拉菜单**（见下面 navHit 的 onClicked 和 js/EditorMenus.js 的
      * helpMenu 说明）—— 点一下直接开"关于 SmartClip"。所以不走 openMenu，
@@ -61,12 +61,12 @@ Rectangle {
     /*
      * 这一栏点了有没有反应。
      *
-     * 「帮助」也算有 —— 它虽然没有下拉菜单，但点一下直接开"关于"（见下面
+     * 「关于」也算有 —— 它虽然没有下拉菜单，但点一下直接开"关于 SmartClip"（见下面
      * onClicked）。不把它算进来的话那一栏没有 hover 反馈，看着像坏的。
      */
     function hasMenu(label) { return Menus.hasMenu(label) }
     /* 这一栏点下去是"直接执行"，不是"弹下拉菜单" */
-    function isDirect(label) { return label === "帮助" }
+    function isDirect(label) { return label === "关于" }
 
     /*
      * 点某一栏。**鼠标和自检都走这一个函数** —— 自检要是自己另写一套触发方式，
@@ -214,7 +214,7 @@ Rectangle {
 
                     /*
                      * 这一栏鼠标压上去有没有反馈。除了"有下拉菜单的"，还有
-                     * 「帮助」—— 它一按就直接开"关于"，没有下拉菜单但也得亮起来。
+                     * 「关于」—— 它一按就直接开"关于 SmartClip"，没有下拉菜单但也得亮起来。
                      */
                     readonly property bool live: root.hasMenu(modelData)
                                                  || root.isDirect(modelData)

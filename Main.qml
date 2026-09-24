@@ -1487,6 +1487,12 @@ Rectangle {
     }
 
     /*
+     * 自检用：行高的档位表（现在只喂设置页的"行高 − / +"和这一条判据 ——
+     * 菜单里那 7 档已经撤进 设置 → 字体 了，表本身还在 js/EditorMenus.js）。
+     */
+    function lineHeightSteps() { return Menus.lineHeightFactors() }
+
+    /*
      * 视图菜单里各条的动作名（自检核对用，见 src/SelfTest.cpp）。
      *
      * 同样走"和弹出的那份同一个构造"：点"视图"弹出的就是 Menus.viewMenu。
@@ -2108,6 +2114,11 @@ Rectangle {
         settingsPanel.openSection("storage")
     }
 
+    /* 设置面板的"字体"那一栏 —— 顶栏菜单里那四组（字号/注释字号/字体/行高）撤到这里了 */
+    function showFont() {
+        settingsPanel.openSection("font")
+    }
+
     /*
      * 自检用：点菜单栏某一栏（走 TopBar::activateTab，和鼠标同一个入口）。
      *
@@ -2585,6 +2596,8 @@ Rectangle {
         if (act === "settings") { showShortcuts(); return }
         /* 设置面板的"存储"栏：保存位置 / 导入的文件夹 */
         if (act === "storage") { showStorage(); return }
+        /* 顶栏「设置」菜单里那条"字体、字号、行高…" */
+        if (act === "settingsFont") { showFont(); return }
         /* 设置面板的"翻译"栏：模型怎么配（翻译卡片上的提示会指到这儿） */
         if (act === "settingsTranslate") { settingsPanel.openSection("translate"); return }
         /* 设置 → 模型里那两个「选择…」（面板先让开，再开系统文件框） */
