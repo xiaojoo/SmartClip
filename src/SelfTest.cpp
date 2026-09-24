@@ -562,6 +562,13 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
         return result.toList();
     };
 
+    /* 读设置菜单里"当前是灰的"条目（见 Main.qml 的 settingsMenuLockedActs） */
+    auto settingsMenuLockedActs = [qmlRoot]() {
+        QVariant result;
+        QMetaObject::invokeMethod(qmlRoot, "settingsMenuLockedActs", Q_RETURN_ARG(QVariant, result));
+        return result.toList();
+    };
+
     /* 读视图菜单的条目清单（见 Main.qml 的 viewMenuActs，同上） */
     auto viewMenuActs = [qmlRoot]() {
         QVariant result;
@@ -8249,6 +8256,133 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
             }
 
             /*
+             * ==================================================================
+             * 方案的 font 段（字体 / 字号 / 行高 / 终端字体）
+             * ==================================================================
+             *
+             * 钉三件事：
+             *   1) 方案写了的项**界面按方案走**，没写的项照用注册表里用户自己设的那个；
+             *   2) 方案永远不许把值写回注册表 —— 写脏了之后换掉方案那一项就回不去，
+             *      而且"我自己设的字号"被偷偷改了，比看不见还难查；
+             *   3) 钉住的项在设置菜单里要**置灰**（不是消失），没钉的那几项不许跟着灰。
+             *      灰不灰只能从菜单条目本身读：置灰那条链的扳机是 QML 绑定，
+             *      接错了两种坏法（全灰 / 全不灰）光看生效字号分不出来。
+             */
+            {
+                auto readReg = [](const char *k) {
+                    return QSettings().value(QLatin1String(k)).toString();
+                };
+                /*
+                 * 菜单条目 →它归 font 段哪一项管（不是字体那一族的返回空串）。
+                 * 判据要按这一项分：方案只钉 size 的话，只有字号那几条该灰，
+                 * 注释字号 / 字体 / 自动换行 该照常能点。
+                 */
+                auto actFontKey = [](const QString &a) -> QString {
+                    if (a.startsWith(QLatin1String("fontSize:")))
+                        return QStringLiteral("size");
+                    if (a.startsWith(QLatin1String("commentFontSize:")))
+                        return QStringLiteral("commentSize");
+                    if (a.startsWith(QLatin1String("font:")))
+                        return QStringLiteral("family");
+                    if (a.startsWith(QLatin1String("lineHeight:")) || a == QLatin1String("lineHeightDown")
+                        || a == QLatin1String("lineHeightUp"))
+                        return QStringLiteral("lineHeight");
+                    if (a == QLatin1String("toggleWrap"))
+                        return QStringLiteral("wrap");
+                    return QString();
+                };
+                QStringList allFontActs;
+                for (const QVariant &v : settingsMenuActs())
+                    if (!actFontKey(v.toString()).isEmpty())
+                        allFontActs << v.toString();
+                auto greyFontActs = [&]() {
+                    QStringList res;
+                    for (const QVariant &v : settingsMenuLockedActs())
+                        if (!actFontKey(v.toString()).isEmpty())
+                            res << v.toString();
+                    return res;
+                };
+                /*
+                 * 菜单里本来就有一两条是灰的（比如字号已经是默认档时"恢复默认字号"
+                 * 那条自己就不许点）。拿这份底色当对照，判据才是"方案多灰了哪几条"，
+                 * 而不是"字体那一族一条都不许灰"。
+                 */
+                const QStringList baseGrey = greyFontActs();
+
+                const QString storedSize = readReg("editor/fontSize");
+                const QString storedLine = readReg("editor/lineHeight");
+                const int storedPx = storedSize.isEmpty() ? 12 : storedSize.toInt();
+
+                /* 这一段全程用 _selftest 那份：先切过去，之后每次改完文件 reloadSchemes */
+                writeScheme(R"({"basedOn":"Dark","font":{"size":16,"lineHeight":1.5}})");
+                th->setScheme(QStringLiteral("_selftest"));
+                th->reloadSchemes();
+                settle();
+                QVariantMap u = uiState();
+                const QStringList greyed = greyFontActs();
+                /* 这一档方案钉的是 size 和 lineHeight 两项 */
+                const QStringList pinned { QStringLiteral("size"), QStringLiteral("lineHeight") };
+                QStringList missing;                            /* 钉了却没灰 */
+                QStringList extra;                              /* 没钉却跟着灰 */
+                for (const QString &a : allFontActs) {
+                    const bool shouldGrey = pinned.contains(actFontKey(a));
+                    if (shouldGrey && !greyed.contains(a) && !baseGrey.contains(a))
+                        missing += a;
+                    if (!shouldGrey && greyed.contains(a) && !baseGrey.contains(a))
+                        extra += a;
+                }
+                check(u.value(QLatin1String("fontPixelSize")).toInt() == 16
+                          && qAbs(u.value(QLatin1String("lineHeightNow")).toDouble() - 1.5) < 0.01
+                          && u.value(QLatin1String("fontLockedSize")).toBool()
+                          && !u.value(QLatin1String("fontLockedWrap")).toBool()
+                          && missing.isEmpty() && extra.isEmpty()
+                          && readReg("editor/fontSize") == storedSize
+                          && readReg("editor/lineHeight") == storedLine,
+                      QStringLiteral("方案写了 font.size / lineHeight：界面按方案走、只灰这两族，"
+                                     "注册表那份一个字节都没被写脏"),
+                      QStringLiteral("生效字号=%1（该 16）行高=%2（该 1.5）钉住标记 size=%3 wrap=%4 "
+                                     "/ 该灰没灰=[%5] 没钉却跟着灰=[%6] / 注册表 fontSize %7→%8 行高 %9→%10")
+                          .arg(u.value(QLatin1String("fontPixelSize")).toInt())
+                          .arg(u.value(QLatin1String("lineHeightNow")).toDouble())
+                          .arg(u.value(QLatin1String("fontLockedSize")).toBool())
+                          .arg(u.value(QLatin1String("fontLockedWrap")).toBool())
+                          .arg(missing.join(QStringLiteral(",")))
+                          .arg(extra.join(QStringLiteral(",")))
+                          .arg(storedSize, readReg("editor/fontSize"))
+                          .arg(storedLine, readReg("editor/lineHeight")));
+
+                /* 去掉 font 段：必须回到用户注册表那个值，灰的那几条也得跟着放开 */
+                writeScheme(R"({"basedOn":"Dark"})");
+                th->reloadSchemes();
+                settle();
+                u = uiState();
+                check(u.value(QLatin1String("fontPixelSize")).toInt() == storedPx
+                          && greyFontActs() == baseGrey,
+                      QStringLiteral("方案里没有 font 段：字号回到注册表那个值，菜单那排不灰"),
+                      QStringLiteral("生效字号=%1（该 %2）灰着的字体项=[%3]（底色=[%4]）")
+                          .arg(u.value(QLatin1String("fontPixelSize")).toInt()).arg(storedPx)
+                          .arg(greyFontActs().join(QStringLiteral(",")), baseGrey.join(QStringLiteral(","))));
+
+                /* 类型写错：那一条不算，同段别的项照用，而且要点名 */
+                writeScheme(R"({"basedOn":"Dark","font":{"size":"16","wrap":true}})");
+                th->reloadSchemes();
+                settle();
+                u = uiState();
+                check(u.value(QLatin1String("fontPixelSize")).toInt() == storedPx
+                          && u.value(QLatin1String("wrapNow")).toBool()
+                          && th->schemeError().contains(QStringLiteral("font.size")),
+                      QStringLiteral("font 项类型写错：只有那一条不生效并点名报出来，同段别的项照用"),
+                      QStringLiteral("生效字号=%1（该 %2，那条字符串不算）自动换行=%3 错误=[%4]")
+                          .arg(u.value(QLatin1String("fontPixelSize")).toInt()).arg(storedPx)
+                          .arg(u.value(QLatin1String("wrapNow")).toBool())
+                          .arg(th->schemeError().trimmed()));
+
+                writeScheme(R"({"basedOn":"Dark"})");
+                th->reloadSchemes();
+                settle();
+            }
+
+            /*
              * 后端能切不等于界面上有这一栏。这里钉两件事：导航里有「配色方案」，
              * 而且那一栏真的列出了方案（Repeater 的条目从外面 findChild 找不到，
              * 所以由组件自己报数 —— 见 SettingsPanel 里 schemeRowCount 那段）。
@@ -8271,6 +8405,83 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
                       QStringLiteral("找不到 settingsPanel，整栏无从谈起"));
             }
 
+            /*
+             * 「字体」那一栏。他第一轮就是这么问的："配置做好了，入口在设置哪里？"
+             * —— 只有后端能改、界面上找不到入口，等于没做。这一栏量三件事：
+             * 侧栏有它、七行都建出来了、被方案钉住的那几行的标记会跟着方案翻。
+             * 七行的顺序 = lockedFlags 那串 0/1 的顺序（family/size/commentSize/
+             * lineHeight/wrap/terminalFamily/terminalSize，见 SettingsPanel 那段注释）。
+             */
+            if (QObject *sp = qmlRoot->findChild<QObject *>("settingsPanel")) {
+                sp->setProperty("section", QStringLiteral("font"));
+                settle();
+                const bool nav = sp->property("fontNavShown").toBool();
+                const int rows = sp->property("fontRowCount").toInt();
+                /*
+                 * 这一栏的**内容高度**必须不为 0：sectionContentHeight() 那个 switch
+                 * 是按栏目名一条条列出来的，新加一栏忘了登记就 return 0，于是
+                 * Flickable 的 contentHeight 只剩两边留白 —— 超出视口的那几行**滚不到**。
+                 * 属性探针全读得到（它们不在被裁掉的那一段上），所以这一步只能拿高度卡。
+                 */
+                const int fontH = [&] {
+                    QVariant r;
+                    QMetaObject::invokeMethod(sp, "sectionContentHeight", Q_RETURN_ARG(QVariant, r));
+                    return r.toInt();
+                }();
+                const QString flagsFree = sp->property("fontLockedFlags").toString();
+
+                writeScheme(R"({"basedOn":"Dark","font":{"size":14,"terminalSize":15}})");
+                th->setScheme(QStringLiteral("_selftest"));
+                th->reloadSchemes();
+                settle();
+                const QString flagsPinned = sp->property("fontLockedFlags").toString();
+
+                writeScheme(R"({"basedOn":"Dark"})");
+                th->reloadSchemes();
+                settle();
+                const QString flagsBack = sp->property("fontLockedFlags").toString();
+
+                check(nav && rows == 7 && fontH > 200 && flagsFree == QStringLiteral("0000000")
+                          && flagsPinned == QStringLiteral("0100001")
+                          && flagsBack == QStringLiteral("0000000"),
+                      QStringLiteral("设置里有「字体」这一栏：七行齐全、这一栏滚得到底，钉住哪几项跟着方案翻"),
+                      QStringLiteral("侧栏有这一栏=%1 行数=%2（该 7）内容高=%3（该 >200，0 = switch 漏登记，"
+                                     "超出视口的行滚不到）没钉=%4 钉 size+终端字号=%5（该 0100001）解钉=%6")
+                          .arg(nav).arg(rows).arg(fontH)
+                          .arg(flagsFree, flagsPinned, flagsBack));
+
+                /* 同一行右边控件的起始 x：六行必须一模一样（他圈的对齐） */
+                const QList<QVariant> edges = [&] {
+                    QVariant r;
+                    QMetaObject::invokeMethod(sp, "fontRowBodyLefts", Q_RETURN_ARG(QVariant, r));
+                    return r.toList();
+                }();
+                bool sameEdge = edges.size() == 6;
+                for (int i = 1; i < edges.size(); ++i)
+                    sameEdge = sameEdge && qFuzzyCompare(edges.at(i).toReal(), edges.at(0).toReal());
+                check(sameEdge,
+                      QStringLiteral("字体那一栏：六行的控件左边缘在同一条竖线上"),
+                      QStringLiteral("%1 行，起始 x = %2").arg(edges.size())
+                          .arg([&] {
+                               QStringList s;
+                               for (const QVariant &v : edges)
+                                   s << QString::number(v.toReal());
+                               return s.join(QStringLiteral(" / "));
+                           }()));
+
+                /* 同一处 switch：配色方案那一栏也漏过（它是上一轮加的，同样没登记） */
+                sp->setProperty("section", QStringLiteral("scheme"));
+                settle();
+                QVariant sr;
+                QMetaObject::invokeMethod(sp, "sectionContentHeight", Q_RETURN_ARG(QVariant, sr));
+                check(sr.toInt() > 200,
+                      QStringLiteral("「配色方案」那一栏的内容高度不是 0（漏登记就滚不到底）"),
+                      QStringLiteral("内容高=%1").arg(sr.toInt()));
+            } else {
+                check(false, QStringLiteral("设置里有「字体」这一栏：七行齐全、这一栏滚得到底，钉住哪几项跟着方案翻"),
+                      QStringLiteral("找不到 settingsPanel，整栏无从谈起"));
+            }
+
             QFile::remove(th->schemesDir() + QStringLiteral("/_selftest.json"));
             th->setScheme(savedScheme);
             settle();
@@ -8281,6 +8492,9 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
         theme->setLight(true);   /* 还原用户那一档 */
 
     out() << Qt::endl
-          << "通过 " << gPassed << " 项，失败 " << gFailed << " 项" << Qt::endl;
+          << "通过 " << gPassed << " 项，失败 " << gFailed << " 项"
+          << "（另丢掉 Qt 那句 windowless update 警告 "
+          << droppedWindowlessUpdateWarnings() << " 条，见 main.cpp 的消息处理器）"
+          << Qt::endl;
     return gFailed == 0 ? 0 : 1;
 }

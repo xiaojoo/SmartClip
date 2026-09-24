@@ -87,6 +87,97 @@ Window {
     readonly property bool schemeNavShown: navItems.some(function (n) { return n.key === "scheme" })
 
     /*
+     * 配色方案的 font 段钉住了哪几项（键名清单）。
+     *
+     * 这里读的是 Theme.fontOverride **属性**，所以换方案时这条会重算；下面那排按钮
+     * 绑的是 lockedByScheme()，它读的就是这个清单 —— 链条接得上。直接绑
+     * Theme.fontOverridden("size") 不行：函数调用里的读取 QML 追不到依赖，
+     * 换了方案按钮不会醒（同一个坑这工程踩过几回了）。
+     */
+    readonly property var schemeFontKeys: Object.keys(Theme.fontOverride)
+    function lockedByScheme(key) { return schemeFontKeys.indexOf(key) >= 0 }
+    /* 下拉的条目（DropdownMenu 要的那份清单）。prefix 是命令前缀：font: / termFont: */
+    function familyEntries(current, prefix) {
+        var out = []
+        for (var i = 0; i < fontFamilyChoices.length; ++i) {
+            var f = fontFamilyChoices[i]
+            out.push({ label: f.label, act: prefix + f.family, checked: f.family === current })
+        }
+        return out
+    }
+
+    /*
+     * 字体家族的候选。和 js/EditorMenus.js 的 kFontFamilies 是同一份东西，
+     * 那边是顶上「设置」菜单用的 —— 名字必须用**英文家族名**（Scintilla 走 toLatin1，
+     * 中文名会压成问号，字体就静默失效）。改这一列记得改那一列。
+     */
+    readonly property var fontFamilyChoices: [
+        { label: "Consolas", family: "Consolas" },
+        { label: "Cascadia Mono", family: "Cascadia Mono" },
+        { label: "新宋体", family: "NSimSun" },
+        { label: "更纱黑体", family: "Sarasa Mono SC" },
+        { label: "Courier New", family: "Courier New" }
+    ]
+
+    /* 终端字体的基线（由 Main.qml 从终端面板那两个属性转过来） */
+    property string termFamilyNow: "Cascadia Mono"
+    property int termSizeNow: 13
+    /*
+     * 终端那两行的**生效值**：方案钉住就是方案那个值，否则是用户在设置里选的基线。
+     * 编辑区那五行不用这么算 —— Main.qml 已经把方案的值推到 view 上了。
+     */
+    readonly property string termFamilyEff: lockedByScheme("terminalFamily")
+                                            ? String(Theme.fontOverride.terminalFamily)
+                                            : termFamilyNow
+    readonly property int termSizeEff: lockedByScheme("terminalSize")
+                                       ? Number(Theme.fontOverride.terminalSize) : termSizeNow
+
+    /* 自检探针：侧栏里到底有没有「字体」这一栏 */
+    readonly property bool fontNavShown: navItems.some(function (n) { return n.key === "font" })
+    /* 勾选框里那个勾、下拉右边那个箭头，都从图标那套来（不引新依赖） */
+    IconProvider { id: fontIcons }
+    /*
+     * 「字体」那一栏的下拉只开这一个（工程里那条"一次只开一个原生弹窗"的规矩）。
+     * parent 挂内容层：它是这个顶层 Window 自己的场景，不是主窗口的 —— 主窗口那个
+     * ddMenu 锚点算的是主窗口的坐标，拿过来会跑到隔壁去。
+     */
+    DropdownMenu {
+        id: fontMenu
+        parent: content
+        onSelected: (act) => root.commandRequested(act)
+    }
+    /*
+     * 字体那一栏建出来没有、七行齐不齐、哪几行正被方案钉着。
+     * 探针必须挂在**面板根**上（和 schemeRowCount 同一本账）：挂在里面那个 Column 上，
+     * 自检从外面 property 读不到，量出来是"0 行"（第一次就红在这儿）。
+     * lockedFlags 的七位顺序 = 那七行的顺序：family / size / commentSize / lineHeight /
+     * wrap / terminalFamily / terminalSize。
+     */
+    readonly property int fontRowCount: fontRows.children.length + termRows.children.length
+    /*
+     * 每一行"右边控件的起始 x"（自检卡对齐用）。没有控件的行（自动换行）跳过，
+     * 剩下六行必须一模一样。
+     */
+    function fontRowBodyLefts() {
+        var out = []
+        var all = fontRows.children.concat(termRows.children)
+        for (var i = 0; i < all.length; ++i)
+            /* rowBody 是 flRow.data 的别名，里面**永远**有勾选框槽位和标题那两项：
+               所以"这一行有没有控件"要看是不是多于那两项（自动换行那行没控件） */
+            if (all[i] && all[i].bodyLeft !== undefined && all[i].rowBody.length > 2)
+                out.push(all[i].bodyLeft)
+        return out
+    }
+    readonly property string fontLockedFlags:
+        (lockedByScheme("family") ? "1" : "0")
+        + (lockedByScheme("size") ? "1" : "0")
+        + (lockedByScheme("commentSize") ? "1" : "0")
+        + (lockedByScheme("lineHeight") ? "1" : "0")
+        + (lockedByScheme("wrap") ? "1" : "0")
+        + (lockedByScheme("terminalFamily") ? "1" : "0")
+        + (lockedByScheme("terminalSize") ? "1" : "0")
+
+    /*
      * 换栏目 = 回到顶部。
      *
      * 右栏从"直接铺满"改成了 Flickable（见下面 content 的说明）：上一栏滚到一半
@@ -267,6 +358,12 @@ Window {
          */
         { key: "scheme",    label: "配色方案", icon: "palette" },
         /*
+         * 字体单开一栏，不塞进「配色方案」：这几项的日常改法是"我今天想大一号"，
+         * 和换配色不是同一个动作。哪一项被方案钉住了，在这一栏里看得见（灰 + 角标），
+         * 改法在那一栏的说明里写着。
+         */
+        { key: "font",      label: "字体",     icon: "font" },
+        /*
          * 这一栏不叫「翻译」而叫「模型」：它配的是**一个** LLM，翻译卡片和
          * 编辑区校验都用它（见这一栏开头那段、还有「校验」里那句"见左边…"）。
          * 叫「翻译」的话，用户在校验那一栏看到"去配模型"就得猜是哪儿。
@@ -368,6 +465,13 @@ Window {
         case "format":    return formatColumn.implicitHeight
         case "summarize": return summarizeColumn.implicitHeight
         case "archive":   return archiveColumn.implicitHeight
+        /*
+         * 配色方案和字体这两栏是后加的，当时漏了这里：switch 落空就 return 0，
+         * 于是 Flickable 的 contentHeight 只剩两边留白 —— **内容超出视口的那一截
+         * 根本滚不到**（自检量的是属性，读得到，所以界面缺一段它不知道）。
+         */
+        case "scheme":    return schemeColumn.implicitHeight
+        case "font":      return fontColumn.implicitHeight
         case "about":     return aboutSectionColumn.implicitHeight
         }
         return 0
@@ -624,12 +728,15 @@ Window {
         id: btn
         property string label: ""
         property bool accent: false
+        /* 点不动但**留着**：配色方案钉住这一项时，整套开关都是这个样子（见 FontStep） */
+        property bool greyed: false
         signal clicked
         implicitWidth: btnLabel.implicitWidth + 22
         implicitHeight: 26
         radius: 5
+        opacity: greyed ? 0.45 : 1.0
         color: accent ? root.accentColor
-                      : (btnHit.containsMouse ? root.rowHover : "transparent")
+                      : (btnHit.containsMouse && !greyed ? root.rowHover : "transparent")
         border.width: 1
         border.color: accent ? root.accentColor : root.borderColor
         Text {
@@ -642,9 +749,242 @@ Window {
         MouseArea {
             id: btnHit
             anchors.fill: parent
+            enabled: !btn.greyed
             hoverEnabled: true
             cursorShape: Qt.PointingHandCursor
             onClicked: btn.clicked()
+        }
+    }
+
+    /* ==================================================================
+     * 设置 → 字体 那一栏的零件（照 IDEA 那个设置页的排法）
+     * ==================================================================
+     * 分组标题是一行小字 + 一条通栏细线；每一行是「(勾选框) 标签 · 控件内联」；
+     * 没有"关"这个状态的项（字体、字号）就不放勾选框 —— IDEA 自己也是混着排的。
+     * 被配色方案的 font 段钉住的行：整行淡一档、控件点不动、行尾挂一个「方案钉住」，
+     * 下面再跟一句去哪儿改（同一句话由 Theme.fontOverrideNote 出）。
+     */
+
+    /* 一行：标题 + 一条通栏的细线 */
+    component FontGroupTitle: Row {
+        id: fgt
+        property string title: ""
+        spacing: 10
+        Text {
+            id: fgtText
+            anchors.verticalCenter: parent.verticalCenter
+            text: fgt.title
+            color: root.textBright
+            font.pixelSize: 12
+            font.bold: true
+        }
+        Rectangle {
+            anchors.verticalCenter: parent.verticalCenter
+            width: Math.max(0, fontColumn.width - fgtText.implicitWidth - fgt.spacing - 28)
+            height: 1
+            color: root.borderColor
+        }
+    }
+
+    /* 自绘勾选框（原生 CheckBox 一律不用）；勾本身用图标那套里的 "check" */
+    component FontCheck: Rectangle {
+        id: fc
+        property bool on: false
+        property bool greyed: false
+        signal toggled
+        implicitWidth: 16
+        implicitHeight: 16
+        radius: 3
+        opacity: greyed ? 0.45 : 1.0
+        color: on ? root.accentColor : "transparent"
+        border.width: 1
+        border.color: on ? root.accentColor : root.borderColor
+        Image {
+            anchors.centerIn: parent
+            sourceSize.width: 13
+            sourceSize.height: 13
+            visible: fc.on
+            source: fontIcons.svg("check", "#ffffff")
+        }
+        MouseArea {
+            anchors.fill: parent
+            enabled: !fc.greyed
+            cursorShape: Qt.PointingHandCursor
+            onClicked: fc.toggled()
+        }
+    }
+
+    /* 一行的骨架：勾选框（可选）+ 标签 + 这一行的控件（default 子项） */
+    component FontLine: Column {
+        id: fl
+        property string title: ""
+        property bool locked: false
+        property string note: ""
+        property bool checkable: false
+        property bool checked: false
+        property alias rowOpacity: flRow.opacity
+        signal toggle
+        default property alias rowBody: flRow.data
+        spacing: 3
+
+        /*
+         * 这一行"右边控件从哪个 x 开始"。勾选框那一格恒定占宽，所以七行这个值
+         * 必须一模一样 —— 自检拿它卡对齐（他圈的就是"字号那两行的框靠左一截"）。
+         */
+        readonly property real bodyLeft: flSlot.x + flSlot.width + flRow.spacing
+                                         + flTitle.width + flRow.spacing
+
+        Row {
+            id: flRow
+            spacing: 8
+            opacity: fl.locked ? 0.45 : 1.0
+
+            /*
+             * 勾选框那一格**恒定占宽**：有勾的行和没勾的行，右边的控件才落在同一条
+             * 竖线上（他圈的就是这个：字号那两行的框比下面三行靠左一截）。
+             */
+            Item {
+                id: flSlot
+                width: 16
+                height: 16
+                anchors.verticalCenter: parent.verticalCenter
+                FontCheck {
+                    anchors.fill: parent
+                    visible: fl.checkable
+                    on: fl.checked
+                    greyed: fl.locked
+                    onToggled: fl.toggle()
+                }
+            }
+            Text {
+                id: flTitle
+                width: 124
+                anchors.verticalCenter: parent.verticalCenter
+                text: fl.title
+                color: root.textBright
+                font.pixelSize: 12
+                elide: Text.ElideRight
+            }
+        }
+        Text {
+            visible: fl.locked && fl.note.length > 0
+            width: parent.width
+            wrapMode: Text.WordWrap
+            text: fl.note
+            color: root.mutedColor
+            font.pixelSize: 11
+        }
+    }
+
+    /*
+     * 数字框：输入框 + 后缀单位，回车/失焦才提交（不像 −/+ 那样一点就发命令）。
+     *
+     * 框的底色/描边用面板里其它输入框**同一份**（#26282b + borderColor + radius 4）：
+     * 原来这里自己另画了一层 headerColor 的底，同一栏里就出现两种框色。
+     * 灰的那一档靠整行 opacity + readOnly，**不用 enabled:false** —— 后者会让
+     * Controls 自己套一层"禁用色"，又变成第三种颜色。
+     */
+    component FontField: Row {
+        id: ff
+        property string suffix: ""
+        property bool greyed: false
+        /* 行高是小数（1.15 倍），其余三项是整数 px —— 一个框两种校验 */
+        property bool decimal: false
+        /* 模型里那个值（字符串）。只在**没在敲这个框**的时候跟上去，敲的时候归用户 */
+        property string shown: ""
+        property alias text: ffEdit.text
+        signal commit(string v)
+
+        spacing: 5
+        opacity: greyed ? 0.45 : 1.0
+        /* 别给 Row/Column 写 implicitHeight：那是只读的（位置器自己算），
+           写了 qmlcachegen 不拦，**运行期整份 QML 加载失败**，程序直接退（exit 1） */
+
+        /* 两种校验得写成两个对象：`cond ? IntValidator{…} : …` 这种写法 QML 的
+           解析器直接把 { 当成代码块，报 "Expected token \`:\`"（编译期就过不去） */
+        IntValidator { id: ffIntVal; bottom: 1; top: 999 }
+        DoubleValidator { id: ffDblVal; bottom: 1.0; top: 3.0; decimals: 2 }
+
+        PanelField {
+            id: ffEdit
+            width: 62
+            height: 24
+            horizontalAlignment: Text.AlignRight
+            verticalAlignment: Text.AlignVCenter
+            leftPadding: 7
+            rightPadding: 7
+            color: root.textColor
+            selectionColor: root.accentColor
+            selectedTextColor: "#ffffff"
+            font.pixelSize: 12
+            readOnly: ff.greyed
+            validator: ff.decimal ? ffDblVal : ffIntVal
+            onEditingFinished: ff.commit(text)
+            background: Rectangle {
+                color: Theme.c("#26282b", Theme.rev)
+                border.color: root.borderColor
+                border.width: 1
+                radius: 4
+            }
+        }
+        Text {
+            anchors.verticalCenter: parent.verticalCenter
+            visible: ff.suffix.length > 0
+            text: ff.suffix
+            color: root.mutedColor
+            font.pixelSize: 11
+        }
+        Binding {
+            target: ffEdit
+            property: "text"
+            value: ff.shown
+            when: !ffEdit.activeFocus
+        }
+    }
+
+    /* 下拉：自绘的框 + 一个 chevron，点开的是面板自己那一个 DropdownMenu */
+    component FontSelect: Rectangle {
+        id: fsl
+        property string shown: ""
+        property var entries: []
+        property bool greyed: false
+        signal openRequested
+        implicitWidth: 168
+        implicitHeight: 24
+        radius: 4
+        opacity: greyed ? 0.45 : 1.0
+        color: Theme.c("#26282b", Theme.rev)
+        border.width: 1
+        border.color: root.borderColor
+
+        Row {
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.leftMargin: 7
+            anchors.rightMargin: 6
+            anchors.verticalCenter: parent.verticalCenter
+            spacing: 6
+            Text {
+                anchors.verticalCenter: parent.verticalCenter
+                width: parent.width - fslArrow.width - 6
+                text: fsl.shown
+                color: root.textBright
+                font.pixelSize: 12
+                elide: Text.ElideRight
+            }
+            Image {
+                id: fslArrow
+                anchors.verticalCenter: parent.verticalCenter
+                sourceSize.width: 12
+                sourceSize.height: 12
+                source: fontIcons.svg("chevron-down", root.mutedColor)
+            }
+        }
+        MouseArea {
+            anchors.fill: parent
+            enabled: !fsl.greyed
+            cursorShape: Qt.PointingHandCursor
+            onClicked: fsl.openRequested()
         }
     }
 
@@ -3125,7 +3465,10 @@ Window {
                             font.pixelSize: 12
                             text: "点一行换一套。方案就是一个 json 文件，"
                                   + "改完存盘界面立刻跟着变，不用重启；"
-                                  + "内置的 Dark / Light 不可改，想改先「另存为…」一份自己的。"
+                                  + "内置的 Dark / Light 不可改，想改先「另存为…」一份自己的。\n"
+                                  + "除了颜色，文件里还能写 font 那一段（字体、字号、注释字号、行高、"
+                                  + "自动换行、终端字体）：写了哪一项就以方案为准，那一排的开关会置灰，"
+                                  + "没写的项照用你在菜单里设的值。"
                         }
 
                         Rectangle {
@@ -3224,11 +3567,20 @@ Window {
                                 Repeater {
                                     model: Theme.schemeError.split("\n")
                                     Text {
+                                        /*
+                                         * 必须自己声明 modelData：Qt6 的委托里那个隐式的
+                                         * modelData 上下文属性已经不给了，不声明就是
+                                         * "ReferenceError: modelData is not defined"，
+                                         * 结果是**方案报的错在界面上一个字都不显示**
+                                         * （后端 schemeError 明明有内容）。
+                                         */
+                                        required property var modelData
                                         width: parent.width
                                         wrapMode: Text.WordWrap
-                                        text: modelData
+                                        text: String(modelData)
                                         color: root.textColor
                                         font.pixelSize: 11
+                                        visible: String(modelData).trim().length > 0
                                     }
                                 }
                             }
@@ -3282,6 +3634,186 @@ Window {
                             color: root.mutedColor
                             font.pixelSize: 11
                             textFormat: Text.PlainText
+                        }
+                    }
+
+
+                    /* ============ 字体 ============ */
+                    Column {
+                        id: fontColumn
+                        anchors.top: parent.top
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.margins: 14
+                        spacing: 12
+                        visible: root.section === "font"
+
+                        Text {
+                            text: "字体"
+                            color: root.textBright
+                            font.pixelSize: 14
+                            font.bold: true
+                        }
+
+                        Text {
+                            width: parent.width
+                            wrapMode: Text.WordWrap
+                            color: root.mutedColor
+                            font.pixelSize: 12
+                            text: "这里改的是你自己的默认档。配色方案的 font 段写了哪一项，"
+                                  + "那一行就整行淡一档、控件点不动，下面跟一句是哪个方案定的；"
+                                  + "没写的项照用这里设的值。"
+                        }
+
+                        FontGroupTitle { title: "编辑区" }
+
+                        Column {
+                            id: fontRows
+                            width: parent.width
+                            spacing: 8
+
+                            FontLine {
+                                id: famLine
+                                title: "字体"
+                                locked: root.lockedByScheme("family")
+                                note: Theme.fontOverrideNote("family")
+                                FontSelect {
+                                    id: famSel
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    shown: root.view ? root.view.fontFamily : ""
+                                    greyed: famLine.locked
+                                    entries: root.familyEntries(root.view ? root.view.fontFamily : "",
+                                                                "font:")
+                                    onOpenRequested: {
+                                        fontMenu.paneWidth = famSel.width
+                                        fontMenu.openFor(famSel, famSel.entries)
+                                    }
+                                }
+                            }
+
+                            FontLine {
+                                id: sizeLine
+                                title: "字号"
+                                locked: root.lockedByScheme("size")
+                                note: Theme.fontOverrideNote("size")
+                                FontField {
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    suffix: "px"
+                                    shown: root.view ? String(Math.round(root.view.fontPixelSize)) : ""
+                                    greyed: sizeLine.locked
+                                    onCommit: (v) => {
+                                        var n = parseInt(v)
+                                        if (!isNaN(n) && n >= 6 && n <= 72)
+                                            root.commandRequested("fontSize:" + n)
+                                    }
+                                }
+                            }
+
+                            /* 有"关"这一档的两行才放行首勾选框：不勾 = 跟随正文 / 跟随字体 */
+                            FontLine {
+                                id: cmtLine
+                                title: "单独设注释字号"
+                                checkable: true
+                                checked: root.view ? root.view.commentFontPixelSize > 0 : false
+                                locked: root.lockedByScheme("commentSize")
+                                note: Theme.fontOverrideNote("commentSize")
+                                onToggle: root.commandRequested(checked
+                                                               ? "commentFontSize:0"
+                                                               : "commentFontSize:"
+                                                                 + Math.round(root.view.fontPixelSize))
+                                FontField {
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    suffix: "px"
+                                    shown: root.view && root.view.commentFontPixelSize > 0
+                                           ? String(root.view.commentFontPixelSize) : ""
+                                    greyed: cmtLine.locked || !cmtLine.checked
+                                    onCommit: (v) => {
+                                        var n = parseInt(v)
+                                        if (!isNaN(n) && n >= 6 && n <= 72)
+                                            root.commandRequested("commentFontSize:" + n)
+                                    }
+                                }
+                            }
+
+                            FontLine {
+                                id: lhLine
+                                title: "自定义行高"
+                                checkable: true
+                                checked: root.view ? root.view.lineHeightFactor > 1.001 : false
+                                locked: root.lockedByScheme("lineHeight")
+                                note: Theme.fontOverrideNote("lineHeight")
+                                onToggle: root.commandRequested(checked ? "lineHeight:1.0"
+                                                                        : "lineHeight:1.15")
+                                FontField {
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    decimal: true
+                                    suffix: root.view
+                                            ? "倍 · 约 " + Math.round(root.view.naturalLineHeight
+                                                                      * root.view.lineHeightFactor) + " px"
+                                            : "倍"
+                                    shown: root.view ? root.view.lineHeightFactor.toFixed(2) : ""
+                                    greyed: lhLine.locked || !lhLine.checked
+                                    onCommit: (v) => {
+                                        var f = parseFloat(v)
+                                        if (!isNaN(f) && f >= 1.0 && f <= 3.0)
+                                            root.commandRequested("lineHeight:" + f.toFixed(2))
+                                    }
+                                }
+                            }
+
+                            FontLine {
+                                id: wrapLine
+                                title: "自动换行"
+                                checkable: true
+                                checked: root.view ? root.view.wrapEnabled : false
+                                locked: root.lockedByScheme("wrap")
+                                note: Theme.fontOverrideNote("wrap")
+                                onToggle: root.commandRequested("toggleWrap")
+                            }
+                        }
+
+                        FontGroupTitle { title: "终端" }
+
+                        Column {
+                            id: termRows
+                            width: parent.width
+                            spacing: 8
+
+                            FontLine {
+                                id: termFamLine
+                                title: "字体"
+                                locked: root.lockedByScheme("terminalFamily")
+                                note: Theme.fontOverrideNote("terminalFamily")
+                                FontSelect {
+                                    id: termFamSel
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    shown: root.termFamilyEff
+                                    greyed: termFamLine.locked
+                                    entries: root.familyEntries(root.termFamilyEff, "termFont:")
+                                    onOpenRequested: {
+                                        fontMenu.paneWidth = termFamSel.width
+                                        fontMenu.openFor(termFamSel, termFamSel.entries)
+                                    }
+                                }
+                            }
+
+                            FontLine {
+                                id: termSizeLine
+                                title: "字号"
+                                locked: root.lockedByScheme("terminalSize")
+                                note: Theme.fontOverrideNote("terminalSize")
+                                FontField {
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    suffix: "px"
+                                    shown: String(root.termSizeEff)
+                                    greyed: termSizeLine.locked
+                                    onCommit: (v) => {
+                                        var n = parseInt(v)
+                                        if (!isNaN(n) && n >= 8 && n <= 40)
+                                            root.commandRequested("termFontSize:" + n)
+                                    }
+                                }
+                            }
                         }
                     }
 
@@ -3378,39 +3910,64 @@ Window {
     
                             Repeater {
                                 model: [
-                                    { label: "字号 −", act: "fontSize:11" },
-                                    { label: "字号 +", act: "fontSize:14" },
-                                    { label: "行高 −", act: "lineHeightDown" },
-                                    { label: "行高 +", act: "lineHeightUp" },
-                                    { label: "重置缩放", act: "zoomReset" },
-                                    { label: "自动换行", act: "toggleWrap" }
+                                    { label: "字号 −", act: "fontSize:11",
+                                      locked: root.lockedByScheme("size") },
+                                    { label: "字号 +", act: "fontSize:14",
+                                      locked: root.lockedByScheme("size") },
+                                    { label: "行高 −", act: "lineHeightDown",
+                                      locked: root.lockedByScheme("lineHeight") },
+                                    { label: "行高 +", act: "lineHeightUp",
+                                      locked: root.lockedByScheme("lineHeight") },
+                                    /* 缩放是临时视图态（不落盘、也不在方案里），永远点得动 */
+                                    { label: "重置缩放", act: "zoomReset", locked: false },
+                                    { label: "自动换行", act: "toggleWrap",
+                                      locked: root.lockedByScheme("wrap") }
                                 ]
     
                                 delegate: Rectangle {
+                                    id: aboutBtn
                                     required property var modelData
+                                    /* 方案钉住的那一格：灰着、不响应点击，但**不消失** */
+                                    readonly property bool off: modelData.locked === true
                                     width: 86
                                     height: 24
                                     radius: 4
-                                    color: aboutBtnHit.containsMouse ? root.rowHover : "transparent"
+                                    opacity: off ? 0.45 : 1.0
+                                    color: !off && aboutBtnHit.containsMouse ? root.rowHover : "transparent"
                                     border.width: 1
                                     border.color: root.borderColor
     
                                     Text {
                                         anchors.centerIn: parent
                                         text: modelData.label
-                                        color: aboutBtnHit.containsMouse ? root.textBright : root.textColor
+                                        color: !off && aboutBtnHit.containsMouse ? root.textBright : root.textColor
                                         font.pixelSize: 12
                                     }
     
                                     MouseArea {
                                         id: aboutBtnHit
                                         anchors.fill: parent
+                                        enabled: !aboutBtn.off
                                         hoverEnabled: true
                                         cursorShape: Qt.PointingHandCursor
                                         onClicked: root.commandRequested(modelData.act)
                                     }
                                 }
                             }
+                        }
+    
+                        /*
+                         * 置灰不写清楚为什么，就是"按钮坏了"。这一行只在方案真的钉了
+                         * 某一项字体时出现，说的是去哪儿改。
+                         */
+                        Text {
+                            visible: root.schemeFontKeys.length > 0
+                            width: parent.width
+                            wrapMode: Text.WordWrap
+                            color: root.mutedColor
+                            font.pixelSize: 11
+                            text: "上面置灰的那几项由方案「" + Theme.scheme
+                                  + "」的 font 段定着，要改就去改那个文件（设置 → 配色方案 上面有路径）。"
                         }
                     }
                 }

@@ -132,6 +132,9 @@ QString keyOf(const QString &hex) {
     return hex.trimmed().toLower();
 }
 
+/* 定义在下面那个匿名 namespace 里（同一个未命名空间，先声明给 parseFontSection 用） */
+void appendErr(QString &err, const QString &file, const QString &what);
+
 /*
  * 方案文件里 ui 段的键：一个色值，后面可以跟 "@角色"（见 AppTheme::c）。
  * 键写错了查表永远查不到，界面上就是"我改了没变" —— 和值写错同一类，必须拦下来报出去。
@@ -225,6 +228,74 @@ const QHash<QString, QString> &uiDoc() {
         { QStringLiteral("#ff6b68"), QStringLiteral("语法：错误") },
     };
     return kDoc;
+}
+
+/*
+ * 方案 font 段的键 →界面上那一排菜单里的叫法。清单就是 Theme.h 上那个宏，
+ * 认键、报错时点名、置灰那格的提示三处都从这一份来。
+ */
+const QHash<QString, QString> &fontLabels() {
+    static const QHash<QString, QString> kLabels = [] {
+        QHash<QString, QString> m;
+#define F(key, label) m.insert(QString::fromLatin1(key), QStringLiteral(label));
+        SCHEMEFONT_CASE(F)
+#undef F
+        return m;
+    }();
+    return kLabels;
+}
+
+/*
+ * font 段：类型/范围不对的那一条丢掉并点名报出来，其余照用 —— 和 ui 段同一套规矩。
+ * 段里没有的键**不进 map**（调用点靠"有没有这个键"决定回不回落到注册表），
+ * 所以"方案没写字号"和"方案把字号写成 12"是两件事，别混。
+ */
+void parseFontSection(const QJsonObject &f, const QString &file, QVariantMap &out, QString &err)
+{
+    auto intInRange = [](const QJsonValue &v, int lo, int hi, int *got) {
+        if (!v.isDouble() || v.toDouble() != static_cast<double>(static_cast<int>(v.toDouble())))
+            return false;
+        *got = v.toInt();
+        return *got >= lo && *got <= hi;
+    };
+    for (auto it = f.constBegin(); it != f.constEnd(); ++it) {
+        const QString k = it.key();
+        const QJsonValue v = it.value();
+        int n = 0;
+        double d = 0.0;
+        if (!fontLabels().contains(k)) {
+            appendErr(err, file, QStringLiteral("font 段没有 \"%1\" 这一项（认的：%2），这条没有生效")
+                                    .arg(k).arg(QStringList(fontLabels().keys()).join(QStringLiteral(" / "))));
+            continue;
+        }
+        bool ok = false;
+        if (k == QLatin1String(SchemeFont::kFamily) || k == QLatin1String(SchemeFont::kTerminalFamily)) {
+            /* 字体名必须是**英文家族名**：Scintilla 走 toLatin1，中文名会压成问号 */
+            ok = v.isString() && !v.toString().trimmed().isEmpty();
+            if (ok)
+                out.insert(k, v.toString().trimmed());
+        } else if (k == QLatin1String(SchemeFont::kWrap)) {
+            ok = v.isBool();
+            if (ok)
+                out.insert(k, v.toBool());
+        } else if (k == QLatin1String(SchemeFont::kCommentSize)) {
+            ok = intInRange(v, 0, 72, &n);      // 0 = 跟随正文
+            if (ok)
+                out.insert(k, n);
+        } else if (k == QLatin1String(SchemeFont::kSize)
+                   || k == QLatin1String(SchemeFont::kTerminalSize)) {
+            ok = intInRange(v, 6, 72, &n);
+            if (ok)
+                out.insert(k, n);
+        } else {                                  // lineHeight
+            ok = v.isDouble() && (d = v.toDouble()) >= 1.0 && d <= 3.0;
+            if (ok)
+                out.insert(k, d);
+        }
+        if (!ok)
+            appendErr(err, file, QStringLiteral("font.%1（%2）的值 %3 不对或超出范围，这条没有生效")
+                                    .arg(k, fontLabels().value(k), v.toVariant().toString()));
+    }
 }
 
 }  // namespace
@@ -330,6 +401,7 @@ void AppTheme::applyScheme(const QString &name)
     const QString want = name.isEmpty() ? QStringLiteral("Dark") : name;
     QHash<QString, QString> ui;
     QVector<QColor> ansi(16);        // 全 invalid = 用 libvterm 自带那一份
+    QVariantMap font;                // 只放方案写了的那几项（空 = 字体全凭注册表）
     bool light = false;
     QString err;
     /*
@@ -418,6 +490,13 @@ void AppTheme::applyScheme(const QString &name)
                 }
                 ansi[idx] = QColor(v);
             }
+            /* font 段：字体 / 字号 / 注释字号 / 行高 / 自动换行 / 终端那两项 */
+            if (o.contains(QStringLiteral("font")) && !o.value(QStringLiteral("font")).isObject()) {
+                appendErr(err, file, QStringLiteral("font 要是一个对象（\"font\": { \"size\": 14 }），"
+                                                    "这一整段没有生效"));
+            } else {
+                parseFontSection(o.value(QStringLiteral("font")).toObject(), file, font, err);
+            }
         }
     }
 
@@ -430,6 +509,7 @@ void AppTheme::applyScheme(const QString &name)
 
     m_ui = ui;
     m_ansi = ansi;
+    m_font = font;
     m_light = light;
     m_scheme = want;
     m_error = err;
@@ -496,6 +576,15 @@ QVector<QColor> AppTheme::ansiPalette() const {
     return any ? m_ansi : QVector<QColor> {};
 }
 
+QString AppTheme::fontOverrideNote(const QString &key) const
+{
+    /* 没被方案定住 → 空串：调用点直接把它当提示文字用，空就是"没有提示" */
+    if (!m_font.contains(key))
+        return QString();
+    return QStringLiteral("%1由方案「%2」的 font 段指定，要改就去改那个文件")
+        .arg(fontLabels().value(key, key), m_scheme);
+}
+
 QString AppTheme::saveSchemeAs(const QString &name)
 {
     const QString clean = name.trimmed();
@@ -518,6 +607,10 @@ QString AppTheme::saveSchemeAs(const QString &name)
     for (int i = 0; i < m_ansi.size() && i < 16; ++i)
         if (m_ansi.at(i).isValid())
             term.insert(QString::number(i), m_ansi.at(i).name());
+    /* 字体那几项只写"方案里真的定了的"：另存为不该顺手把注册表里那套钉死 */
+    QJsonObject font;
+    for (auto it = m_font.constBegin(); it != m_font.constEnd(); ++it)
+        font.insert(it.key(), QJsonValue::fromVariant(it.value()));
     QJsonObject doc;
     for (auto it = uiDoc().constBegin(); it != uiDoc().constEnd(); ++it)
         doc.insert(it.key(), it.value());
@@ -533,11 +626,17 @@ QString AppTheme::saveSchemeAs(const QString &name)
                             "没写的键沿用 basedOn 那一档。同一个深色值在界面上担两个角色时，"
                             "可以用 色值@角色 单独指一个（例如 #1e1f22@tabstrip 只管页签条底，"
                             "裸 #1e1f22 管编辑区纸色）。terminal 的键是 0~15 号 ANSI 色。"
+                            "font 那一段管字体：family 字体、size 字号(6~72)、commentSize 注释字号(0=跟随正文)、"
+                            "lineHeight 行高倍数(1.0~3.0)、wrap 自动换行(true/false)、"
+                            "terminalFamily 终端字体、terminalSize 终端字号；"
+                            "写了哪几项就以方案为准（界面对应那排按钮会置灰），没写的项照用设置里那个值。"
                             "改完保存，界面立刻生效；_doc/_说明 只是给人看的，程序不读。"));
     o.insert(QStringLiteral("_doc"), doc);
     o.insert(QStringLiteral("ui"), ui);
     if (!term.isEmpty())
         o.insert(QStringLiteral("terminal"), term);
+    if (!font.isEmpty())
+        o.insert(QStringLiteral("font"), font);
 
     const QString dir = schemesDirPath();
     if (!QDir().mkpath(dir))

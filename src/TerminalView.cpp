@@ -226,7 +226,8 @@ TerminalView::TerminalView(QQuickItem *parent) : QQuickItem(parent)
      * 两张表都在 src/Theme.cpp（见 AppTheme::ansiPalette）。
      */
     if (AppTheme *th = AppTheme::instance())
-        connect(th, &AppTheme::lightChanged, this, &TerminalView::applyAnsiPalette);
+        connect(th, &AppTheme::lightChanged, this,
+                [this] { applyAnsiPalette(); applySchemeFont(); });
 
     m_blink = new QTimer(this);
     m_blink->setInterval(530);
@@ -246,6 +247,7 @@ void TerminalView::componentComplete()
     QQuickItem::componentComplete();
     m_engine->setDefaultColors(m_fg, m_bg);
     applyAnsiPalette();
+    applySchemeFont();
     relayout();
 }
 
@@ -256,6 +258,38 @@ void TerminalView::applyAnsiPalette()
     update();
 }
 
+/*
+ * 方案 font 段里终端那两项（terminalFamily / terminalSize）。
+ *
+ * 走 C++ 而不是在 QML 里绑 Theme.fontOverride：换方案时那两条绑定不会重算
+ * （自检那条判据量到的还是 13，见 TerminalPanel.qml 里那段说明）。ANSI 那 16
+ * 色一直是这个走法，实测是活的，两件事就并成一条路。
+ *
+ * 账分两本：m_fontFamily / m_fontSize 是**基线**（设置里那位用户自己选的，由 QML 灌进来），
+ * m_usedFamily / m_usedSize 是**这一帧真正拿来画字的**。方案钉住就用方案的，没钉就退回基线
+ * —— 所以"改基线"和"换方案"两条路都只要重算这一处。
+ */
+void TerminalView::applySchemeFont()
+{
+    QString fam = m_fontFamily;
+    qreal px = m_fontSize;
+    if (AppTheme *th = AppTheme::instance()) {
+        const QVariantMap o = th->fontOverride();
+        const QString sf = o.value(QLatin1String(SchemeFont::kTerminalFamily)).toString();
+        const qreal sfp = o.value(QLatin1String(SchemeFont::kTerminalSize)).toReal();
+        if (!sf.isEmpty())
+            fam = sf;
+        if (sfp > 0)
+            px = sfp;
+    }
+    if (fam == m_usedFamily && qFuzzyCompare(px, m_usedSize))
+        return;                 // 方案钉住时改基线，用的还是方案那个值：不该重排一次
+    m_usedFamily = fam;
+    m_usedSize = px;
+    rebuildFont();
+    relayout();
+}
+
 // ------------------------------------------------------------------ 外观
 
 void TerminalView::setFontFamily(const QString &name)
@@ -263,8 +297,7 @@ void TerminalView::setFontFamily(const QString &name)
     if (m_fontFamily == name)
         return;
     m_fontFamily = name;
-    rebuildFont();
-    relayout();
+    applySchemeFont();
 }
 
 void TerminalView::setFontSize(qreal pixels)
@@ -272,8 +305,7 @@ void TerminalView::setFontSize(qreal pixels)
     if (qFuzzyCompare(m_fontSize, pixels) || pixels <= 0)
         return;
     m_fontSize = pixels;
-    rebuildFont();
-    relayout();
+    applySchemeFont();
 }
 
 void TerminalView::rebuildFont()
@@ -284,11 +316,11 @@ void TerminalView::rebuildFont()
      * 让 ASCII 拿到等宽字形，中文再回退到雅黑。只写一个族的话中文会被 Qt 随便挑一个
      * 比例字体顶上，宽度就不是两倍格宽了 —— 中文对齐全靠这条。
      */
-    m_font.setFamilies({ m_fontFamily, QStringLiteral("Consolas"),
+    m_font.setFamilies({ m_usedFamily, QStringLiteral("Consolas"),
                          QStringLiteral("Courier New"), QStringLiteral("Microsoft YaHei") });
     m_font.setStyleHint(QFont::Monospace);
     m_font.setFixedPitch(true);
-    m_font.setPixelSize(qMax(6, int(m_fontSize)));
+    m_font.setPixelSize(qMax(6, int(m_usedSize)));
 
     const QFontMetricsF fm(m_font);
     /*

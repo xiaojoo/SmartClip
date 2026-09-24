@@ -5,10 +5,37 @@
 #include <QObject>
 #include <QString>
 #include <QStringList>
+#include <QVariantMap>
 #include <QVector>
 
 class QFileSystemWatcher;
 class QTimer;
+
+/*
+ * 方案 font 段认的那七个键（名字就是文件里写的名字）。
+ * Theme.cpp 校验用、Main.qml / 菜单 / 设置面板查"这一项被方案定了没"也用，
+ * 两边各写一份字符串迟早对不上号。
+ */
+namespace SchemeFont {
+inline constexpr const char *kFamily = "family";
+inline constexpr const char *kSize = "size";
+inline constexpr const char *kCommentSize = "commentSize";
+inline constexpr const char *kLineHeight = "lineHeight";
+inline constexpr const char *kWrap = "wrap";
+inline constexpr const char *kTerminalFamily = "terminalFamily";
+inline constexpr const char *kTerminalSize = "terminalSize";
+}  // namespace SchemeFont
+
+/*
+ * 一份清单两用的宏：Theme.cpp 里靠它认"font 段有哪几项"（写错项名的键会被点名报出去，
+ * 而不是像以前那样静默无效），fontOverrideNote() 也用它取"这一项在界面上叫什么"。
+ * 值怎么校验按类型分在 Theme.cpp 的那一串 if 里。
+ */
+#define SCHEMEFONT_CASE(F)                                                        \
+    F(SchemeFont::kFamily, "字体") F(SchemeFont::kSize, "字号")                   \
+    F(SchemeFont::kCommentSize, "注释字号") F(SchemeFont::kLineHeight, "行高")    \
+    F(SchemeFont::kWrap, "自动换行")                                              \
+    F(SchemeFont::kTerminalFamily, "终端字体") F(SchemeFont::kTerminalSize, "终端字号")
 
 /*
  * 主题（QML 单例 Theme，注册见 src/main.cpp；色表在 src/Theme.cpp）。
@@ -73,6 +100,14 @@ class AppTheme final : public QObject {
     Q_PROPERTY(QString schemeError READ schemeError NOTIFY schemeErrorChanged)
     Q_PROPERTY(QStringList schemeNames READ schemeNames NOTIFY schemeFilesChanged)
 
+    /*
+     * 方案里的 font 段：字体 / 字号 / 注释字号 / 行高 / 自动换行 / 终端字体。
+     * **只含方案写了的那几项** —— 没写的键由调用点（Main.qml）退回注册表里
+     * 用户自己设的那个值，注册表永远不会被方案写脏。
+     * NOTIFY 挂 revChanged：换方案必然 +1，比再开一个信号少一处会漏发的地方。
+     */
+    Q_PROPERTY(QVariantMap fontOverride READ fontOverride NOTIFY revChanged)
+
 public:
     explicit AppTheme(QObject *parent = nullptr);
 
@@ -133,6 +168,15 @@ public:
      */
     Q_INVOKABLE QString saveSchemeAs(const QString &name);
 
+    QVariantMap fontOverride() const { return m_font; }
+    /* 方案有没有指定这一项（菜单/设置里那排按钮据此置灰） */
+    Q_INVOKABLE bool fontOverridden(const QString &key) const { return m_font.contains(key); }
+    /*
+     * 置灰那一格上写的提示，一句话带方案名："字号由方案 my 的 font 段指定"。
+     * 由这里统一出：菜单和设置面板两处要说同一句话，写两遍迟早对上号。
+     */
+    Q_INVOKABLE QString fontOverrideNote(const QString &key) const;
+
     /* 落盘用的键（QSettings：ui/theme = "light" / "dark"，ui/scheme = 方案名） */
     static constexpr const char *kKey = "ui/theme";
     static constexpr const char *kSchemeKey = "ui/scheme";
@@ -152,6 +196,9 @@ private:
     QHash<QString, QString> m_ui;
     /* 16 项按索引对齐；invalid = 这一格用 libvterm 自带 */
     QVector<QColor> m_ansi;
+    /* font 段：只放方案里写了的那几项（family / size / commentSize / lineHeight /
+       wrap / terminalFamily / terminalSize） */
+    QVariantMap m_font;
     QString m_error;
 
     /* 读文件 + 合并 + 记账（m_ui / m_ansi / m_error / m_light），最后发信号 */

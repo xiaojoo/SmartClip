@@ -95,8 +95,40 @@ public:
 
 }  // namespace
 
+/*
+ * 把 Qt 那一句 "Update called for a item without content" 精确丢掉，其余原样交回。
+ *
+ * 为什么可以丢：这句是 Qt 自己在 `QQuickItem::update()` 里喊的（Qt6Quickd.dll 里能
+ * 搜到同一串字面量），喊完就 return —— 也就是说**这次重画请求本来就被丢掉了**，
+ * 我们并没有少画一帧；等这个 item 真挂进窗口、场景图自己会把它标脏。
+ * 本工程唯一一处自调 update()（EditorViewItem::restyleForTheme）已经加了 window
+ * 判断挡掉，剩下这些是 Qt 内部对"建出来但还没挂窗口"的那几栏（分栏的镜像栏、
+ * 对比页那两栏）调出来的，量级一次启动几十条。
+ *
+ * 不静默：计数器留着，自检末尾那行会把"吞了多少条"打出来，吞多了看得见。
+ */
+namespace {
+
+QtMessageHandler g_nextMsgHandler = nullptr;
+int g_droppedWindowlessUpdates = 0;
+
+void dropWindowlessUpdateMsg(QtMsgType type, const QMessageLogContext &ctx, const QString &msg) {
+    if (msg.endsWith(QLatin1String("Update called for a item without content"))) {
+        ++g_droppedWindowlessUpdates;
+        return;
+    }
+    if (g_nextMsgHandler)
+        g_nextMsgHandler(type, ctx, msg);
+}
+
+}  // namespace
+
+int droppedWindowlessUpdateWarnings() { return g_droppedWindowlessUpdates; }
+
 int main(int argc, char *argv[]) {
     QApplication app(argc, argv);
+    /* 见上面 dropWindowlessUpdateMsg 那段：只丢那一句，其余交回默认处理器 */
+    g_nextMsgHandler = qInstallMessageHandler(dropWindowlessUpdateMsg);
     app.setOrganizationName("SmartClip");
     app.setApplicationName("SmartClip");
     /*

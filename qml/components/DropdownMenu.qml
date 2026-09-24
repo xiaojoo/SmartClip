@@ -139,8 +139,11 @@ Popup {
      *
      * menuWidth 保留成"只有主菜单时弹窗有多宽"，openFor / openAtPoint 的
      * 贴边夹取和老的自检值都还用这个数（两者现在相等）。
+     *
+     * 做成可写的：设置 → 字体 那两个下拉要**和触发它的那个框同宽**（他圈的就是
+     * "弹出来的比框宽一截"）。默认还是 244，别处不写就一个字没变。
      */
-    readonly property real paneWidth: 244
+    property real paneWidth: 244
     readonly property real menuWidth: paneWidth
 
     /*

@@ -473,6 +473,29 @@ function rulerColumnItems(view) {
     return out
 }
 
+/*
+ * 配色方案的 font 段钉住了某一项时，菜单上那一组置灰、组标题写明是谁定的。
+ *
+ * ov.fontLock 由 QML 侧拼进来（Main.qml 的 fontLock / TopBar.menuOv）：菜单构造器
+ * 待在 js 里，够不着 Theme 单例，只能靠状态包带。包不在（别的调用点、直接
+ * settingsMenu(view) 的旧写法）就一切照旧 —— 别因为读不到就把整排点亮死。
+ */
+function fontLockOf(ov, key) {
+    var f = ov && ov.fontLock
+    return f && f[key] && f[key].on ? f[key] : null
+}
+function lockHead(label, l) {
+    return l && l.note ? label + "（" + l.note + "）" : label
+}
+function lockItems(list, l) {
+    if (!l)
+        return list
+    for (var i = 0; i < list.length; ++i)
+        if (list[i] && list[i].act !== undefined)
+            list[i].disabled = true
+    return list
+}
+
 function settingsMenu(view, ov) {
     var hasDoc = !!view && view.hasDocument
     var items = []
@@ -480,27 +503,32 @@ function settingsMenu(view, ov) {
     items.push({ label: "打开设置面板…", act: "settings", icon: "gear" })
     /* 剪贴板内容存哪儿、导入了哪些外部文件夹 —— 直接翻到"存储"那一栏 */
     items.push({ label: "存储与保存位置…", act: "storage", icon: "folder" })
+    /* 方案钉住了哪几项：钉住的那一组整排置灰，组标题带上"由方案 X 定" */
+    var lSize = fontLockOf(ov, "size")
+    var lComment = fontLockOf(ov, "commentSize")
+    var lFamily = fontLockOf(ov, "family")
+    var lLine = fontLockOf(ov, "lineHeight")
     items.push({ separator: true })
-    items.push({ label: "字号", icon: "zoom-reset", disabled: true })
-    var sizes = fontSizeItems(view)
+    items.push({ label: lockHead("字号", lSize), icon: "zoom-reset", disabled: true })
+    var sizes = lockItems(fontSizeItems(view), lSize)
     for (var i = 0; i < sizes.length; ++i)
         items.push(sizes[i])
 
     items.push({ separator: true })
-    items.push({ label: "注释字号", icon: "comment", disabled: true })
-    var commentSizes = commentFontSizeItems(view)
+    items.push({ label: lockHead("注释字号", lComment), icon: "comment", disabled: true })
+    var commentSizes = lockItems(commentFontSizeItems(view), lComment)
     for (var c = 0; c < commentSizes.length; ++c)
         items.push(commentSizes[c])
 
     items.push({ separator: true })
-    items.push({ label: "字体", icon: "gear", disabled: true })
-    var families = fontFamilyItems(view)
+    items.push({ label: lockHead("字体", lFamily), icon: "gear", disabled: true })
+    var families = lockItems(fontFamilyItems(view), lFamily)
     for (var f = 0; f < families.length; ++f)
         items.push(families[f])
 
     items.push({ separator: true })
-    items.push({ label: "行高", icon: "line-height", disabled: true })
-    var heights = lineHeightItems(view)
+    items.push({ label: lockHead("行高", lLine), icon: "line-height", disabled: true })
+    var heights = lockItems(lineHeightItems(view), lLine)
     for (var h = 0; h < heights.length; ++h)
         items.push(heights[h])
 
@@ -511,8 +539,9 @@ function settingsMenu(view, ov) {
         items.push(cols[r])
 
     items.push({ separator: true })
-    items.push({ label: "自动换行", act: "toggleWrap", icon: "wrap",
-                 checked: !!view && view.wrapEnabled })
+    var lWrap = fontLockOf(ov, "wrap")
+    items.push({ label: lockHead("自动换行", lWrap), act: "toggleWrap", icon: "wrap",
+                 checked: !!view && view.wrapEnabled, disabled: !!lWrap })
     items.push({ label: "显示行号", act: "toggleLineNumbers", icon: "numbers",
                  checked: !!view && view.lineNumbersVisible })
     items.push({ label: "显示空白字符", act: "toggleWhitespace", icon: "whitespace",

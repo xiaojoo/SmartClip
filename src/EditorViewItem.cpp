@@ -1739,7 +1739,17 @@ void EditorViewItem::restyleForTheme() {
     applyFoldMarkers();
     /* 滚动条和右键菜单的调色板 */
     styleChrome();
-    update();
+    /*
+     * 没挂进窗口的时候别请求重画：`QQuickItem::update()` 在这种情况下**本来就什么都不做**
+     * （Qt 自己在 qquickitem.cpp 里 qWarning 一句 "Update called for a item without
+     * content" 就返回），所以这一句挡掉的只有刷屏的日志，不会丢一次重画 —— 项挂进窗口
+     * 之后场景图自己会把它标脏。
+     *
+     * 为什么老是被触发：换主题 / 换配色方案会 restyle 每一栏，而第二栏（分栏那个
+     * mirrorView）在没分栏时是**建出来了但没挂窗口**的，于是每翻一次档就叫一声。
+     */
+    if (window())
+        update();
 }
 
 void EditorViewItem::applyViewOptions() {

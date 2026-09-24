@@ -150,6 +150,14 @@ public:
     qreal fontSize() const { return m_fontSize; }
     void setFontSize(qreal pixels);
 
+    /*
+     * 真正用来画字的那对值（= 基线被方案 font 段盖过之后的结果）。
+     * fontFamily / fontSize 那两个属性报的是**基线**（用户在设置里选的），所以自检
+     * 要看"方案生效没"必须读这两个，别读那两本账里的另一本。
+     */
+    Q_INVOKABLE qreal usedFontPixelSizeForTest() const { return m_usedSize; }
+    Q_INVOKABLE QString usedFontFamilyForTest() const { return m_usedFamily; }
+
     QColor foregroundColor() const { return m_fg; }
     void setForegroundColor(const QColor &c);
     QColor backgroundColor() const { return m_bg; }
@@ -224,6 +232,11 @@ private:
     void relayout();
     /* 按当前主题档把 ANSI 16 色推给引擎（浅色一套，深色退回 libvterm 自带） */
     void applyAnsiPalette();
+    /*
+     * 按当前配色方案的 font 段钉一下终端字体（terminalFamily / terminalSize）。
+     * 没钉的那一项回到 QML 给的那个基线值。
+     */
+    void applySchemeFont();
     void checkScreenForBlack();
     void drawRow(QPainter *painter, int viewRow, int docRow);
     /* 视图里第 i 行 -> 文档行号（负数 = 回滚区） */
@@ -241,8 +254,12 @@ private:
     TerminalEngine *m_engine = nullptr;
     QVector<TerminalCell> m_rowScratch;
 
-    QString m_fontFamily;
+    /* 基线：设置里那位用户自己选的（由 QML 灌进来） */
+    QString m_fontFamily = QStringLiteral("Cascadia Mono");
     qreal m_fontSize = 13;
+    /* 实际用来画字的：基线被方案钉住时就是方案那个值（见 applySchemeFont） */
+    QString m_usedFamily = QStringLiteral("Cascadia Mono");
+    qreal m_usedSize = 13;
     QColor m_fg { QStringLiteral("#d4d4d4") };
     QColor m_bg { QStringLiteral("#1e1f22") };
     /* updatePaintNode 用的画布：尺寸不对就重建，避免每帧 malloc 一张 4K 图 */

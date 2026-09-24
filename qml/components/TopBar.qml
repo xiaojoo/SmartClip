@@ -33,6 +33,12 @@ Rectangle {
      * 菜单条目里硬编码的那份只是出厂默认，用户改过键之后要以这份为准。
      */
     property var shortcuts: []
+    /*
+     * 配色方案的 font 段钉住了哪几项（由 Main.qml 传进来，形状见那边的 fontLock）。
+     * 菜单构造器在 js 里，够不着 Theme 单例，只能靠这个包把"钉住了"带过去 ——
+     * 钉住的条目要置灰，组标题还要写上"由方案 X 定"。
+     */
+    property var fontLock: ({})
 
     signal openMenu(Item anchor, var items)
     signal searchChanged(string text)
@@ -86,17 +92,24 @@ Rectangle {
     /*
      * 菜单条目。
      *
-     * 第三个参数把"用户改过的快捷键"覆盖表带进去（name -> 组合键），
-     * 没改过的动作不在表里，菜单就用 EditorMenus.js 里的出厂默认值。
+     * 第三个参数是状态包（见下面的 menuOv）：一是"用户改过的快捷键"覆盖表
+     * （name -> 组合键，没改过的动作不在表里，菜单用 js 里的出厂默认值），
+     * 二是配色方案钉住了哪几项字体。
      */
     function menuItems(label) {
+        return Menus.menuItems(label, root.view, root.menuOv())
+    }
+
+    /* 状态包：快捷键覆盖 + 方案钉住的字体项（自检那边走 Main.qml 的 menuOv，同一形状） */
+    function menuOv() {
         var ov = ({})
         for (var i = 0; i < (root.shortcuts ? root.shortcuts.length : 0); ++i) {
             var item = root.shortcuts[i]
             if (item && item.name)
                 ov[item.name] = item.shortcut
         }
-        return Menus.menuItems(label, root.view, ov)
+        ov.fontLock = root.fontLock
+        return ov
     }
 
     /*

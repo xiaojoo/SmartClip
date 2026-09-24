@@ -75,6 +75,31 @@ Rectangle {
         ListElement { title: "终端" }
     }
     property int current: 0
+    /*
+     * 终端字体的**基线**（用户在 设置 → 字体 里选的那一档，启动时由 Main.qml 从
+     * 注册表灌进来）。配色方案的 font 段可以钉住这两项 —— 钉住时真正用来画字的是
+     * 方案那个值，那个覆盖在 TerminalView::applySchemeFont 里合，不在这里。
+     */
+    property string termFamily: "Cascadia Mono"
+    property int termSize: 13
+
+    /*
+     * 把基线显式推到每个会话的视图上。**不走委托里的绑定**：这个委托里的绑定换值
+     * 不会重算 —— 自检量过两次（一次绑 Theme.fontOverride，一次绑 root.termSize，
+     * 面板属性明明到了 16，视图上还是 13），改成"变了就再推一遍"。
+     * 显式赋值同时把那两条绑定彻底替掉，所以后面不会再有"绑定和值打架"。
+     */
+    function applyTermFont() {
+        for (var i = 0; i < views.count; ++i) {
+            const d = views.itemAt(i)
+            if (!d || !d.terminal)
+                continue
+            d.terminal.fontFamily = root.termFamily
+            d.terminal.fontSize = root.termSize
+        }
+    }
+    onTermFamilyChanged: applyTermFont()
+    onTermSizeChanged: applyTermFont()
     /* 自检要读：面板有没有真被开出来、槽位要多高（红的时候靠这两个值定位） */
     readonly property int sessionCount: sessionModel.count
     readonly property real wantedHeight: Layout.preferredHeight
@@ -132,6 +157,15 @@ Rectangle {
     /* 自检用：顶边那条拖高度的把手（按住期间光标要钉在上下拉伸上） */
     function stripItem() {
         return resizeStrip
+    }
+
+    /*
+     * 自检用：把面板自己交给 C++（Repeater 里的 delegate 和这块面板都从外面
+     * findChild 够不到）。判"设置里改了终端字号，值有没有一路走到视图"时，
+     * 要能分开断在哪一段：面板的基线属性、还是视图上的绑定。
+     */
+    function selfTestPanel() {
+        return root
     }
 
     /*
@@ -448,15 +482,24 @@ Rectangle {
                             anchors.fill: parent
                             focus: visible
 
-                            /* 字号跟主窗口那条"编辑器字号"不是一回事，这里给一个终端常用的档 */
-                            fontFamily: "Cascadia Mono"
-                            fontSize: 13
+                            /*
+                             * 字号/字体**不在这里绑**：绑的是面板的基线（root.termFamily /
+                             * root.termSize，设置 → 字体 里那一档），而这个委托里的绑定换值
+                             * 不重算（自检量过两次，见上面 applyTermFont 那段）—— 所以由
+                             * 面板显式推：建出来推一次（下面 Component.onCompleted）、
+                             * 基线变了再推一遍（onTermSizeChanged）。
+                             * 配色方案的 font 段要钉这两项时，真正用来画字的值在
+                             * TerminalView::applySchemeFont 里合，不经过这里。
+                             */
                             foregroundColor: Theme.c("#d4d4d4", Theme.rev)
                             backgroundColor: root.cardColor
                             padding: 6
                             cornerRadius: root.cardRadius - 2
 
                             Component.onCompleted: {
+                                /* 基线先灌上（新开会话也带着当前那一档，不靠绑定） */
+                                fontFamily = root.termFamily
+                                fontSize = root.termSize
                                 /* 空 = 系统默认 shell；工作目录空 = 用户主目录 */
                                 start("", "")
                             }

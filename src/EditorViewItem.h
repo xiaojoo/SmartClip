@@ -23,6 +23,13 @@ class QWidget;
 class QsciScintilla;
 class QsciLexer;
 
+/*
+ * 启动以来被丢掉的那句 Qt 内部警告有多少条（"Update called for a item without
+ * content"，定义在 src/main.cpp 的消息处理器里）。自检末尾把它打出来：
+ * 丢日志这件事不能是静默的，吞多了要看得见。
+ */
+int droppedWindowlessUpdateWarnings();
+
 class ClipboardStore;
 
 /*

@@ -104,6 +104,92 @@ Rectangle {
     readonly property var view: editor.view
 
     /* ------------------------------------------------------------------
+     * 字体这几项的两个来源：注册表（用户自己在菜单里设的）+ 方案文件的 font 段
+     * ---------------------------------------------------------------- */
+
+    /*
+     * 注册表里那份**原样**的备份。方案可以覆盖显示出来的值，但永远不写回注册表
+     * —— 换掉或删掉方案那一项，界面就得回到用户自己设的那个，而不是回到 12。
+     * 键名和 Theme.h 那个 SCHEMEFONT_CASE 清单一一对应；终端那两项不在这里，
+     * 它由 TerminalView 自己在 C++ 侧应用（见那边的 applySchemeFont）。
+     */
+    property var storedFont: ({ family: "Consolas", size: 12, commentSize: 0,
+                                lineHeight: 1.0, wrap: false })
+    /* 这一项现在生效的是哪个值：方案写了就以方案为准，没写就用注册表那份 */
+    function fontEffective(key) {
+        const o = Theme.fontOverride
+        return o[key] !== undefined ? o[key] : storedFont[key]
+    }
+
+    /* 方案有没有钉住这一项（菜单和设置面板那一排按钮据此置灰） */
+    function fontLocked(key) {
+        return Theme.fontOverridden(key)
+    }
+
+    /*
+     * 给菜单构造器（js/EditorMenus.js 的 settingsMenu）那一包：
+     * 每一项带"钉没钉" + 置灰那格上写的一句话。
+     *
+     * 表达式开头读一下 Theme.scheme 是**这条绑定的扳机**：QML 不追函数调用内部的
+     * 依赖（lockOne 里读的东西它看不见），换方案时整条不重算就会一直摆着旧状态。
+     * 文案走 Theme.fontOverrideNote()，和设置面板那排按钮同一份，写两遍迟早对不上。
+     */
+    /*
+     * 构造菜单时的那个状态包：快捷键覆盖 + 方案钉住的字体项。
+     * 自检读的就是这份（settingsMenuActs），弹出来的那份走 TopBar —— 两边都得带上
+     * fontLock，否则自检量到的是"没置灰"的那一份，界面上置灰了它也不知道。
+     */
+    function menuOv() {
+        var b = shortcutOverrides()
+        b.fontLock = fontLock
+        return b
+    }
+
+    function lockOne(k) { return { on: Theme.fontOverridden(k), note: Theme.fontOverrideNote(k) } }
+    property var fontLock: ({ scheme: Theme.scheme,
+                               size: lockOne("size"),
+                               commentSize: lockOne("commentSize"),
+                               family: lockOne("family"),
+                               lineHeight: lockOne("lineHeight"),
+                               wrap: lockOne("wrap") })
+
+    /*
+     * 把生效值推到视图上。启动时推一次、换方案 / 改完方案文件热加载时再推一次
+     * （Theme 的 rev 每换一次方案必 +1，绑在它身上就够）。
+     *
+     * 字号走 editor.editorFontSize：view.fontPixelSize 一直绑着它，直接给
+     * fontPixelSize 赋值会把那条绑定打断（见 EditorArea.qml 里那段的说明）。
+     */
+    function applyFontScheme() {
+        /*
+         * 每个写入都**先比一下**：字号那一改是整篇重排（Scintilla 要重算每一行的
+         * 行高），而 revChanged 在方案自检里会被打好几回 —— 值没变就别白重排一次。
+         */
+        const size = fontEffective("size")
+        if (editor.editorFontSize !== size)
+            editor.editorFontSize = size      // 走绑定，别直接写 view.fontPixelSize
+        const fam = fontEffective("family")
+        const csize = fontEffective("commentSize")
+        const lh = fontEffective("lineHeight")
+        const wrap = fontEffective("wrap")
+        applyToPanes(function (v) {
+            if (v.fontFamily !== fam)
+                v.fontFamily = fam
+            if (v.commentFontPixelSize !== csize)
+                v.commentFontPixelSize = csize
+            if (v.lineHeightFactor !== lh)
+                v.lineHeightFactor = lh
+            if (v.wrapEnabled !== wrap)
+                v.wrapEnabled = wrap
+        })
+    }
+
+    Connections {
+        target: Theme
+        function onRevChanged() { window.applyFontScheme() }
+    }
+
+    /* ------------------------------------------------------------------
      * Markdown 预览（见 qml/components/MarkdownView.qml）
      * ---------------------------------------------------------------- */
 
@@ -1374,10 +1460,27 @@ Rectangle {
      * 有一份，自检要认的就是它到底给了哪几档。
      */
     function settingsMenuActs() {
-        var items = Menus.settingsMenu(activeView(), shortcutOverrides())
+        var items = Menus.settingsMenu(activeView(), menuOv())
         var out = []
         for (var i = 0; i < items.length; ++i) {
             if (items[i] && items[i].act !== undefined)
+                out.push(String(items[i].act))
+        }
+        return out
+    }
+
+    /*
+     * 设置菜单里**当前是灰的**那些条目的动作名（自检核对用）。
+     *
+     * 单独报一条清单，是因为"方案钉住了字号"这件事有两种坏法：一种是没置灰
+     * （用户按下去看着改了，下次重推又被盖掉），另一种是全都灰了（扳机没接上，
+     * 换方案时没重算）。只看生效字号分不出这两种，看这份清单能。
+     */
+    function settingsMenuLockedActs() {
+        var items = Menus.settingsMenu(activeView(), menuOv())
+        var out = []
+        for (var i = 0; i < items.length; ++i) {
+            if (items[i] && items[i].act !== undefined && items[i].disabled === true)
                 out.push(String(items[i].act))
         }
         return out
@@ -2199,6 +2302,27 @@ Rectangle {
         if (act === undefined || act === null || act === "" || act === "none")
             return
 
+        /*
+         * 方案钉住的那几项在这儿再拦一道。菜单条目本身是置灰的（走不到这里），
+         * 但字号/行高这些还有**快捷键**——QAction 在 C++ 侧注册，直接发命令过来，
+         * 绕得过界面那排灰按钮。不拦的话按一下就真改设置（还会写回注册表），
+         * 下一次重推又被方案盖掉，看着像"设置存不住"。
+         */
+        var lockKey = ""
+        if (act.indexOf("fontSize:") === 0)
+            lockKey = "size"
+        else if (act.indexOf("commentFontSize:") === 0)
+            lockKey = "commentSize"
+        else if (act.indexOf("font:") === 0)
+            lockKey = "family"
+        else if (act.indexOf("lineHeight:") === 0 || act === "lineHeightDown"
+                 || act === "lineHeightUp")
+            lockKey = "lineHeight"
+        else if (act === "toggleWrap")
+            lockKey = "wrap"
+        if (lockKey !== "" && fontLocked(lockKey))
+            return
+
         /* ---- 带参数的命令 ---- */
         if (act.indexOf("fontSize:") === 0) {
             var px = parseInt(act.substring(9))
@@ -2229,6 +2353,24 @@ Rectangle {
             var nextLh = Menus.stepLineHeight(view.lineHeightFactor,
                                               act === "lineHeightUp" ? 1 : -1)
             applyToPanes(function (v) { v.lineHeightFactor = nextLh })
+            return
+        }
+        /*
+         * 终端字体这两条：改的是面板的**基线**（terminal.termFamily / termSize）并立刻落盘。
+         * 配色方案钉住这两项时，设置里那两行是灰的、走不到这里；没钉的时候，
+         * TerminalView 会自己重算"实际用来画字的那个值"（applySchemeFont）。
+         */
+        if (act.indexOf("termFont:") === 0) {
+            terminal.termFamily = act.substring(9)
+            Cmd.remember("termFontFamily", terminal.termFamily)
+            return
+        }
+        if (act.indexOf("termFontSize:") === 0) {
+            var tpx = parseInt(act.substring(13))
+            if (!isNaN(tpx) && tpx >= 8 && tpx <= 40) {
+                terminal.termSize = tpx
+                Cmd.remember("termFontSize", String(tpx))
+            }
             return
         }
         /*
@@ -2802,6 +2944,19 @@ Rectangle {
             themeLight: Theme.light,
             themeChrome: String(Theme.c("#313335", Theme.rev)),
             /*
+             * 字体生效值 + 方案钉住了哪几项（自检读这两组，见 src/SelfTest.cpp）。
+             * 量的是 view 上**当下真正生效**的那个字号 / 行高 / 家族，不是注册表里
+             * 存的数 —— 注册表那两份方案永远不许写脏，这条要自己证明给自检看。
+             */
+            fontPixelSize: view.fontPixelSize,
+            fontFamilyNow: view.fontFamily,
+            lineHeightNow: view.lineHeightFactor,
+            wrapNow: view.wrapEnabled,
+            fontLockedSize: Theme.fontOverride.size !== undefined,
+            fontLockedFamily: Theme.fontOverride.family !== undefined,
+            fontLockedLine: Theme.fontOverride.lineHeight !== undefined,
+            fontLockedWrap: Theme.fontOverride.wrap !== undefined,
+            /*
              * 浅色档下"挨着的两层"各自实际解析成什么颜色。
              *
              * 查表机制有个固有缺陷：两个不同的深色值可以映射到同一个浅色值，
@@ -2897,6 +3052,14 @@ Rectangle {
             terminalHeight = Math.max(terminalMinHeight, Math.min(700, termH))
         terminalHidden = true
 
+        /* 终端字体的基线（方案钉住时上面那两条只是"没钉才用"的那份） */
+        var tf = Cmd.recall("termFontFamily", "Cascadia Mono")
+        if (tf !== "")
+            terminal.termFamily = tf
+        var ts = parseInt(Cmd.recall("termFontSize", "13"))
+        if (!isNaN(ts) && ts >= 8 && ts <= 40)
+            terminal.termSize = ts
+
         /*
          * Markdown 预览那个偏好（上次退出时看的是预览还是源码）。
          *
@@ -2938,23 +3101,22 @@ Rectangle {
          * 它在 EditorArea 里直接绑 editorFontSize / 自己读同一份设置，
          * 见分栏那一段）。
          */
+        /*
+         * 先原样收下注册表那几项（越界/写坏就当没设过，用出厂默认），再让
+         * applyFontScheme() 把方案的 font 段盖上去。顺序不能反：方案那一档以后
+         * 改动或删掉，回落的是这里记下的 storedFont，不是出厂默认。
+         */
         var size = parseInt(Cmd.recall("fontSize", "12"))
-        if (!isNaN(size) && size >= 6 && size <= 72)
-            editor.editorFontSize = size
-
-        /* 注释字号 / 字体家族也是上次怎么设的怎么回来 */
         var commentSize = parseInt(Cmd.recall("commentFontSize", "0"))
-        if (!isNaN(commentSize) && commentSize >= 0 && commentSize <= 72)
-            view.commentFontPixelSize = commentSize
-        var family = Cmd.recall("fontFamily", "Consolas")
-        if (family !== "")
-            view.fontFamily = family
-        /* 行高倍数：1.0 = 跟随字体（越界值由 C++ 侧夹住） */
         var lineHeight = parseFloat(Cmd.recall("lineHeight", "1"))
-        if (!isNaN(lineHeight))
-            view.lineHeightFactor = lineHeight
-
-        view.wrapEnabled = Cmd.recall("wrap", "0") === "1"
+        var family = Cmd.recall("fontFamily", "Consolas")
+        storedFont.size = (!isNaN(size) && size >= 6 && size <= 72) ? size : 12
+        storedFont.commentSize = (!isNaN(commentSize) && commentSize >= 0 && commentSize <= 72)
+                                 ? commentSize : 0
+        storedFont.lineHeight = isNaN(lineHeight) ? 1.0 : lineHeight
+        storedFont.family = family !== "" ? family : "Consolas"
+        storedFont.wrap = Cmd.recall("wrap", "0") === "1"
+        applyFontScheme()
         view.lineNumbersVisible = Cmd.recall("lineNumbers", "1") === "1"
         view.whitespaceVisible = Cmd.recall("whitespace", "0") === "1"
         view.indentGuidesVisible = Cmd.recall("indentGuides", "1") === "1"
@@ -2999,13 +3161,28 @@ Rectangle {
         target: editor.view
 
         function onFontChanged() {
-            Cmd.remember("fontSize", String(editor.view.fontPixelSize))
-            Cmd.remember("commentFontSize", String(editor.view.commentFontPixelSize))
-            Cmd.remember("fontFamily", editor.view.fontFamily)
-            Cmd.remember("lineHeight", String(editor.view.lineHeightFactor))
+            /*
+             * 方案钉住的那一项，注册表里存的**永远是用户自己设的那个值**。
+             * 不这么挡一下，方案推下来的字号会被当成"用户改的"记回去 —— 换了方案
+             * 那一项就再也回不去了（而且用户那份被悄悄改脏，比看不见还难查）。
+             *
+             * 这里没用一个"正在推"的标志位：C++ 侧那一下 fontChanged 常常是
+             * **下一拍**才发的（applyStyle 排在事件队列里），推的函数早返回了、
+             * 标志位已经落回去，照样写脏。按"这一项被不被方案钉着"判就没这个时间窗。
+             */
+            Cmd.remember("fontSize", fontLocked("size") ? String(storedFont.size)
+                                                        : String(editor.view.fontPixelSize))
+            Cmd.remember("commentFontSize",
+                         fontLocked("commentSize") ? String(storedFont.commentSize)
+                                                   : String(editor.view.commentFontPixelSize))
+            Cmd.remember("fontFamily", fontLocked("family") ? storedFont.family
+                                                           : editor.view.fontFamily)
+            Cmd.remember("lineHeight", fontLocked("lineHeight") ? String(storedFont.lineHeight)
+                                                                : String(editor.view.lineHeightFactor))
         }
         function onWrapChanged() {
-            Cmd.remember("wrap", editor.view.wrapEnabled ? "1" : "0")
+            Cmd.remember("wrap", fontLocked("wrap") ? (storedFont.wrap ? "1" : "0")
+                                                    : (editor.view.wrapEnabled ? "1" : "0"))
         }
         function onLineNumbersChanged() {
             Cmd.remember("lineNumbers", editor.view.lineNumbersVisible ? "1" : "0")
@@ -3260,6 +3437,9 @@ Rectangle {
         /* 它现在是一块顶层 Window，不能再当子项挂 parent；居中用的宿主矩形现读 Win.hostScreenGeometry() */
         view: window.view
         entries: window.shortcutItems
+        /* 设置 → 字体 那两行终端的基线（生效值由面板自己合：方案钉住就用方案的） */
+        termFamilyNow: terminal.termFamily
+        termSizeNow: terminal.termSize
         onCommandRequested: (act) => window.dispatch(act)
         /* 「配色方案」那一栏的"另存为…"要一个带输入框的弹框，卡片挂在窗口这一侧 */
         askText: function (title, hint, value, then) {
@@ -3644,6 +3824,7 @@ Rectangle {
             host: window
             view: window.view
             shortcuts: window.shortcutItems
+            fontLock: window.fontLock
             onOpenMenu: (anchor, items) => {
                 /*
                  * 记下这次菜单锚在哪个控件上 —— 自检拿它验"菜单挂在被点的那一栏

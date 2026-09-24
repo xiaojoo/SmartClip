@@ -2584,6 +2584,130 @@ void runRenderChecks(QObject *qmlRoot, EditorController *cmd)
                        .arg(before.name(), fromFile.name(), back.name()).arg(wrote));
         }
         /*
+         * 终端的字体以前**写死在 QML 里**（Cascadia Mono / 13），界面上没有开关，
+         * 所以"字体也能进方案"这句话要单独量：文件的 font.terminalFamily /
+         * terminalSize 必须真的落到那个 item 的属性上，切回来还得是出厂那两个值。
+         */
+        {
+            const QString saved = th->scheme();
+            const QString path = th->schemesDir() + QStringLiteral("/_selftest_term_font.json");
+            QFile sf(path);
+            const bool wrote = sf.open(QIODevice::WriteOnly | QIODevice::Truncate)
+                              && sf.write(R"({"basedOn":"Dark","font":{"terminalFamily":"Consolas","terminalSize":15}})") > 0;
+            sf.close();
+            /* 现取：手上那个 view 可能已经是被重开掉的旧委托（见下一条判据那段说明） */
+            QVariant lv;
+            QMetaObject::invokeMethod(panel, "firstView", Q_RETURN_ARG(QVariant, lv));
+            TerminalView *tv = qobject_cast<TerminalView *>(lv.value<QObject *>());
+            if (!tv)
+                tv = view;
+            const qreal sizeBefore = tv->usedFontPixelSizeForTest();
+            th->setScheme(QStringLiteral("_selftest_term_font"));
+            QCoreApplication::processEvents();
+            const qreal sizeFromFile = tv->usedFontPixelSizeForTest();
+            const QString famFromFile = tv->usedFontFamilyForTest();
+            /* 基线那本账不许被方案改：改的是"用户在设置里选的那个"，方案只盖在上面 */
+            const qreal baseAtPinned = tv->property("fontSize").toReal();
+            const QString keysAt = QStringList(th->fontOverride().keys()).join(QStringLiteral(","));
+            const QString errAt = th->schemeError().trimmed();
+            th->setScheme(saved);
+            QFile::remove(path);
+            const qreal back = tv->usedFontPixelSizeForTest();
+            tcheck(wrote && qFuzzyCompare(sizeFromFile, 15.0)
+                       && famFromFile == QStringLiteral("Consolas")
+                       && qFuzzyCompare(baseAtPinned, sizeBefore)
+                       && qFuzzyCompare(back, sizeBefore),
+                   QStringLiteral("终端字体也归方案管：font.terminalFamily / terminalSize 真的生效、切回去还原"),
+                   QStringLiteral("用来的字号 %1 → 按文件 %2 → 切回 %3；基线在钉住时=%4（不该动）"
+                                  "家族按文件=%5（写文件成功=%6，方案读到的项=%7，加载错误=[%8]）")
+                       .arg(sizeBefore).arg(sizeFromFile).arg(back).arg(baseAtPinned)
+                       .arg(famFromFile).arg(wrote)
+                       .arg(keysAt, errAt.isEmpty() ? QStringLiteral("无") : errAt));
+        }
+        /*
+         * 基线能不能被用户自己改（设置 → 字体 那两行的链路），以及"改过基线 + 解钉"
+         * 之后回到的到底是哪一个。这条最容易出错的地方就是把两本账合成一本：
+         * 出厂的 13 一旦被当成回落点，用户设的 16 就在换一次方案之后悄悄丢了。
+         */
+        {
+            QSettings st;
+            const QString storedBase = st.value(QStringLiteral("editor/termFontSize")).toString();
+            const QString savedScheme = th->scheme();
+
+            /*
+             * 量的对象必须**现取**：面板的委托会被重开（这套自检前面重启过会话），
+             * 手上那个 view 指针可能已经是旧对象。旧对象对 lightChanged 照样有反应
+             * （所以方案钉住那两条量得到），但面板推的基线只发给挂在树上的那一个 ——
+             * 第一版就栽在这儿：面板报 views/ok=1/1，视图上仍是 13。
+             */
+            auto live = [panel] {
+                QVariant v;
+                QMetaObject::invokeMethod(panel, "firstView", Q_RETURN_ARG(QVariant, v));
+                return qobject_cast<TerminalView *>(v.value<QObject *>());
+            };
+            /* used=true 要"实际用来画字的"，false 要"设置里那个基线" */
+            auto sizeNow = [&live](bool used) {
+                TerminalView *tv = live();
+                if (!tv)
+                    return -1.0;
+                return used ? tv->usedFontPixelSizeForTest() : tv->property("fontSize").toReal();
+            };
+            auto famNow = [&live] {
+                TerminalView *tv = live();
+                return tv ? tv->usedFontFamilyForTest() : QStringLiteral("(够不到视图)");
+            };
+
+            QMetaObject::invokeMethod(qmlRoot, "dispatch",
+                                      Q_ARG(QVariant, QStringLiteral("termFontSize:16")));
+            QCoreApplication::processEvents();
+            const qreal baseAfterSet = sizeNow(false);
+            const qreal usedAfterSet = sizeNow(true);
+            const QString storedAfterSet = QSettings().value(QStringLiteral("editor/termFontSize")).toString();
+            /* 设置面板那一行的读数（它读的是 Main 转给面板的基线），断在哪一段靠这个分 */
+            QObject *sp = qmlRoot->findChild<QObject *>("settingsPanel");
+            const QString panelCopy = sp ? sp->property("termSizeNow").toString()
+                                         : QStringLiteral("(没有设置面板)");
+
+            QFile sf(th->schemesDir() + QStringLiteral("/_selftest_term_font2.json"));
+            sf.open(QIODevice::WriteOnly | QIODevice::Truncate);
+            sf.write(R"({"basedOn":"Dark","font":{"terminalSize":15}})");
+            sf.close();
+            th->setScheme(QStringLiteral("_selftest_term_font2"));
+            const qreal usedPinned = sizeNow(true);
+            const qreal basePinned = sizeNow(false);
+            th->setScheme(savedScheme);
+            QFile::remove(sf.fileName());
+            const qreal usedAfterUnpin = sizeNow(true);
+            const QString famAtEnd = famNow();
+
+            /* 还原用户自己的那一档（原来没设过就写回出厂的 13） */
+            QMetaObject::invokeMethod(qmlRoot, "dispatch",
+                                      Q_ARG(QVariant, QStringLiteral("termFontSize:")
+                                            + (storedBase.isEmpty() ? QStringLiteral("13") : storedBase)));
+            QCoreApplication::processEvents();
+            if (storedBase.isEmpty()) {
+                /* 原来没设过这条：整键撤掉，别在用户注册表里留一个"等于默认值"的痕 */
+                QSettings clean;
+                clean.remove(QStringLiteral("editor/termFontSize"));
+                clean.sync();
+            }
+            const QString residue = QSettings().value(QStringLiteral("editor/termFontSize")).toString();
+
+            tcheck(qFuzzyCompare(baseAfterSet, 16.0) && qFuzzyCompare(usedAfterSet, 16.0)
+                       && storedAfterSet == QStringLiteral("16")
+                       && panelCopy == QStringLiteral("16")
+                       && qFuzzyCompare(usedPinned, 15.0) && qFuzzyCompare(basePinned, 16.0)
+                       && qFuzzyCompare(usedAfterUnpin, 16.0)
+                       && residue == storedBase,
+                   QStringLiteral("设置改基线要立刻生效；方案钉住时盖在基线上；解钉回到**改过的**基线（不是出厂 13）"),
+                   QStringLiteral("设 16 后：视图基线=%1 用来的=%2 落盘=%3 设置那行读到=%4 "
+                                  "/ 钉 15 后 用来的=%5 基线=%6 / 解钉后 用来的=%7（家族=%8）"
+                                  "/ 收尾后注册表=%9（原本=%10）")
+                       .arg(baseAfterSet).arg(usedAfterSet).arg(storedAfterSet).arg(panelCopy)
+                       .arg(usedPinned).arg(basePinned).arg(usedAfterUnpin).arg(famAtEnd)
+                       .arg(residue, storedBase.isEmpty() ? QStringLiteral("(没有这一项)") : storedBase));
+        }
+        /*
          * 这一条只量到**引擎换算**那一层，没量到像素 —— 试过，量不出来，记在这儿免得
          * 下次再烧一轮：往格子里喂一段 33 号色的 W（得先关掉 shell，否则 PSReadLine
          * 一次重绘就把 W 抹了，实测 inGrid 从 1 变 0），格子里确实有；但 grabToImage
@@ -2620,7 +2744,8 @@ int SelfTest::runTerminal(QObject *qmlRoot, EditorController *cmd)
         tout(QStringLiteral("\n（没传 qmlRoot，界面与真实渲染那一节跳过）"));
 
     std::fputs("\n", stdout);
-    tout(QStringLiteral("终端自检：通过 %1 项，失败 %2 项").arg(gTermPassed).arg(gTermFailed));
+    tout(QStringLiteral("终端自检：通过 %1 项，失败 %2 项（丢掉 Qt 那句 windowless update 警告 %3 条）")
+             .arg(gTermPassed).arg(gTermFailed).arg(droppedWindowlessUpdateWarnings()));
     return gTermFailed;
 }
 
