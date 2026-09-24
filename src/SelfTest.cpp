@@ -8171,12 +8171,82 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
                       .arg(60 * 20).arg(th->c(QStringLiteral("#313335")))
                       .arg(th->schemeError().trimmed()));
 
+            /*
+             * "@角色"那一条键：页签条底以前是写死的（和编辑区纸色同一个深色值，
+             * 按裸 hex 查会撞车），现在走方案表。这里钉两件事：
+             *   1) 带角色的键**只挪条子底**，纸色那条必须还是内置 Light 的 #ffffff
+             *      —— 分开这两个角色的全部意义就在这儿；
+             *   2) 键写错了（漏 #）要报出来。不拦的话查表永远查不到，用户看到的
+             *      就是"我改了文件却没任何变化"，和当初值写错一样难查。
+             */
+            writeScheme(R"({"basedOn":"Light","ui":{"#1e1f22@tabStrip":"#010203"}})");
+            th->reloadSchemes();
+            settle();
+            {
+                const QVariantMap r = uiState();
+                const QColor strip(r.value(QLatin1String("layerTabStrip")).toString());
+                check(strip == QColor(QStringLiteral("#010203"))
+                          && th->c(QStringLiteral("#1e1f22")) == QStringLiteral("#ffffff")
+                          && th->schemeError().isEmpty(),
+                      QStringLiteral("方案文件里 #色值@角色 能单独指一个角色：只挪页签条底，纸色不动"),
+                      QStringLiteral("条子底=%1（该 #010203）/ 纸色查表=%2（该 #ffffff）/ 错误=[%3]")
+                          .arg(strip.name(), th->c(QStringLiteral("#1e1f22")),
+                               th->schemeError().trimmed()));
+            }
+
+            writeScheme(R"({"basedOn":"Light","ui":{"1e1f22":"#010203"}})");
+            th->reloadSchemes();
+            settle();
+            {
+                const QVariantMap r = uiState();
+                const QColor strip(r.value(QLatin1String("layerTabStrip")).toString());
+                check(strip != QColor(QStringLiteral("#010203"))
+                          && th->schemeError().contains(QStringLiteral("键")),
+                      QStringLiteral("方案文件的键写错（漏了 #）：不生效，而且点名报出来"),
+                      QStringLiteral("条子底=%1（不该是 #010203）/ 错误=[%2]")
+                          .arg(strip.name(), th->schemeError().trimmed()));
+            }
+
             th->setScheme(QStringLiteral("Dark"));
             check(th->c(QStringLiteral("#313335")) == QStringLiteral("#313335")
-                      && th->ansiPalette().isEmpty(),
+                      && th->ansiPalette().isEmpty()
+                      /* 带角色的键在 Dark 里查不到 → 必须退成**去掉后缀的 hex 本身**；
+                         后缀要是漏进返回值，那就是一个非法色值，深色档不再恒等 */
+                      && th->c(QStringLiteral("#1e1f22@tabStrip")) == QStringLiteral("#1e1f22")
+                      && th->c(QStringLiteral("#1e1f22@nope")) == QStringLiteral("#1e1f22"),
                   QStringLiteral("切回内置 Dark：每个键都必须是恒等、终端退回 libvterm 那 16 色"),
                   QStringLiteral("#313335 → %1 / ANSI 表长 %2").arg(th->c(QStringLiteral("#313335")))
                       .arg(th->ansiPalette().size()));
+
+            /*
+             * 页签条这两处**从"按角色写死"改回查方案表**，两档内置下的像素必须一个
+             * 数都没变（深色本来就是 #1e1f22 / #2b2d30，浅色那对"灰面压白卡"是靠
+             * #1e1f22@tabstrip 这条新键保住的）。不钉这一条的话，"改成查表"很容易
+             * 查出来的是另一个颜色 —— 而撞车那个症状只在浅色看得见，改的人在看深色，
+             * 谁都不会发现。
+             */
+            {
+                struct Want { const char *sec; const char *strip; const char *active; };
+                static const Want wants[] = {
+                    { "Dark",   "#1e1f22", "#2b2d30" },
+                    { "Light",  "#f2f3f5", "#ffffff" },
+                };
+                for (const Want &w : wants) {
+                    th->setScheme(QString::fromLatin1(w.sec));
+                    settle();
+                    const QVariantMap u = uiState();
+                    const QColor strip(u.value(QLatin1String("layerTabStrip")).toString());
+                    const QColor act(u.value(QLatin1String("layerTabActive")).toString());
+                    check(strip == QColor(QString::fromLatin1(w.strip))
+                              && act == QColor(QString::fromLatin1(w.active)),
+                          QStringLiteral("页签条改查表之后，内置 %1 档这两处一个色值都没动")
+                              .arg(QString::fromLatin1(w.sec)),
+                          QStringLiteral("条子底=%1（该 %2）/ 选中那枚=%3（该 %4）")
+                              .arg(strip.name(), QString::fromLatin1(w.strip),
+                                   act.name(), QString::fromLatin1(w.active)));
+                }
+                th->setScheme(QStringLiteral("Dark"));
+            }
 
             /*
              * 后端能切不等于界面上有这一栏。这里钉两件事：导航里有「配色方案」，

@@ -44,7 +44,7 @@ Item {
     readonly property color textColor: Theme.c("#d6d7da", Theme.rev)
     readonly property color mutedColor: Theme.c("#9aa0a6", Theme.rev)
     readonly property color accentColor: "#4c96d8"
-    readonly property color barBg: "#26282c"
+    readonly property color barBg: Theme.c("#26282c", Theme.rev)
     readonly property color delBg: Theme.c("#3a2224", Theme.rev)
     readonly property color addBg: Theme.c("#1e3524", Theme.rev)
     readonly property color modBg: Theme.c("#3a3320", Theme.rev)

@@ -73,19 +73,21 @@ Rectangle {
     signal tabActivated(var pane, int index)
 
 /*
- * 页签条这一处**不按 hex 查表**，按角色写死。
+ * 页签条这一处的底色**和编辑区纸色共用同一个深色值 #1e1f22**，浅色档要的是
+ * "灰面压白卡"（条子 #f2f3f5、选中那一枚 #ffffff），按裸 hex 查必然撞成
+ * 同一个 #ffffff —— 2026-09-23 他圈的那个"选中的 tab 背景没有了"就是这么来的。
+ * 当时图省事按角色写死了，代价是自定义方案驱动不到这一处。
  *
- * 表里 #1e1f22（条子底）和 #2b2d30（选中那一枚的底）在浅色档都翻成 #ffffff ——
- * 同一个深色值在这儿担着两个角色（条子底 / 卡片底），全局按 hex 映射必然撞车，
- * 结果就是"选中的 tab 背景没有了"（2026-09-23 他圈的这条）。
- * 浅色档照他参考图那套来：灰面 #f2f3f5 上压一张白卡片 #ffffff。
+ * 现在走方案表：条子底用带角色的键 #1e1f22@tabStrip（内置 Light 里给它单独
+ * 一条 #f2f3f5，Dark 里查不到 → 恒等回 #1e1f22），选中那枚本来就和"气泡/输入框"
+ * 同一个浅色值 #ffffff，不撞车，直接用裸 hex。
  */
-    color: Theme.light ? "#f2f3f5" : "#1e1f22"
+    color: Theme.c("#1e1f22@tabStrip", Theme.rev)
     topLeftRadius: roundTopLeft ? cornerRadius : 0
     topRightRadius: roundTopRight ? cornerRadius : 0
 
     readonly property color accentColor: "#4c96d8"
-    readonly property color tabActiveBg: Theme.light ? "#ffffff" : "#2b2d30"
+    readonly property color tabActiveBg: Theme.c("#2b2d30", Theme.rev)
     readonly property color textBright: Theme.c("#e8e8e8", Theme.rev)
     readonly property color textMain: Theme.c("#bbbbbb", Theme.rev)
     readonly property color textMuted: Theme.c("#7d7d7d", Theme.rev)

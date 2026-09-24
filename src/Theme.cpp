@@ -36,6 +36,7 @@ const QHash<QString, QString> &builtinLightUi() {
         { QStringLiteral("#2b2d30"), QStringLiteral("#ffffff") },  // 气泡、选中标签、输入框
         { QStringLiteral("#3c3f41"), QStringLiteral("#ffffff") },  // 下拉菜单 / 确认卡 / 查找条面板
         { QStringLiteral("#1e1f22"), QStringLiteral("#ffffff") },  // 编辑区纸色
+        { QStringLiteral("#1e1f22@tabstrip"), QStringLiteral("#f2f3f5") },  // 页签条底：和纸色同一个深色值，浅色下要"灰面压白卡"，所以带角色才分得开
         { QStringLiteral("#252526"), QStringLiteral("#f2f3f5") },  // 编辑器旁的窄侧栏
         { QStringLiteral("#2d2d30"), QStringLiteral("#ebebeb") },  // 另一种选中底
         { QStringLiteral("#404043"), QStringLiteral("#dcdcdc") },  // 滚动条槽 / 分隔带
@@ -131,6 +132,16 @@ QString keyOf(const QString &hex) {
     return hex.trimmed().toLower();
 }
 
+/*
+ * 方案文件里 ui 段的键：一个色值，后面可以跟 "@角色"（见 AppTheme::c）。
+ * 键写错了查表永远查不到，界面上就是"我改了没变" —— 和值写错同一类，必须拦下来报出去。
+ */
+bool isUiKey(const QString &s) {
+    static const QRegularExpression re(
+        QStringLiteral("^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})(@[A-Za-z][A-Za-z0-9]*)?$"));
+    return re.match(s.trimmed()).hasMatch();
+}
+
 /* "#rrggbb" / "#rgb"，别的都不认（方案文件是人手改的，宁可认严一点） */
 bool isHexColor(const QString &s) {
     static const QRegularExpression re(QStringLiteral("^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$"));
@@ -177,6 +188,7 @@ const QHash<QString, QString> &uiDoc() {
         { QStringLiteral("#2b2d30"), QStringLiteral("气泡、选中标签、输入框底") },
         { QStringLiteral("#3c3f41"), QStringLiteral("下拉菜单 / 确认卡 / 查找条面板") },
         { QStringLiteral("#1e1f22"), QStringLiteral("编辑区纸色（正文底）") },
+        { QStringLiteral("#1e1f22@tabstrip"), QStringLiteral("页签条底（和纸色同一个深色值；想单独改这一条就用这个带角色的键）") },
         { QStringLiteral("#252526"), QStringLiteral("编辑器旁的窄侧栏") },
         { QStringLiteral("#2d2d30"), QStringLiteral("另一种选中底") },
         { QStringLiteral("#404043"), QStringLiteral("滚动条槽 / 分隔带") },
@@ -371,6 +383,12 @@ void AppTheme::applyScheme(const QString &name)
 
             const QJsonObject u = o.value(QStringLiteral("ui")).toObject();
             for (auto it = u.constBegin(); it != u.constEnd(); ++it) {
+                if (!isUiKey(it.key())) {
+                    appendErr(err, file,
+                              QStringLiteral("键 \"%1\" 不是色值（要 #rrggbb，可以带 @角色 后缀），"
+                                              "这条没有生效").arg(it.key()));
+                    continue;
+                }
                 const QString v = it.value().toString();
                 if (!isHexColor(v)) {
                     /* 这一条丢掉、其余照用：缺的本来就退回内置，写错的那条也一样处理 */
@@ -450,10 +468,24 @@ QString AppTheme::c(const QString &darkHex, bool lightMode) const {
      *
      * 查的是**当前方案的有效表**；表里没有的键原样返回，所以内置 Dark（空表）
      * 是恒等映射 —— 自检里那条"切回来必须等于原值"钉的就是这个。
+     *
+     * "@角色"后缀是给**同一个深色值在界面上担着两个角色、两个角色又想要不同浅色值**
+     * 那种情况留的口子（页签条底和编辑区纸色都是 #1e1f22，浅色下撞成一个，选中那枚
+     * 页签就丢了背景）。调用点写 `Theme.c("#1e1f22@tabStrip", Theme.rev)`：先查带角色
+     * 的那条，没有再按裸 hex 查，都没有就返回**去掉后缀的 hex 本身** —— 后缀只是键、
+     * 不是颜色，带进返回值就是个非法色值，深色档也就破了恒等。
      */
     Q_UNUSED(lightMode)
-    const auto it = m_ui.constFind(keyOf(darkHex));
-    return it == m_ui.constEnd() ? darkHex : *it;
+    const QString raw = darkHex.trimmed();
+    const int at = raw.indexOf(QLatin1Char('@'));
+    const QString bare = at < 0 ? raw : raw.left(at);
+    if (at >= 0) {                          /* 先认带"@角色"的那一条 */
+        const auto r = m_ui.constFind(keyOf(raw));
+        if (r != m_ui.constEnd())
+            return *r;
+    }
+    const auto it = m_ui.constFind(keyOf(bare));
+    return it == m_ui.constEnd() ? bare : *it;
 }
 
 QVector<QColor> AppTheme::ansiPalette() const {
@@ -498,7 +530,9 @@ QString AppTheme::saveSchemeAs(const QString &name)
                                              : QStringLiteral("dark"));
     o.insert(QStringLiteral("_说明"),
              QStringLiteral("ui 的键是深色档那个色值，值是这个方案要用的色；"
-                            "没写的键沿用 basedOn 那一档。terminal 的键是 0~15 号 ANSI 色。"
+                            "没写的键沿用 basedOn 那一档。同一个深色值在界面上担两个角色时，"
+                            "可以用 色值@角色 单独指一个（例如 #1e1f22@tabstrip 只管页签条底，"
+                            "裸 #1e1f22 管编辑区纸色）。terminal 的键是 0~15 号 ANSI 色。"
                             "改完保存，界面立刻生效；_doc/_说明 只是给人看的，程序不读。"));
     o.insert(QStringLiteral("_doc"), doc);
     o.insert(QStringLiteral("ui"), ui);
