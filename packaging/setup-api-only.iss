@@ -27,9 +27,9 @@
 ; So this file only NAMES the tool; the command, certificate path and password
 ; included, never lives in a tracked file - ISCC inherits the environment from
 ; build-release.bat, which keeps it in SMARTCLIP_SIGN_CMD.
-; Unset means no signing, and then SignedUninstaller/SignTool have to stay off too:
-; there is no "sign if a tool happens to be configured" mode.
-; Caveat: a ';' inside the command would be read as the start of an .iss comment.
+; There is no "sign if a tool happens to be configured" mode. Inno re-checks the
+; result itself: a tool that exits 0 without really signing aborts the compile with
+; "the file does not have a digital signature" (measured with a do-nothing wrapper).
 #define SIGNCMD GetEnv("SMARTCLIP_SIGN_CMD")
 
 [Setup]

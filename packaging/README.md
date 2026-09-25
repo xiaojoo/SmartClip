@@ -74,9 +74,12 @@ Qt 那些第三方 DLL **不重签**（它们带 Nokia 的签名，重签会破�
 —— 自签证书必然如此，不是链子的问题。
 `signtool` 能签 `.tmp` 扩展名（试过），所以那个临时名字不碍事。
 
-签名命令里有三个坑：`;` 会被 `.iss` 当注释开头；`!` 会被本脚本的延迟展开吃掉（口令里有就出事）；
-命令第一个 token 是程序名，**路径带空格时 Inno 解析不了** —— 要么把 `signtool.exe` 所在目录加进 PATH
-后直接写 `signtool sign …`，要么用一个不含空格的完整路径。
+签名命令有两个实测出来的注意点：**口令里不能有 `!`**（本脚本开了延迟展开，
+`pass!word$1` 会变成 `password$1`，签名单静默失败）；工具路径里的空格**不是**问题
+（把工具指向 `H:\...\_s p a c e dir\w r ap.bat`，Inno 照样调用它）。
+另外 Inno 自己会复核：签名命令返回 0 但文件其实没签上，编译直接中止并报
+`The Sign Tool command returned an exit code of 0, but the file does not have a digital signature`
+—— 用一个什么都不做的包装脚本就能复现这条，所以"以为签了"在编译期就会被抓住。
 
 ## 缺点 / 已知没做的
 

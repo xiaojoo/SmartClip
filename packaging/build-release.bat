@@ -49,8 +49,10 @@ rem    set "SMARTCLIP_SIGN_CMD=signtool sign /fd sha256 /td sha256 /tr http://ti
 rem With no SMARTCLIP_SIGN_CMD set the whole thing is a no-op and you get the same
 rem unsigned build as before. A sign that FAILS aborts the chain (exit 7) rather
 rem than shipping something you believed was signed.
-rem Not covered: the uninstaller Inno generates inside setup.exe - that needs
-rem SignedUninstaller=yes plus a [SignTools] entry in the .iss.
+rem Covered: the app binary (signed before the tiers are cut, so the exe inside every
+rem zip and setup carries it), the three setups, and the uninstaller Inno generates -
+rem the last one via the -s option below, because Inno has no [SignTools] script
+rem section. Inno re-checks that the file really got signed and aborts if it did not.
 set "SIGNFAIL=0"
 set "SIGTOOL="
 if exist "C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\signtool.exe" set "SIGTOOL=C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\signtool.exe"
@@ -58,9 +60,10 @@ if not defined SIGTOOL if exist "C:\Program Files (x86)\Windows Kits\10\bin\x64\
 if not defined SIGTOOL where signtool >nul 2>nul && set "SIGTOOL=signtool"
 rem Inno has no [SignTools] script section: the tool has to be registered on the
 rem compiler command line, and the .iss only names it ("SignTool=scsign").
-rem Two characters the sign command must not contain: ';' (Inno reads it as the start
-rem of a comment in the .iss) and '!' (this script runs with delayed expansion, so a
-rem '!' in a password would be eaten here).
+rem One character the sign command must not contain: '!'. This script runs with
+rem delayed expansion, so a password like pass!word arrives here as password and
+rem signing fails silently (measured). Spaces in the tool path are fine (measured:
+rem Inno happily runs a tool under "_s p a c e dir\w r ap.bat").
 set "SIGNARG="
 if defined SMARTCLIP_SIGN_CMD set "SIGNARG=-s"scsign=%SMARTCLIP_SIGN_CMD% $f""
 
