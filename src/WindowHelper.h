@@ -44,9 +44,20 @@ class QQuickWindow;
  *     实测刷了 1.2 秒一帧都上不去（build\win-gdi-red-video.ps1）。
  *
  * 系统状态：最大化走 showMaximized()（任务栏右键 / Win+↓ / 贴边吸附这些语义才对），
- * 只是不让系统放那段转场。拖标题栏还原、Win+↑ / 系统菜单里那条"最大化"，都由这一层
- * 自己接（见 startSystemMove 和 MessageTrace）；贴边吸附最大化是系统自己摆的矩形，
- * 靠几何认（见 updateMaximizedFromWindow）。
+ * 只是不让系统放那段转场。Win+↑ / 系统菜单里那条"最大化"由这一层自己接
+ * （见 MessageTrace）；贴边吸附最大化是系统自己摆的矩形，靠几何认
+ * （见 updateMaximizedFromWindow）。
+ *
+ * 还原回哪儿：只回 maximize() 记下的 m_restoreAnchor（= 用户最后摆出来的那块卡片）。
+ * 原来 startSystemMove() 里有一段"最大化时一按下就 restore() + 按光标位置重摆"，
+ * 实测连**单击**都会触发它：卡片缩到鼠标那儿去，那个位置还把 m_normalRect 一起盖掉
+ * （2026-10-03 用户报的那件事）。删掉之后用真鼠标点顶栏空白处量过
+ * （build\probe-title-2.ps1）：1460x900@1189,605 →双击→ 3840x2112@0,0
+ * →单击→ 原地不动 →再双击→ 逐位回到 1189,605。
+ * 代价（build\probe-title-3.ps1 / -4.ps1 各量过一遍）：最大化时"按住标题栏往下拖
+ * 就把窗口拖出最大化"这个手势没了 —— 同一个合成拖动在常规窗口上把窗口挪了
+ * (+200,+120)，在最大化那一档上系统没替我们还原、矩形一动没动。
+ * 所以这一档的还原只剩两条路：顶栏双击、那颗还原按钮。
  */
 class QScreen;
 class QWidget;

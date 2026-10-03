@@ -1,5 +1,6 @@
 #include "Screenshot.h"
 #include "PinWindow.h"
+#include "Translate.h"
 
 #include <QAction>
 #include <QApplication>
@@ -47,29 +48,6 @@
 #endif
 
 namespace {
-
-/*
- * 一张图 -> png 的 data URL（"data:image/png;base64,…"）。
- *
- * 选区识别（Screenshot::selectionImage）和贴图识别（PinWindow::composedImageUrl）
- * 都走这一份 —— 发给模型的必须是同一种东西（见 LlmClient::recognize）。
- * 太大就返回空串：base64 之后还要再涨三分之一，几十 MB 的请求体多半会被服务端
- * 直接掐掉，报出来还是一句看不懂的 HTTP 错，界面上回一句人话更省事。
- */
-QString imageToDataUrl(const QImage &image) {
-    if (image.isNull())
-        return QString();
-    QByteArray png;
-    QBuffer buffer(&png);
-    buffer.open(QIODevice::WriteOnly);
-    if (!image.save(&buffer, "PNG"))
-        return QString();
-    buffer.close();
-    constexpr int kMaxRawBytes = 8 * 1024 * 1024;
-    if (png.size() > kMaxRawBytes)
-        return QString();
-    return QStringLiteral("data:image/png;base64,") + QString::fromLatin1(png.toBase64());
-}
 
 /*
  * image://shot/… 的取图口。
@@ -746,8 +724,8 @@ bool Screenshot::selectionReady(const QRectF &sel) const {
 QString Screenshot::selectionImage(const QRectF &sel) const {
     if (!selectionReady(sel))
         return QString();
-    /* 编码只留一份（见 imageToDataUrl）：选区识别和贴图识别发的是同一种东西 */
-    return imageToDataUrl(cropSelection(sel));
+    /* 编码只留一份（见 LlmClient::imageToDataUrl）：选区、贴图、汇总认截图发的是同一种东西 */
+    return LlmClient::imageToDataUrl(cropSelection(sel));
 }
 
 void Screenshot::copyText(const QString &text) const {

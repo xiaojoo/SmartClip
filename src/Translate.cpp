@@ -3,6 +3,7 @@
 #include <QBuffer>
 #include <QClipboard>
 #include <QCloseEvent>
+#include <QFileInfo>
 #include <QGuiApplication>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -82,6 +83,12 @@ constexpr const char *kOcrSeparator = "----";
  */
 constexpr const char *kPersonaOcr = "ocr";
 constexpr const char *kPersonaOcrTranslate = "ocr-translate";
+/*
+ * "note" = 汇总认剪贴板截图那一路：以读字为主，图上确实没什么字（图表、界面、
+ * 照片）时允许它补一句这图讲了什么。不复用 "ocr" 是因为那套提示词写死了
+ * "只准原样读字"，一张没字的图回来就是空的，汇总那边等于白烧一次请求。
+ */
+constexpr const char *kPersonaImageNote = "note";
 
 }  // namespace
 
@@ -123,6 +130,27 @@ LlmClient::~LlmClient() {
 
 void LlmClient::persist(const QString &key, const QVariant &value) {
     QSettings().setValue(QString::fromLatin1(kKeyBase) + key, value);
+}
+
+QString LlmClient::imageToDataUrl(const QImage &image) {
+    if (image.isNull())
+        return QString();
+    QByteArray png;
+    QBuffer buffer(&png);
+    buffer.open(QIODevice::WriteOnly);
+    if (!image.save(&buffer, "PNG"))
+        return QString();
+    buffer.close();
+    constexpr int kMaxRawBytes = 8 * 1024 * 1024;
+    if (png.size() > kMaxRawBytes)
+        return QString();
+    return QStringLiteral("data:image/png;base64,") + QString::fromLatin1(png.toBase64());
+}
+
+void LlmClient::failAsync(const QString &token, const QString &reason) {
+    setBusy(false);
+    setStatus(reason);
+    QTimer::singleShot(0, this, [this, token, reason]() { emit failed(token, reason); });
 }
 
 QString LlmClient::mode() const { return m_mode; }
@@ -385,6 +413,31 @@ QString LlmClient::recognize(const QString &imageDataUrl, const QString &target,
     return token;
 }
 
+/*
+ * 认磁盘上的一张图：读文件 → 编码 → 和选区识别同一条 postVision 路。
+ *
+ * 读不出来、或者大到编码返回空串，在这儿各变成一句人话 —— 让 postVision 用
+ * "选区是不是太小了"那句去报一个**文件**的错，界面上就是一句对不上号的提示。
+ */
+QString LlmClient::recognizeFile(const QString &imagePath, const QString &persona) {
+    const QString token = QStringLiteral("f%1").arg(++m_nextToken);
+    QImage image(imagePath.trimmed());
+    if (image.isNull()) {
+        failAsync(token, QStringLiteral("这张图读不出来：%1")
+                             .arg(QFileInfo(imagePath).fileName()));
+        return token;
+    }
+    const QString dataUrl = imageToDataUrl(image);
+    if (dataUrl.isEmpty()) {
+        failAsync(token, QStringLiteral("这张图太大，没法发给模型（%1×%2）")
+                             .arg(image.width())
+                             .arg(image.height()));
+        return token;
+    }
+    postVision(token, dataUrl, QString(), QString(), persona);
+    return token;
+}
+
 QString LlmClient::ask(const QString &systemPrompt, const QString &userText,
                        const QString &busyStatus) {
     const QString token = QStringLiteral("a%1").arg(++m_nextToken);
@@ -587,6 +640,7 @@ void LlmClient::postVision(const QString &token, const QString &imageDataUrl,
     }
 
     const bool wantTranslate = (persona == QLatin1String(kPersonaOcrTranslate));
+    const bool wantNote = (persona == QLatin1String(kPersonaImageNote));
     const QString to = target.trimmed();
     const bool autoSource = source.trimmed().isEmpty()
                             || source.trimmed() == QStringLiteral("自动检测");
@@ -594,6 +648,21 @@ void LlmClient::postVision(const QString &token, const QString &imageDataUrl,
     QString system = QStringLiteral(
         "你是一名文字识别助手。请把图片里的文字**原样**读出来：不要翻译、不要解释、"
         "不要加任何前后缀，按图片里的换行和版式分段。");
+    if (wantNote) {
+        /*
+         * 汇总认剪贴板截图那一路。不复用上面那句"只准原样读字"：剪贴板里的图
+         * 有一大半是图表、界面、照片，那种图没几个字可读，只读字的结果是一段
+         * 空白，汇总那边等于白烧一次请求。所以这里允许它在没字可抄时说一句
+         * "这图讲了什么" —— 同时把"不要编"写死，因为这一句会当成原文进文档。
+         */
+        system = QStringLiteral(
+            "你在替一份笔记补全图片的内容。请按下面这条规矩输出，不要加任何前后缀：\n"
+            "1) 图上有文字（代码、报错、聊天记录、表格、文档）就把它们**原样**抄出来，"
+            "保留换行和版式，不要翻译、不要改写、不要顺手修正；\n"
+            "2) 图上几乎没有可读的文字（图表、界面截图、照片）时，用一两句话说明"
+            "它画的是什么、能看出哪些信息；\n"
+            "3) 图上看不到的东西一律不要编。");
+    }
     if (wantTranslate) {
         /*
          * 一边认一边翻。中间那条分隔行是界面拆"原文 / 译文"两栏的依据

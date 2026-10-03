@@ -2,6 +2,7 @@
 
 #include "PinOcr.h"
 #include "Screenshot.h"
+#include "Translate.h"
 
 #include <QApplication>
 #include <QBuffer>
@@ -46,29 +47,6 @@ namespace {
 constexpr qreal kPinDpr = 1.0;
 
 constexpr double kPi = 3.14159265358979323846;
-
-/*
- * 一张图 -> png 的 data URL（"data:image/png;base64,…"）。
- *
- * 和选区识别（Screenshot::selectionImage）编出来的**必须是同一种东西** ——
- * 都是发给 LlmClient::recognize 的。太大就返回空串：base64 之后还要再涨三分之一，
- * 几十 MB 的请求体多半会被服务端直接掐掉，报出来还是一句看不懂的 HTTP 错，
- * 界面上回一句人话更省事。
- */
-QString imageToDataUrl(const QImage &image) {
-    if (image.isNull())
-        return QString();
-    QByteArray png;
-    QBuffer buffer(&png);
-    buffer.open(QIODevice::WriteOnly);
-    if (!image.save(&buffer, "PNG"))
-        return QString();
-    buffer.close();
-    constexpr int kMaxRawBytes = 8 * 1024 * 1024;
-    if (png.size() > kMaxRawBytes)
-        return QString();
-    return QStringLiteral("data:image/png;base64,") + QString::fromLatin1(png.toBase64());
-}
 
 /* 波浪线：沿 a->b 一段段摆过去，用二次曲线连起来（见 paintAnnotation 的说明） */
 void paintWavy(QPainter &painter, const QPointF &a, const QPointF &b, qreal amp) {
@@ -415,7 +393,10 @@ QImage PinWindow::composedImage() const {
     return out;
 }
 
-QString PinWindow::composedImageUrl() const { return imageToDataUrl(composedImage()); }
+QString PinWindow::composedImageUrl() const {
+    /* 编码只留一份（见 LlmClient::imageToDataUrl）：和选区、汇总认截图发的是同一种东西 */
+    return LlmClient::imageToDataUrl(composedImage());
+}
 
 void PinWindow::annotationsChanged(const QVariantList &list) {
     m_annotations = list;

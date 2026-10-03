@@ -214,7 +214,9 @@ public:
      * 一段时间里的剪贴板原文，按文件分组（汇总的输入）。
      *
      * fromDate / toDate 是 `yyyy-MM-dd`，两端都含。返回
-     *   { path, label, dateKey, count, text }
+     *   { path, label, dateKey, count, images, imageList, text }
+     * imageList 是那些纯图片段：{ time, path }，path 已经按它自己那个日期目录
+     * 解成绝对路径（汇总要不要认这些图，见 Summarizer::imageMode）。
      * text 是这些段落拼成的 markdown（每段前面带它自己的时间，模型才知道先后）。
      *
      * 只收"看起来就是剪贴板自动记的那一类"文件：每一段段首都得是**真的时分秒**，

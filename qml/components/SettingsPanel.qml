@@ -2973,7 +2973,94 @@ Window {
                             text: "用的是「模型」那一栏里配的同一个模型（和翻译、校验共用一套配置）。"
                                   + "内容按每 6000 字分批发，一批一次请求，一轮最多 30 批 —— "
                                   + "区间拉太长会直接让你缩短，不会闷着烧 token。"
-                                  + "这一版只汇总文字，剪贴板里的截图不进汇总。"
+                                  + (Sum.imageMode === "none"
+                                     ? "剪贴板里的截图不认（下面那一档可以切）。"
+                                     : ("剪贴板里的截图先按"
+                                        + (Sum.imageMode === "vision" ? "多模态" : "OCR")
+                                        + "认成文字，再和复制的内容一起汇总。"))
+                        }
+
+                        /* ---- 剪贴板里的截图：认不认、用哪条路认 ---- */
+                        Column {
+                            width: parent.width
+                            spacing: 6
+
+                            Text {
+                                text: "剪贴板里的截图（图片段）"
+                                color: root.textBright
+                                font.pixelSize: 12
+                                font.bold: true
+                            }
+
+                            Row {
+                                /* objectName 给自检：它要按名字找到这一档量个数 */
+                                objectName: "sumImageModeRow"
+                                /* 自检从场景外面数不过来三个自绘按钮，由这里报真实个数 */
+                                readonly property int modeCount: sumModeRepeater.count
+                                spacing: 6
+
+                                Repeater {
+                                    id: sumModeRepeater
+                                    model: [ { k: "none",   label: "不处理" },
+                                             { k: "ocr",    label: "OCR 识别" },
+                                             { k: "vision", label: "多模态识别" } ]
+
+                                    delegate: Rectangle {
+                                        id: sumModeCell
+                                        required property var modelData
+                                        readonly property bool active: Sum.imageMode === sumModeCell.modelData.k
+
+                                        width: 96
+                                        height: 24
+                                        radius: 4
+                                        color: sumModeCell.active ? Theme.c("#2f3a44", Theme.rev)
+                                                                  : (sumModeHit.containsMouse
+                                                                     ? root.rowHover : "transparent")
+                                        border.width: 1
+                                        border.color: sumModeCell.active ? root.accentColor
+                                                                        : root.borderColor
+
+                                        Text {
+                                            anchors.centerIn: parent
+                                            text: sumModeCell.modelData.label
+                                            color: sumModeCell.active ? root.accentColor
+                                                                     : root.textColor
+                                            font.pixelSize: 11
+                                        }
+                                        MouseArea {
+                                            id: sumModeHit
+                                            anchors.fill: parent
+                                            hoverEnabled: true
+                                            cursorShape: Qt.PointingHandCursor
+                                            onClicked: Sum.imageMode = sumModeCell.modelData.k
+                                        }
+                                    }
+                                }
+                            }
+
+                            Text {
+                                width: parent.width
+                                wrapMode: Text.WordWrap
+                                color: root.mutedColor
+                                font.pixelSize: 11
+                                text: {
+                                    if (Sum.imageMode === "vision")
+                                        return "多模态：每张图一次请求，发给「模型」那一栏的识别模型"
+                                               + "（留空就用翻译那个模型名，它得能看图）。"
+                                               + "慢、要等请求，但图上没字的东西（图表、界面、照片）"
+                                               + "它也说得出一句。一轮最多 50 张。"
+                                    if (Sum.imageMode === "none")
+                                        return "不处理：只汇总复制到的文字，图片段照旧跳过"
+                                               + "（就是加这个功能之前的行为）。"
+                                    return "OCR：本机认字，不联网、不烧 token，一轮最多 50 张。"
+                                           + "引擎跟着「模型」那一栏的图上选字走 —— 现在用的是 "
+                                           + (Llm.pinOcrEngine === "ppocr"
+                                              ? "PP-OCRv6（每张要起一次本机程序，一张几秒）"
+                                              : "Windows 自带（离线，一张几十到几百毫秒）")
+                                           + "。代价：图上本来没有字的（照片、纯图表）认出来是空的，"
+                                           + "那种内容要用多模态那一档。"
+                                }
+                            }
                         }
 
                         /* ---- 区间 ---- */

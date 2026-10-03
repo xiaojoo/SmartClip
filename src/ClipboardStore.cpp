@@ -1386,6 +1386,35 @@ QStringList ClipboardStore::categories() const {
 }
 
 /*
+ * 一行 markdown 里所有图片引用的**路径**部分：`![alt](assets/a.png)` → "assets/a.png"。
+ *
+ * 只取 "](" 之后、第一个空白或 ')' 之前的那段：我们自己写的一定是
+ * `![图片](assets/xxx.png)`（见 captureImage），导入的外部文件可能带 title
+ * （`![](a.png "标题")`），那种在磁盘上本来就对不上号 —— 别在这儿替它猜规矩，
+ * 交给汇总那边按"这张读不出来"计数，比悄悄认错一张图好。
+ */
+static QStringList assetRefsOf(const QString &line) {
+    QStringList out;
+    int from = 0;
+    while (from < line.size()) {
+        const int open = line.indexOf(QStringLiteral("]("), from);
+        if (open < 0)
+            break;
+        const int close = line.indexOf(QLatin1Char(')'), open + 2);
+        if (close < 0)
+            break;
+        QString ref = line.mid(open + 2, close - open - 2).trimmed();
+        const int space = ref.indexOf(QLatin1Char(' '));
+        if (space > 0)
+            ref = ref.left(space);
+        if (!ref.isEmpty())
+            out.append(ref);
+        from = close + 1;
+    }
+    return out;
+}
+
+/*
  * 一段时间里的剪贴板原文（汇总的输入）。
  *
  * 判"这个文件是不是剪贴板自动记的"用两条一起（理由见 .h 上那段）：
@@ -1448,6 +1477,7 @@ QVariantList ClipboardStore::sectionsInRange(const QString &fromDate,
         QString joined;
         int count = 0;
         int images = 0;
+        QVariantList imageList;
         bool clipboardShaped = true;
         for (const Section &section : sections) {
             const QDateTime when =
@@ -1460,12 +1490,22 @@ QVariantList ClipboardStore::sectionsInRange(const QString &fromDate,
             if (body.isEmpty())
                 continue;
             /*
-             * 纯图片那一段跳过：这一版不把图喂给模型，正文里那句
-             * `![](assets/x.png)` 对它毫无意义，而剪贴板里的图片引用是
-             * **相对它自己那个日期目录**的 —— 抄进文档就成了断链。
+             * 纯图片那一段不进正文：那句
+             * `![](assets/x.png)` 对模型毫无意义，而图片引用是
+             * **相对它自己那个日期目录**的 —— 抄进文档就成了断链。改成单列一份
+             * imageList（绝对路径 + 它自己的时间），认不认、用哪条路认由 Summarizer
+             * 按「设置 → 汇总」那个选项决定。
              */
             if (body.startsWith(QStringLiteral("![")) && !body.contains(QLatin1Char('\n'))) {
                 ++images;
+                for (const QString &rel : assetRefsOf(body)) {
+                    QVariantMap item;
+                    item.insert(QStringLiteral("time"), section.time);
+                    /* 相对路径按**它自己那个日期目录**解开，整目录搬走也指得到 */
+                    item.insert(QStringLiteral("path"),
+                                QDir::cleanPath(info.dir().filePath(rel)));
+                    imageList.append(item);
+                }
                 continue;
             }
             /* 段首带上日期：跨天的原文混在一批里，模型才知道先后 */
@@ -1473,7 +1513,11 @@ QVariantList ClipboardStore::sectionsInRange(const QString &fromDate,
                     + QStringLiteral("\n\n");
             ++count;
         }
-        if (!clipboardShaped || count == 0)
+        /*
+         * 一段文字都没有、但有几张截图的文件**也要交出去**：那天只往剪贴板里放了图
+         * 是常事，把整个文件跳过的话那些图连被认的机会都没有。
+         */
+        if (!clipboardShaped || (count == 0 && imageList.isEmpty()))
             continue;
 
         QVariantMap row;
@@ -1482,6 +1526,7 @@ QVariantList ClipboardStore::sectionsInRange(const QString &fromDate,
         row.insert(QStringLiteral("dateKey"), day);
         row.insert(QStringLiteral("count"), count);
         row.insert(QStringLiteral("images"), images);
+        row.insert(QStringLiteral("imageList"), imageList);
         row.insert(QStringLiteral("text"), joined.trimmed() + QLatin1Char('\n'));
         out.append(row);
     }

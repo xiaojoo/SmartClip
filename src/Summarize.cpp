@@ -1,11 +1,17 @@
 #include "Summarize.h"
 
 #include "ClipboardStore.h"
+#include "PinOcr.h"
 #include "Translate.h"
 
 #include <QDateTime>
+#include <QPointer>
+#include <QRunnable>
+#include <QSettings>
+#include <QThreadPool>
 #include <QVariantList>
 #include <QVariantMap>
+#include <algorithm>
 
 namespace {
 
@@ -32,10 +38,10 @@ const QString kFallbackCategory = QStringLiteral("未分类");
  * 草稿正文里那行出处。区间已经写在上一级的小标题上了，这里就不重复，
  * 补上"吃进去多少段、跳过多少图片、哪一批"—— 过半年想回去查，靠的是批次号。
  */
-QString provenance(const QString &runId, int sections, int images) {
+QString provenance(const QString &runId, int sections, const QString &imageNote) {
     QString line = QStringLiteral("> 取自 %1 段原文 · 批次 %2").arg(sections).arg(runId);
-    if (images > 0)
-        line += QStringLiteral(" · 另有 %1 段是图片，本版不处理").arg(images);
+    if (!imageNote.isEmpty())
+        line += QStringLiteral(" · %1").arg(imageNote);
     return line + QStringLiteral("\n\n");
 }
 
@@ -127,10 +133,101 @@ constexpr int kMaxNewCategories = 3;
 /* 正文比这还短的分类撑不起一份文档（模型常拿一句"（样式表的变量定义）"占位） */
 constexpr int kMinCategoryChars = 80;
 
+/*
+ * 一轮最多认几张图。
+ *
+ * 和 kMaxBatches 同一个道理，只是这儿疼的不是超时是**等**：OCR 一张几十到几百
+ * 毫秒，多模态一张就是一次请求（本地模型十几秒）。一天截图上百张时整轮会跑到
+ * 没完，所以超出的不认 —— 但**照样报数**（状态里、草稿那行出处里都写得清）。
+ */
+constexpr int kMaxShotsPerRun = 50;
+
+/*
+ * 认出来的那段文字在正文里长什么样：段首格式和原文段**一模一样**，
+ * 后面才能和复制来的内容排进同一条时间线（见 sortKeyOf）。
+ * 尾巴上那句"（OCR 认出来的截图）"是写给模型看的，也是写给半年后审稿的人看的。
+ */
+QString shotBlock(const QString &day, const QString &time, const QString &engine,
+                  const QString &text) {
+    return QStringLiteral("### %1 %2（%3 认出来的截图）\n\n%4").arg(day, time, engine, text);
+}
+
+/* 一块的排序键 = 它自己那行段首（"### yyyy-MM-dd HH:mm:ss…"）：字典序就是时间序 */
+QString sortKeyOf(const QString &block) {
+    const int newline = block.indexOf(QLatin1Char('\n'));
+    return newline < 0 ? block : block.left(newline);
+}
+
+/*
+ * 选项只认这三个值。脏配置（手改注册表、旧版本留下的别的字符串）一律回落到
+ * "ocr"：默认档是它 —— 本机离线、不烧 token，配错了也不至于偷偷发起一堆请求。
+ */
+QString cleanImageMode(const QString &value) {
+    if (value == QLatin1String("none") || value == QLatin1String("vision"))
+        return value;
+    return QStringLiteral("ocr");
+}
+
+/*
+ * "ocr" 那一档的工人：读盘 + 认字都在线程池里（PinOcr 那两个函数都是阻塞的）。
+ *
+ * 和 PinWindow 里那个 OcrTask 同一套做法 —— 包括用 QPointer 兜住"认到一半这一轮
+ * 已经没了"（他点了停，或者切了区间重开）。结果回主线程才敢动状态。
+ */
+class ShotOcrTask final : public QRunnable {
+public:
+    ShotOcrTask(Summarizer *sum, const QString &path, const QString &engine,
+                const QString &command)
+        : m_sum(sum), m_path(path), m_engine(engine), m_command(command) {
+        setAutoDelete(true);
+    }
+
+    void run() override {
+        QString error;
+        QString text;
+        const QImage image(m_path);
+        if (image.isNull()) {
+            error = QStringLiteral("这张图读不出来");
+        } else {
+            QVariantList lines;
+            if (m_engine == QLatin1String("ppocr"))
+                lines = PinOcr::recognizeWithProgram(image, m_command, &error);
+            else
+                lines = PinOcr::recognize(image, &error);
+            QStringList rows;
+            for (const QVariant &value : lines)
+                rows.append(value.toMap().value(QStringLiteral("text")).toString());
+            text = rows.join(QLatin1Char('\n'));
+            if (text.trimmed().isEmpty() && error.trimmed().isEmpty())
+                error = QStringLiteral("图上没认出字");
+        }
+        if (m_sum.isNull())
+            return;
+        const QPointer<Summarizer> sum = m_sum;
+        QMetaObject::invokeMethod(sum, [sum, text, error]() {
+            if (sum)
+                sum->applyShotText(text, error);
+        });
+    }
+
+private:
+    QPointer<Summarizer> m_sum;
+    QString m_path;
+    QString m_engine;
+    QString m_command;
+};
 }  // namespace
 
 Summarizer::Summarizer(ClipboardStore *store, LlmClient *llm, QObject *parent)
     : QObject(parent), m_store(store), m_llm(llm) {
+    /*
+     * 图片段怎么处理。默认 "ocr"：本机离线、不烧 token，装上就能用；
+     * 要发给视觉模型的那档得他自己去「设置 → 汇总」切（每张图一次请求）。
+     */
+    QSettings settings;
+    m_imageMode = cleanImageMode(settings.value(QStringLiteral("summarize/imageMode"),
+                                                 QStringLiteral("ocr")).toString());
+
     if (!m_llm)
         return;
 
@@ -156,6 +253,19 @@ void Summarizer::setStatus(const QString &text) {
         return;
     m_status = text;
     emit statusChanged();
+}
+
+/*
+ * 换图片段的处理方式，改一下立刻落盘（设置面板绑的就是这条属性，没有"应用"那一步，
+ * 和 LlmClient 那几项一个约定）。
+ */
+void Summarizer::setImageMode(const QString &value) {
+    const QString clean = cleanImageMode(value);
+    if (m_imageMode == clean)
+        return;
+    m_imageMode = clean;
+    QSettings().setValue(QStringLiteral("summarize/imageMode"), clean);
+    emit settingsChanged();
 }
 
 /* ------------------------------------------------------------------ */
@@ -187,6 +297,8 @@ QString Summarizer::classifyPrompt(const QString &existingCategories) const {
                "- 重复的片段合并成一条；没有长期价值的（一句闲聊、半成品、看不懂的残句）直接丢掉\n"
                "- 命令、代码、配置、报错原文**一字不改**地放进代码块，不要顺手修正\n"
                "- 每条内容末尾用 `（来源 yyyy-MM-dd HH:mm:ss）` 标它自己的时间\n"
+               "- 段首标了「（… 认出来的截图）」的那段是从图片里认出来的，本身可能带识别错误："
+               "照原样收录，残缺的地方不要替他补全\n"
                "- 原文里没有的东西不要编")
         .arg(categories);
 }
@@ -284,11 +396,44 @@ void Summarizer::start(const QString &fromDate, const QString &toDate) {
     }
 
     /*
-     * 切批按"段"切，不从一行中间断开：一段被劈成两半，模型两边各看到半条，
-     * 整理出来就是两条残缺的笔记。一段本身比一批还长时让它独占一批 ——
-     * 断在段中间不如不断。
+     * 这一轮的状态先归零：下面两处是往里**加**的，留着上一轮的数会更糟
+     * （草稿数错、进度倒退，而这两种都比直接不跑难查）。
      */
-    QStringList blocks;
+    m_runId = stampForRun();
+    m_from = from;
+    m_to = to;
+    m_categories = m_store->categories().join(QStringLiteral("、"));
+    m_sections = 0;
+    m_failedSteps = 0;
+    m_collapsed = 0;
+    m_lastError.clear();
+    m_bucket.clear();
+    m_order.clear();
+    m_blocks.clear();
+    m_shots.clear();
+    m_shotBlocks.clear();
+    m_nextShot = 0;
+    m_shotOk = 0;
+    m_shotFailed = 0;
+    m_shotSkipped = 0;
+    m_inShots = false;
+    m_queue.clear();
+    m_drafts = 0;
+    m_doneSteps = 0;
+    m_totalSteps = 0;
+    m_merging = false;
+    m_stopping = false;
+    m_token.clear();
+
+    /*
+     * 先把原文段收齐，图片段单独收成 m_shots —— 两段活儿不能并成一段：
+     * 认图是一张一张来的（本机 OCR 几百毫秒，多模态一次请求），而切批要的
+     * 是"所有段已经按时间排好"。所以现在只攒料，认完才进 startBatchPhase。
+     *
+     * 切批按"段"切，不从一行中间断开：一段被劈成两半，模型两边各看到半条，
+     * 整理出来就是两条残缺的笔记。一段本身比一批还长时按行劈开（见
+     * splitOversizedBlock 里那次翻车）。
+     */
     for (const QVariant &row : rows) {
         const QVariantMap map = row.toMap();
         const QString text = map.value(QStringLiteral("text")).toString();
@@ -296,14 +441,126 @@ void Summarizer::start(const QString &fromDate, const QString &toDate) {
         const QStringList lines = text.split(QLatin1Char('\n'));
         for (const QString &line : lines) {
             if (line.startsWith(QStringLiteral("### ")) && !current.trimmed().isEmpty()) {
-                blocks.append(current.trimmed());
+                m_blocks.append(current.trimmed());
                 current.clear();
             }
             current += line + QLatin1Char('\n');
         }
         if (!current.trimmed().isEmpty())
-            blocks.append(current.trimmed());
+            m_blocks.append(current.trimmed());
+
+        m_sections += map.value(QStringLiteral("count")).toInt();
+        const QString day = map.value(QStringLiteral("dateKey")).toString();
+        for (const QVariant &value : map.value(QStringLiteral("imageList")).toList()) {
+            const QVariantMap shot = value.toMap();
+            Shot item;
+            item.day = day;
+            item.time = shot.value(QStringLiteral("time")).toString();
+            item.path = shot.value(QStringLiteral("path")).toString();
+            m_shots.append(item);
+        }
     }
+
+    setBusy(true);
+
+    if (m_imageMode == QLatin1String("none") || m_shots.isEmpty()) {
+        startBatchPhase();
+        return;
+    }
+
+    /*
+     * 超出上限的砍在尾巴上（m_shots 本来就是按日期先后收的）：宁可认最早那几张，
+     * 也不打乱他"这段先汇总"的预期。砍掉几张在状态里、在草稿那行出处里都报得出来。
+     */
+    if (m_shots.size() > kMaxShotsPerRun) {
+        m_shotSkipped = m_shots.size() - kMaxShotsPerRun;
+        m_shots = m_shots.mid(0, kMaxShotsPerRun);
+    }
+
+    m_inShots = true;
+    m_doneSteps = 0;
+    m_totalSteps = m_shots.size();
+    recognizeNextImage();   /* 状态由它写：那一句本来就带着"第几张 / 共几张" */
+}
+
+/*
+ * 认下一张。一次只让一张在飞：
+ *   * OCR 那条虽然不占网络，但 PP-OCR 是**每张起一个程序**，并发起来机器就没了；
+ *   * 多模态那条要守 LlmClient 的 token 契约（同时两条回来分不清是谁的）。
+ */
+void Summarizer::recognizeNextImage() {
+    if (m_stopping) {
+        m_inShots = false;
+        m_shots.clear();
+        advance();   /* 走原来那条"已停在第 N/M 步"的收尾 */
+        return;
+    }
+    if (m_nextShot >= m_shots.size()) {
+        m_inShots = false;
+        startBatchPhase();
+        return;
+    }
+
+    const Shot shot = m_shots.at(m_nextShot);
+    if (m_imageMode == QLatin1String("vision"))
+        m_token = m_llm->recognizeFile(shot.path, QStringLiteral("note"));
+    else
+        /* 本机 OCR 是阻塞调用（一张几十到几百毫秒），搬到线程池里，别冻住界面 */
+        QThreadPool::globalInstance()->start(new ShotOcrTask(
+            this, shot.path, m_llm->pinOcrEngine(), m_llm->pinOcrRunner()));
+
+    /* 状态在发出去之后才写：那两条路自己都会改状态，我们这句要盖在它后面 */
+    setStatus(QStringLiteral("正在汇总 %1 ~ %2：认第 %3/%4 张截图（%5）…")
+                  .arg(m_from, m_to)
+                  .arg(m_nextShot + 1)
+                  .arg(m_shots.size())
+                  .arg(shotKindLabel()));
+}
+
+void Summarizer::applyShotText(const QString &text, const QString &error) {
+    onImageRecognized(text, error);
+}
+
+/*
+ * 一张有结果了。
+ *
+ * 没认出字的（读不出来 / 引擎报错 / 图上确实没字）**不留正文**，只记一笔数：
+ * 往正文里塞一句"（没认出来）"，模型会把它当成内容抄进草稿 —— 那比少一段更糟。
+ */
+void Summarizer::onImageRecognized(const QString &text, const QString &error) {
+    if (!m_inShots)
+        return;   /* 点了停、或者已经切到下一阶段才回来的：丢掉 */
+
+    const Shot shot = m_shots.value(m_nextShot);
+    ++m_nextShot;
+    ++m_doneSteps;
+    emit progressChanged();
+
+    const QString body = text.trimmed();
+    const QString why = error.trimmed();
+    if (!why.isEmpty() || body.isEmpty()) {
+        ++m_shotFailed;
+        if (!why.isEmpty())
+            m_lastError = why;
+    } else {
+        ++m_shotOk;
+        m_shotBlocks.append(shotBlock(shot.day, shot.time, shotKindLabel(), body));
+    }
+    recognizeNextImage();
+}
+
+/*
+ * 图片阶段结束（这一轮没有图要认时也走这儿）：认出来的块并进原文，切批开跑。
+ *
+ * 是**并进排序**而不是拼在最后 —— 段首那行就是时间，排完截图会落回它自己那个
+ * 时间点上；拼在尾巴上等于把晚上十一点的截图当成这天最后一条内容喂给模型。
+ */
+void Summarizer::startBatchPhase() {
+    QStringList blocks = m_blocks;
+    blocks += m_shotBlocks;
+    std::stable_sort(blocks.begin(), blocks.end(), [](const QString &a, const QString &b) {
+        return sortKeyOf(a) < sortKeyOf(b);
+    });
 
     QList<Task> tasks;
     Task batch;
@@ -311,8 +568,7 @@ void Summarizer::start(const QString &fromDate, const QString &toDate) {
     for (const QString &block : std::as_const(blocks))
         splitOversizedBlock(block, kBatchChars, &pieces);
     for (const QString &block : std::as_const(pieces)) {
-        if (!batch.text.isEmpty()
-            && batch.text.size() + block.size() > kBatchChars) {
+        if (!batch.text.isEmpty() && batch.text.size() + block.size() > kBatchChars) {
             tasks.append(batch);
             batch = Task();
         }
@@ -324,43 +580,69 @@ void Summarizer::start(const QString &fromDate, const QString &toDate) {
         tasks.append(batch);
 
     if (tasks.size() > kMaxBatches) {
+        setBusy(false);
         setStatus(QStringLiteral("这段时间的内容太多（要分 %1 批，上限 %2）"
                                 "—— 把区间缩短一点再汇总")
                       .arg(tasks.size())
                       .arg(kMaxBatches));
+        emit runFinished(0);
+        return;
+    }
+    if (tasks.isEmpty()) {
+        /*
+         * 只有截图、又一张都没认出字：得说一句人话。原来这条路会直接停在
+         * "正在汇总…"上不放 busy（界面那个按钮一直灰着），因为过去不可能
+         * 出现"一批都没有"—— 现在有了图片这一档，就可能。
+         */
+        setBusy(false);
+        setStatus(QStringLiteral("%1 ~ %2：%3，没有可整理的内容")
+                      .arg(m_from, m_to)
+                      .arg(shotNote().isEmpty() ? QStringLiteral("没有内容") : shotNote()));
+        emit runFinished(0);
         return;
     }
 
-    m_runId = stampForRun();
-    m_from = from;
-    m_to = to;
-    m_categories = m_store->categories().join(QStringLiteral("、"));
-    m_sections = 0;
-    m_images = 0;
-    m_failedSteps = 0;
-    m_collapsed = 0;
-    m_lastError.clear();
-    for (const QVariant &row : rows) {
-        const QVariantMap map = row.toMap();
-        m_sections += map.value(QStringLiteral("count")).toInt();
-        m_images += map.value(QStringLiteral("images")).toInt();
-    }
-    m_bucket.clear();
-    m_order.clear();
     m_queue = tasks;
-    m_drafts = 0;
-    m_doneSteps = 0;
-    m_totalSteps = tasks.size();
-    m_merging = false;
-    m_stopping = false;
-    m_token.clear();
-
-    setBusy(true);
+    /* 认图那几步已经记在 doneSteps 上了，分母要在它上面接着数，不然进度条会倒退 */
+    m_totalSteps = m_doneSteps + tasks.size();
     setStatus(QStringLiteral("正在汇总 %1 ~ %2（共 %3 段，分 %4 批问）")
-                  .arg(from, to)
-                  .arg(m_sections)
-                  .arg(m_totalSteps));
+                  .arg(m_from, m_to)
+                  .arg(m_sections + m_shotOk)
+                  .arg(tasks.size()));
     pump();
+}
+
+/* 出现在正文 / 状态 / 草稿出处里的那个引擎名（短，且和设置面板上说的对得上） */
+QString Summarizer::shotKindLabel() const {
+    if (m_imageMode == QLatin1String("vision"))
+        return QStringLiteral("多模态");
+    if (m_llm && m_llm->pinOcrEngine() == QLatin1String("ppocr"))
+        return QStringLiteral("PP-OCR");
+    return QStringLiteral("OCR");
+}
+
+/*
+ * 图片这一档的报数，一句话。草稿那行出处和界面状态**共用**这一句 ——
+ * 两边各写一份的话，哪天对不上数就没人能查出到底认了几张。
+ */
+QString Summarizer::shotNote() const {
+    const int total = m_shots.size() + m_shotSkipped;
+    if (total == 0)
+        return QString();
+    if (m_imageMode == QLatin1String("none"))
+        return QStringLiteral("另有 %1 张截图没认（设置 → 汇总 可以切成 OCR 或多模态）")
+            .arg(total);
+    QString note = QStringLiteral("截图 %1 张：%2 认出 %3 张")
+                       .arg(total)
+                       .arg(shotKindLabel())
+                       .arg(m_shotOk);
+    if (m_shotFailed > 0)
+        note += QStringLiteral("，%1 张没认出字").arg(m_shotFailed);
+    if (m_shotSkipped > 0)
+        note += QStringLiteral("，另有 %1 张超出了每轮 %2 张的上限")
+                    .arg(m_shotSkipped)
+                    .arg(kMaxShotsPerRun);
+    return note;
 }
 
 void Summarizer::cancel() {
@@ -368,6 +650,12 @@ void Summarizer::cancel() {
         return;
     m_stopping = true;
     m_queue.clear();
+    /*
+     * 认到一半也在这儿收手：标志一放下，线程池里那张回来就没人认了
+     * （onImageRecognized 开头那道守卫），不会再往这一轮里添正文。
+     */
+    m_inShots = false;
+    m_shots.clear();
     setStatus(QStringLiteral("正在收尾…"));
     advance();
 }
@@ -500,7 +788,7 @@ void Summarizer::finishCategory(const QString &category, const QStringList &part
     if (body.trimmed().isEmpty())
         return;
     body = QStringLiteral("## 汇总 %1 ~ %2\n\n").arg(m_from, m_to)
-         + provenance(m_runId, m_sections, m_images) + body.trimmed();
+         + provenance(m_runId, m_sections, shotNote()) + body.trimmed();
     const QString path = m_store->writeDraft(m_runId, category, body);
     if (!path.isEmpty())
         ++m_drafts;
@@ -517,13 +805,17 @@ void Summarizer::complete() {
                                ? QStringLiteral("%1 批没整理出来（%2）· ").arg(m_failedSteps)
                                      .arg(m_lastError)
                                : QString();
+    /* 有几张图没认出来也一样要说在前面，光报草稿数会让他以为这轮把图都吃了 */
+    const QString shots = (m_shotFailed > 0 || m_shotSkipped > 0)
+                              ? shotNote() + QStringLiteral(" · ")
+                              : QString();
     const QString folded = m_collapsed > 0
                                ? QStringLiteral("%1 个分类太碎、并进了「未分类」· ")
                                      .arg(m_collapsed)
                                : QString();
     if (m_drafts > 0)
         setStatus(QStringLiteral("%1%2汇总完成：%3 份草稿在「待审」里，审完可以收进归档")
-                      .arg(failed, folded)
+                      .arg(failed, shots + folded)
                       .arg(m_drafts));
     else if (m_failedSteps > 0)
         setStatus(QStringLiteral("%1一份草稿都没有：把区间缩短，或者换「模型」那一栏里"
@@ -537,6 +829,11 @@ void Summarizer::onFinished(const QString &token, const QString &text) {
     if (token != m_token || m_token.isEmpty())
         return;
     m_token.clear();
+    if (m_inShots) {
+        /* 这条回来的是**一张截图认出来的正文**，不是某一批的分类结果 */
+        onImageRecognized(text, QString());
+        return;
+    }
     ++m_doneSteps;
     emit progressChanged();
 
@@ -582,6 +879,10 @@ void Summarizer::onFailed(const QString &token, const QString &error) {
     if (token != m_token || m_token.isEmpty())
         return;
     m_token.clear();
+    if (m_inShots) {
+        onImageRecognized(QString(), error);
+        return;
+    }
     m_current = Task();
 
     /*

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QImage>
 #include <QJsonObject>
 #include <QObject>
 #include <QPointer>
@@ -202,6 +203,29 @@ public:
     Q_INVOKABLE QString recognize(const QString &imageDataUrl, const QString &target = QString(),
                                   const QString &source = QString());
 
+    /*
+     * 识别**磁盘上的一个图片文件**（汇总认剪贴板里那几张截图走的是这条）。
+     *
+     * 和 recognize 的差别只有"图从哪儿来"：那边是屏幕上框选的那一块（已经在内存
+     * 里，而且是用户挑出来的那一小块），这边只有一张整图的路径。编码、发请求、
+     * token 回调契约全共用同一条路 —— 汇总那边不该自己再拼一份 base64，
+     * 拼出来的东西和识别选区的不是一套，模型那边的表现就不会是一套。
+     *
+     * persona 现在只有 "note" 这一档用得上（见 postVision：读字，图上没什么字时
+     * 让它说一句这图讲了什么）；文件读不出来 / 图太大都会回 failed。
+     */
+    Q_INVOKABLE QString recognizeFile(const QString &imagePath, const QString &persona);
+
+    /*
+     * 一张图 -> png 的 data URL（"data:image/png;base64,…"）。
+     *
+     * **只有这一份**：选区识别（Screenshot::selectionImage）、贴图识别
+     * （PinWindow::composedImageUrl）、汇总认截图（recognizeFile）发的必须是
+     * 同一种东西。太大就返回空串 —— base64 之后还要再涨三分之一，几十 MB 的请求
+     * 体多半被服务端直接掐掉，报出来还是一句看不懂的 HTTP 错。
+     */
+    static QString imageToDataUrl(const QImage &image);
+
     /* 选字引擎 / PP-OCR 命令（见上面那两个 Q_PROPERTY 的说明） */
     QString pinOcrEngine() const;
     void setPinOcrEngine(const QString &value);
@@ -293,6 +317,14 @@ private:
      */
     void postVision(const QString &token, const QString &imageDataUrl, const QString &target,
                     const QString &source, const QString &persona);
+    /*
+     * 异步回一句失败（和 post / postVision 里那个 failLater 同一套做法）。
+     *
+     * 为什么必须异步：这些入口的契约是**先返回 token、结果从信号回来**，
+     * 同步 emit 会让调用方在拿到 token 之前就收到回调，界面记不下这次请求，
+     * 那句失败就当没发生。
+     */
+    void failAsync(const QString &token, const QString &reason);
     /*
      * 最后那一步：把拼好的 body 发出去、认回复。翻译和识别共用（见 .cpp 里的说明）。
      * busyStatus 是这期间状态栏上那句话（"翻译中…" / "正在识别…"）。

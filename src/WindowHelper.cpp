@@ -332,36 +332,6 @@ bool WindowHelper::startSystemMove()
     QWindow *wh = m_widget->windowHandle();
     if (!wh)
         return false;
-
-    /*
-     * 最大化状态下拖标题栏 = "拖出来还原"（原生窗口就是这个手感）。
-     *
-     * 我们自己的最大化只是几何、系统不知道它是最大化（见 applyState 那段：
-     * 就是**为了**不让系统放那段转场），系统因此不会替我们还原 —— 这一条
-     * 得自己补，不然拖起来是一块铺满屏幕的窗在动。
-     *
-     * 位置也要自己算：原生行为是"还原之后鼠标还压在标题栏上"，
-     * 所以按鼠标在最大化窗口里的**相对横向位置**把还原矩形摆过去，
-     * 纵向让鼠标落在标题栏那一条里。
-     */
-    if (m_maximized) {
-        const QPoint cursor = QCursor::pos();
-        const QRect from = m_widget->geometry();
-
-        restore();
-
-        if (m_widget->geometry().isValid() && from.width() > 0) {
-            const qreal fx = qBound(0.15, qreal(cursor.x() - from.x()) / qreal(from.width()), 0.85);
-            const int dy = qBound(0, cursor.y() - from.y(), 16);
-            QRect to = m_widget->geometry();
-            to.moveLeft(qRound(cursor.x() - fx * to.width()));
-            to.moveTop(cursor.y() - dy);
-            m_widget->setGeometry(to);
-            m_normalRect = to;
-            trace(QStringLiteral("startSystemMove：拖出还原，摆到 %1x%2@%3,%4（鼠标还压在标题栏上）")
-                      .arg(to.width()).arg(to.height()).arg(to.x()).arg(to.y()));
-        }
-    }
     return wh->startSystemMove();
 }
 

@@ -1,6 +1,7 @@
 #include "SelfTest.h"
 
 #include "ClipboardStore.h"
+#include "PinOcr.h"
 #include "Summarize.h"
 #include "Translate.h"
 
@@ -9,8 +10,10 @@
 #include <QEventLoop>
 #include <QFile>
 #include <QFileInfo>
+#include <QFont>
 #include <QHostAddress>
 #include <QImage>
+#include <QPainter>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -566,6 +569,8 @@ int SelfTest::runSummarize(ClipboardStore *store, Summarizer *sum, QObject *qmlR
         const QString savedBase = llm->apiBase();
         const QString savedKey = llm->apiKey();
         const QString savedModel = llm->model();
+        /* 图片那一档跑完要换回原样：自检不改他的设置（自检不留痕） */
+        const QString savedImageMode = sum->imageMode();
 
         ScriptedLlm mock;
         sumcheck(mock.listen(QHostAddress::LocalHost, 0), "假模型服务起来了",
@@ -755,6 +760,184 @@ int SelfTest::runSummarize(ClipboardStore *store, Summarizer *sum, QObject *qmlR
         for (const QVariant &value : store->drafts())
             store->discardDraft(value.toMap().value(QStringLiteral("path")).toString());
 
+        /* ------------------------------------------------------------- */
+        /* D/E/F. 剪贴板里的截图：真认、真进请求、真报数                    */
+        /* ------------------------------------------------------------- */
+        std::fputs("\n-- 截图识别进汇总（OCR / 多模态） --\n", stdout);
+
+        /*
+         * 先把这一天的东西清空再测：这三案例都要数得清"发了几条请求、几张图"，
+         * 而上面那几节已经往同一天里堆了一段 2.6 万字的原文。
+         * deleteFile 会把它引用到的图片一起收拾掉（没人引用才删）。
+         */
+        for (const QVariant &value : store->sectionsInRange(today, today))
+            store->deleteFile(value.toMap().value(QStringLiteral("path")).toString());
+        sumcheck(store->sectionsInRange(today, today).isEmpty(), "清干净了这一天");
+
+        sum->setImageMode(QStringLiteral("乱七八糟"));
+        sumcheck(sum->imageMode() == QLatin1String("ocr"),
+                 "认不出来的取值回落到 OCR（默认档：本机、不烧 token）", sum->imageMode());
+        sum->setImageMode(QStringLiteral("ocr"));
+
+        /* 造一张真图：白底黑字，OCR 那一档要真的去认它（不是塞一段假文字糊弄自己） */
+        auto makeShot = [&temp](const QString &name, const QString &words, int w, int h) {
+            QImage image(w, h, QImage::Format_RGB32);
+            image.fill(Qt::white);
+            QPainter painter(&image);
+            painter.setPen(Qt::black);
+            painter.setFont(QFont("Arial", 30, QFont::Bold));
+            painter.drawText(image.rect(), Qt::AlignCenter, words);
+            painter.end();
+            const QString path = temp.path() + QStringLiteral("/fixture-%1.png").arg(name);
+            return image.save(path) ? QImage(path) : QImage();
+        };
+
+        /* 草稿开头那行出处（报的是"图片吃进去几张、认出几张"） */
+        auto provenanceLine = [](const QString &text) {
+            const QStringList lines = text.split(QLatin1Char('\n'));
+            for (const QString &line : lines) {
+                if (line.contains(QStringLiteral("截图")))
+                    return line.trimmed();
+            }
+            return QStringLiteral("（草稿里没有出处那行）");
+        };
+
+        sumcheck(store->captureText(kClipOne), "喂进一条文字原文");
+        sumcheck(store->captureImage(makeShot("ocr", "SUMOCR42", 520, 130)), "喂进一张写着字的真图");
+        store->rescan();
+
+        {
+            const QVariantList rows = store->sectionsInRange(today, today);
+            sumcheck(rows.size() == 1, "文字段和图片段住在同一个文件里", QString::number(rows.size()));
+            const QVariantMap row = rows.value(0).toMap();
+            const QVariantList shots = row.value(QStringLiteral("imageList")).toList();
+            sumcheck(shots.size() == 1, "sectionsInRange 把图片段交出来了（不再只是个计数）",
+                     QString::number(shots.size()));
+            const QString shotPath =
+                shots.value(0).toMap().value(QStringLiteral("path")).toString();
+            sumcheck(QFileInfo::exists(shotPath),
+                     "图片路径已按它自己那个日期目录解成绝对路径（相对路径抄进文档会断链）",
+                     shotPath);
+            sumcheck(row.value(QStringLiteral("count")).toInt() == 1
+                         && row.value(QStringLiteral("images")).toInt() == 1,
+                     "文字数在 count、图片数在 images，两本账没混");
+        }
+
+        /* D. OCR：本机认字，一条模型请求都不该多发 */
+        mock.served = 0;
+        mock.requests.clear();
+        mock.replies = { QStringLiteral("=== 分类: 截图 ===\n这一类的正文是照识别内容整理的%1").arg(pad) };
+        sum->start(today, today);
+        const int ocrDrafts = waitRun();
+        sumcheck(mock.served == 1, "OCR 不占模型请求（1 批 = 1 条）", QString::number(mock.served));
+        sumcheck(sum->totalSteps() == 2 && sum->doneSteps() == 2,
+                 "进度分母把认图那一步也数进去了（1 张图 + 1 批）",
+                 QStringLiteral("%1/%2").arg(sum->doneSteps()).arg(sum->totalSteps()));
+        if (!PinOcr::available()) {
+            sumout("这台机器没有 Windows OCR 语言包：真认字那两条没法钉，跳过");
+        } else {
+            QString draftText;
+            for (const QVariant &value : store->drafts())
+                draftText += readIt(value.toMap().value(QStringLiteral("path")).toString());
+            sumcheck(ocrDrafts >= 1 && draftText.contains(QStringLiteral("截图 1 张：OCR 认出 1 张")),
+                     "真 OCR 认出了字，草稿那行出处把张数报了", provenanceLine(draftText));
+            sumcheck(mock.requests.value(0).contains(QStringLiteral("认出来的截图")),
+                     "认出来的内容以\"截图块\"的形式进了发给模型的正文");
+            /* 认得**准不准**是引擎的事，不进断言（那种红不是我们的 bug）：打出来看 */
+            sumout(mock.requests.value(0).contains(QStringLiteral("SUMOCR42"))
+                       ? QStringLiteral("Windows OCR 把夹具上的 SUMOCR42 原样读出来了")
+                       : QStringLiteral("注意：SUMOCR42 没被原样读出来（图上写的是这四个字符，见夹具）"));
+        }
+        for (const QVariant &value : store->drafts())
+            store->discardDraft(value.toMap().value(QStringLiteral("path")).toString());
+
+        /* E. 多模态：图要真的编码进请求，认回来的字要进那一批原文 */
+        sum->setImageMode(QStringLiteral("vision"));
+        mock.served = 0;
+        mock.requests.clear();
+        mock.replies = { QStringLiteral("图上抄下来的字：SUMVISION77"),
+                         QStringLiteral("=== 分类: 看图 ===\n看图整理出来的正文%1").arg(pad) };
+        sum->start(today, today);
+        const int visionDrafts = waitRun();
+        sumcheck(mock.served == 2, "多模态是每张一次请求：1 张图 + 1 批 = 2 条",
+                 QString::number(mock.served));
+        sumcheck(mock.requests.value(0).contains(QStringLiteral("image_url"))
+                     && mock.requests.value(0).contains(
+                            QStringLiteral("data:image/png;base64,")),
+                 "发出去的是带图的多模态消息（不是把文件路径当文字发给模型）");
+        sumcheck(mock.requests.value(0).contains(QStringLiteral("补全图片的内容")),
+                 "用的是\"读字 + 没字时说一句这图讲了什么\"那套提示词");
+        sumcheck(mock.requests.value(1).contains(QStringLiteral("SUMVISION77")),
+                 "看图认回来的文字进了那一批原文");
+        sumcheck(visionDrafts >= 1, "多模态这一轮照样落出了草稿", QString::number(visionDrafts));
+        for (const QVariant &value : store->drafts())
+            store->discardDraft(value.toMap().value(QStringLiteral("path")).toString());
+
+        /* F. 超出每轮上限：多出来的不认，但要说得出是几张 */
+        for (const QVariant &value : store->sectionsInRange(today, today))
+            store->deleteFile(value.toMap().value(QStringLiteral("path")).toString());
+        sumcheck(store->captureText(kClipTwo), "上限这一案例：先喂一条文字");
+        for (int i = 0; i < 51; ++i)   /* 上限是 50（kMaxShotsPerRun），第 51 张该被砍 */
+            store->captureImage(makeShot(QStringLiteral("c%1").arg(i),
+                                         QStringLiteral("SUMCAP%1").arg(i), 320, 90));
+        store->rescan();
+        mock.served = 0;
+        mock.requests.clear();
+        mock.replies = { QStringLiteral("图上抄下来的字"),
+                         QStringLiteral("=== 分类: 上限 ===\n一批装得下的正文%1").arg(pad) };
+        sum->start(today, today);
+        const int cappedDrafts = waitRun();
+        sumcheck(mock.served == 51, "只认了 50 张（50 条看图 + 1 条分类）",
+                 QString::number(mock.served));
+        QString cappedDraft;
+        if (!store->drafts().isEmpty())
+            cappedDraft = readIt(store->drafts().first().toMap()
+                                     .value(QStringLiteral("path")).toString());
+        sumcheck(cappedDrafts >= 1 && cappedDraft.contains(QStringLiteral("另有 1 张超出了每轮 50 张的上限")),
+                 "砍掉的那张在草稿里报得出来", provenanceLine(cappedDraft));
+        for (const QVariant &value : store->drafts())
+            store->discardDraft(value.toMap().value(QStringLiteral("path")).toString());
+        for (const QVariant &value : store->sectionsInRange(today, today))
+            store->deleteFile(value.toMap().value(QStringLiteral("path")).toString());
+
+        /*
+         * G. 那一天只往剪贴板里放了图、一个字都没复制。这种文件过去**整个跳过**
+         * （count==0 就当没内容），于是那几张图连被认的机会都没有 —— 手工摆一份出来钉住。
+         */
+        {
+            const QString onlyDay = QStringLiteral("2026-09-20");
+            const QString dayDir = store->contentRoot() + QLatin1Char('/') + onlyDay;
+            QDir().mkpath(dayDir + QStringLiteral("/assets"));
+            QImage fixture(420, 110, QImage::Format_RGB32);
+            fixture.fill(Qt::white);
+            QPainter painter(&fixture);
+            painter.setPen(Qt::black);
+            painter.setFont(QFont("Arial", 30, QFont::Bold));
+            painter.drawText(fixture.rect(), Qt::AlignCenter, QStringLiteral("SUMONLY7"));
+            painter.end();
+            sumcheck(fixture.save(dayDir + QStringLiteral("/assets/only.png")),
+                     "那一天摆了一张图（没有一条文字）");
+            QFile md(dayDir + QStringLiteral("/101530.md"));
+            sumcheck(md.open(QIODevice::WriteOnly), "那份剪贴板文件也写出来了", dayDir);
+            md.write(QStringLiteral("# %1\n\n## 10:15:30\n\n![图片](assets/only.png)\n")
+                         .arg(onlyDay)
+                         .toUtf8());
+            md.close();
+            store->rescan();
+
+            const QVariantList rows = store->sectionsInRange(onlyDay, onlyDay);
+            const QVariantMap row = rows.value(0).toMap();
+            const QVariantList shots = row.value(QStringLiteral("imageList")).toList();
+            sumcheck(rows.size() == 1 && row.value(QStringLiteral("count")).toInt() == 0
+                         && shots.size() == 1,
+                     "只有截图的那一天也交得出来（文字 0 段、图 1 张）",
+                     QStringLiteral("%1 行 / 图 %2 张")
+                         .arg(rows.size())
+                         .arg(shots.size()));
+            store->deleteFile(dayDir + QStringLiteral("/101530.md"));
+        }
+
+        sum->setImageMode(savedImageMode);
         llm->setMode(savedMode);
         llm->setApiBase(savedBase);
         llm->setApiKey(savedKey);
@@ -804,6 +987,16 @@ int SelfTest::runSummarize(ClipboardStore *store, Summarizer *sum, QObject *qmlR
             const qreal height = column ? column->property("implicitHeight").toReal() : 0.0;
             sumcheck(height > 320, "那一栏画出了内容（塌成 0 就是绑定写错了）",
                      QString::number(height));
+
+            /*
+             * 新加的那一档要真在界面上：藏在设置里看不见的功能等于没做。
+             * 数的是 Row 下面那三个自绘按钮（不是原生控件，见 feedback-no-ua-default-widgets）。
+             */
+            QObject *modeRow = panel->findChild<QObject *>("sumImageModeRow");
+            sumcheck(modeRow != nullptr, "「汇总」那一栏里有图片识别那一档");
+            const int modeButtons = modeRow ? modeRow->property("modeCount").toInt() : 0;
+            sumcheck(modeButtons == 3, "三个选项都画出来了（不处理 / OCR / 多模态）",
+                     QString::number(modeButtons));
             const QVariantList rows = panel->property("draftRows").toList();
             sumcheck(rows.size() == 1, "面板自己那份草稿清单是 1 行", QString::number(rows.size()));
 
