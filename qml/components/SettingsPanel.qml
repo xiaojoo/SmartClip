@@ -179,12 +179,20 @@ Window {
         + (lockedByScheme("terminalSize") ? "1" : "0")
 
     /*
-     * 换栏目 = 回到顶部。
+     * 换栏目 = 回到顶部，另外把"这一栏要的数据"取回来。
      *
-     * 右栏从"直接铺满"改成了 Flickable（见下面 content 的说明）：上一栏滚到一半
-     * 的位置会留在 contentY 上，点进下一栏第一眼就是半截内容。
+     * 回到顶部这条：右栏从"直接铺满"改成了 Flickable（见下面 content 的说明），
+     * 上一栏滚到一半的位置会留在 contentY 上，点进下一栏第一眼就是半截内容。
+     *
+     * 取数据这条：格式化那一栏必须在这儿刷一份 —— 自检和键盘导航是**直接改
+     * section** 的（不走 openSection），只挂 openSection 的话那两条路进来是空表。
+     * 为什么不能在 Component.onCompleted 里预先扫一次，见下面那段注释。
      */
-    onSectionChanged: content.contentY = 0
+    onSectionChanged: {
+        content.contentY = 0
+        if (section === "format")
+            refreshFormatTools()
+    }
 
     /* ---- 汇总 / 归档那两栏的状态（见下面的 summarizeColumn / archiveColumn） ---- */
 
@@ -315,8 +323,14 @@ Window {
      */
     ListModel { id: fmtToolModel }
 
+    /*
+     * 刷了几次（一次 = 一遍 Fmt.toolList()）。AtStartup 那份是面板建完那一刻的
+     * 快照，之后不再动 —— 自检拿它钉"启动那一路一次都没扫"（见下面 onCompleted）。
+     */
+    property int fmtRefreshes: 0
+    property int fmtRefreshesAtStartup: -1
+
     Component.onCompleted: {
-        refreshFormatTools()
         /*
          * 汇总区间先给"今天"：不然第一次点「开始汇总」传的是空串，
          * 只能回一句"区间不对"。（清单不在这里取 —— openSection() 打开时取。）
@@ -325,6 +339,18 @@ Window {
             root.sumFrom = root.dayText(0)
             root.sumTo = root.dayText(0)
         }
+        /*
+         * 这里**不调** refreshFormatTools()，而且这句快照放在最后：启动这一路
+         * 只要扫过一次，快照就不是 0，自检那条就红（反证量过：把调用加回来，
+         * 失败项正好是它一条，"刷了 1 次"）。
+         *
+         * 以前这条是挂在 onCompleted 上的，为的是"面板一打开就有行"。但显示这一
+         * 栏的两条路（openSection / 直接改 section）现在自己都会刷；而面板是启动
+         * 就建好的顶层窗，挂在这儿等于每次开程序先在 GUI 线程上扫一遍 PATH ——
+         * 冷的那一次实测 164 毫秒（15 行 × 五级找程序，本机 PATH 99 个目录，
+         * 2026-10-05 两个样本 163.2 / 164.8ms），买到的却是用户没在看的那一栏。
+         */
+        fmtRefreshesAtStartup = fmtRefreshes
     }
 
     /*
@@ -434,12 +460,38 @@ Window {
      * "本机装没装"这个判断结果。
      */
     function refreshFormatTools() {
-        var list = Fmt.toolList()
+        ++root.fmtRefreshes
+        /*
+         * 把"正在编辑的这份文件"报给 C++：prettier / black 一般是装在某个项目的
+         * node_modules、.venv 里而不是全局 PATH 上，不带这个路径的话，面板上那几行
+         * 会一直说"本机没装"，而同一份文件在编辑区里其实格式化得了（两句话对不上）。
+         */
+        var docPath = root.view && root.view.filePath ? root.view.filePath : ""
+        var list = Fmt.toolList(docPath)
+
+        /* 工具列按最长那句量：后缀全表一样，所以比工具名长度就够。
+           三个后缀里「（本机没装）」最宽（七个全角字），所以拿它当尺子 */
+        var widest = ""
+        for (var w = 0; w < list.length; ++w) {
+            var label = list[w].tool + "（本机没装）"
+            if (label.length > widest.length)
+                widest = label
+        }
+        root.fmtToolWidest = widest
 
         if (fmtToolModel.count === list.length) {
             for (var i = 0; i < list.length; ++i) {
                 fmtToolModel.setProperty(i, "command", list[i].command)
                 fmtToolModel.setProperty(i, "available", list[i].available)
+                fmtToolModel.setProperty(i, "source", list[i].source)
+                /*
+                 * 模版那行也得原地刷：用户可能刚在 styles/*.json 里改过数，
+                 * 而这条路**没有信号**（toolsChanged 只在命令变了时发）。
+                 * styleFor / styleSummary 在 C++ 侧按文件的 mtime + 大小缓存，
+                 * 没改过文件时这里就是读一次缓存，15 行不值得再加一层信号。
+                 */
+                fmtToolModel.setProperty(i, "style", list[i].style)
+                fmtToolModel.setProperty(i, "styleError", list[i].styleError)
             }
             return
         }
@@ -447,6 +499,60 @@ Window {
         fmtToolModel.clear()
         for (var j = 0; j < list.length; ++j)
             fmtToolModel.append(list[j])
+    }
+
+    /*
+     * 工具那一列要多宽 —— 按**最长的那句**量出来的，不是拍的。
+     * 这里先后写死过 110、122，两次都把 "clang-format（本机没装）" 截成
+     * "clang-format（本机…"（用户圈的就是这个）。列宽必须全表同一个数才能
+     * 让下面每一行的输入框左边缘对成一条线，所以不能各行走各的 implicitWidth，
+     * 只能取最长那句的宽度。
+     */
+    property string fmtToolWidest: ""
+    Text {
+        id: fmtToolMetric
+        visible: false
+        font.pixelSize: 11
+        text: root.fmtToolWidest
+    }
+    readonly property real fmtToolColWidth: Math.ceil(fmtToolMetric.implicitWidth) + 2
+
+    /*
+     * 格式化那一栏的真实情况，报给自检（{nav, rows, styled, firstStyle}）。
+     *
+     * 为什么由组件自己数：Repeater 长出来的 delegate 从外面 findChild 找不到
+     * （这工程踩过两次，见上面 schemeRowCount 那段），不然"整栏没渲染"和
+     * "渲染了但每行那句模版是空的"在自检里长得一模一样。
+     *
+     * 为什么是**函数**而不是属性：属性绑的是 ListModel 的 role，改了模版文件之后
+     * 那条绑定不一定醒，自检就会拿着上一次的数字报绿（同一类坑：QML 绑定缓存
+     * 函数结果 / 追不到函数调用里的读取）。
+     *
+     * rowWidth / availWidth 是钉"这一行会不会撑出右栏"的：列宽是量出来的，
+     * 量完就得确认加起来还放得下，不然输入框会被挤到看不见的地方。
+     */
+    function fmtSectionProbe() {
+        var styled = 0
+        for (var i = 0; i < fmtToolModel.count; ++i) {
+            if (fmtToolModel.get(i).style.length > 0)
+                styled++
+        }
+        /*
+         * 整行宽度从**第一个委托实例**量（Repeater.itemAt），不能在面板这一层
+         * 直接写委托里的 id：委托的 id 只在那一份委托的作用域里存在，根作用域
+         * 取它是 ReferenceError —— 而这工程的消息处理器会把它吞了，函数返回
+         * 一个空 map，自检那边读到 "0 行 / 0px"（第一次就红在这儿）。
+         */
+        var first = fmtToolRepeater.itemAt(0)
+        return {
+            nav: navItems.some(function (n) { return n.key === "format" }),
+            rows: fmtToolRepeater.count,
+            styled: styled,
+            firstStyle: fmtToolModel.count > 0 ? fmtToolModel.get(0).style : "",
+            toolCol: root.fmtToolColWidth,
+            rowWidth: first ? first.width : 0,
+            availWidth: content.width - 28
+        }
     }
 
     /*
@@ -519,8 +625,22 @@ Window {
      * show()，同名函数会跟它打架（到底调的是哪个，读代码的人看不出来）。
      */
     function openSection(sectionKey) {
+        /* 换没换栏目：换了的话下面那条 onSectionChanged 已经刷过一遍了 */
+        const switchedIntoFormat = sectionKey && section !== sectionKey
         if (sectionKey)
             section = sectionKey
+        /*
+         * 格式化那一栏每次打开都重读一遍：模版是磁盘上的 json 文件，改它**没有
+         * 任何信号**（toolsChanged 只在命令变了时发），不重读就会一直显示上一次
+         * 打开时的数字。
+         *
+         * 代价（2026-10-05 本机量的，Debug 包，两个样本）：冷的那一次 163.2 /
+         * 164.8 毫秒（15 行 × 五级找程序，PATH 上 99 个目录），2 秒内再问一次
+         * 5.3 / 5.5 毫秒（C++ 那份 m_foundCache）。所以这一栏的数据**只在打开
+         * 这一栏时**取，不挂启动 —— 见上面 Component.onCompleted 那段。
+         */
+        if (section === "format" && !switchedIntoFormat)
+            refreshFormatTools()
         capturing = ""
         hint = ""
         /* 上一次的"收进归档 3 份"不该跟着面板一直开着还在 */
@@ -2834,11 +2954,75 @@ Window {
                                   + "不写占位就自动追加在末尾。留空 = 用默认那一行。"
                         }
 
-                        /* 每个语言一行：状态 + 命令输入框（角色名见上面 ListModel 那段） */
+                        Text {
+                            width: parent.width
+                            wrapMode: Text.WordWrap
+                            color: root.mutedColor
+                            font.pixelSize: 11
+                            text: "每行下面那一句是这一语言的**格式模版**（照 IDEA 的默认风格：缩进 / 续行 / 行宽 / 大括号 / 空行）。"
+                                  + "观感由这份模版指挥工具，不是工具自己的默认；"
+                                  + "各工具吃得下的项不一样，所以句尾写清了当前这个能落地几项。"
+                        }
+
+                        Text {
+                            width: parent.width
+                            wrapMode: Text.WordWrap
+                            color: root.mutedColor
+                            font.pixelSize: 11
+                            text: "工具按这几档找：PATH（含你在上面填的完整路径）→ **当前这份文件所在项目**的 "
+                                  + "node_modules/.bin、.venv/Scripts → 用户级 bin（~\\go\\bin、~\\.cargo\\bin、"
+                                  + "%APPDATA%\\npm、pip 的 Scripts 这些没写进 PATH 的地方）→ VS 和 Qt Creator "
+                                  + "自带的 clang-format、官方 LLVM 目录 → npx 用过的缓存。"
+                                  + "工具名后面那个括号说的就是它来自哪一档：不标 = 机器上，（项目里）只对这份"
+                                  + "文件成立，（npx）是缓存里那份。"
+                        }
+
+                        Row {
+                            spacing: 8
+                            PanelButton {
+                                label: "打开模版目录"
+                                onClicked: Cmd.revealInExplorer(Fmt.stylesDir())
+                            }
+                            Text {
+                                anchors.verticalCenter: parent.verticalCenter
+                                /*
+                                 * 不可写要当场说出来：这句旁边写着"改完立刻生效"，
+                                 * 而那一档在只读位置（老版本管理员权限装进 Program
+                                 * Files）时根本存不回去 —— 那时候用户只会以为程序
+                                 * 没读文件，不会想到是权限。
+                                 */
+                                text: Fmt.stylesDir()
+                                      + (Fmt.stylesWritable() ? "" : "（这一档不可写，改了存不进去）")
+                                color: Fmt.stylesWritable() ? root.mutedColor
+                                                            : Theme.c("#d7a85b", Theme.rev)
+                                font.pixelSize: 10
+                            }
+                        }
+
+                        Text {
+                            width: parent.width
+                            wrapMode: Text.WordWrap
+                            color: root.mutedColor
+                            font.pixelSize: 11
+                            text: "里面一种语言一个 json，改完立刻生效（不用重启）；只写你想改的那几项就行，"
+                                  + "没写的沿用内置默认。写错的那一项会在这行下面黄字说出来，其余项照样算数。"
+                        }
+
+                        /*
+                         * 每个语言两行：上面那行是 状态 + 命令输入框，下面那行是这一份
+                         * 格式模版的摘要（缩进 / 续行 / 行宽 / 大括号 / 空行 + 当前这个
+                         * 工具能吃掉其中几项）。
+                         *
+                         * 为什么折成两行而不是在行尾再接一列：这条 Row 实测 534px 宽
+                         * （92 + 8 + 8 + 8 + 110 + 8 + 300），右栏能给的是 581px
+                         * （820 面板宽 - 210 左栏 - 1 - 上下 14 边距），摘要那句
+                         * 通常 90~110px 高不了但要有 ~250px 才不折行 —— 塞不进同一行。
+                         */
                         Repeater {
+                            id: fmtToolRepeater
                             model: fmtToolModel
 
-                            delegate: Row {
+                            delegate: Column {
                                 id: fmtRow
                                 required property int index
                                 required property string id
@@ -2847,80 +3031,117 @@ Window {
                                 required property string defaultCommand
                                 required property string command
                                 required property bool available
+                                required property string source
+                                required property string style
+                                required property string styleError
 
-                                spacing: 8
+                                spacing: 2
 
-                                Text {
-                                    width: 92
-                                    anchors.verticalCenter: parent.verticalCenter
-                                    text: fmtRow.label
-                                    color: root.textColor
-                                    font.pixelSize: 12
-                                }
+                                Row {
+                                    id: fmtToolRow
+                                    spacing: 8
 
-                                /* 装没装那个工具：一个小圆点 + 工具名 */
-                                Rectangle {
-                                    width: 8
-                                    height: 8
-                                    radius: 4
-                                    anchors.verticalCenter: parent.verticalCenter
-                                    color: fmtRow.available ? Theme.c("#7bc47f", Theme.rev) : root.mutedColor
-                                }
-
-                                Text {
-                                    width: 110
-                                    anchors.verticalCenter: parent.verticalCenter
-                                    text: fmtRow.tool
-                                          + (fmtRow.available ? "" : "（没找到）")
-                                    color: fmtRow.available ? root.mutedColor
-                                                            : Theme.c("#d7a85b", Theme.rev)
-                                    font.pixelSize: 11
-                                    elide: Text.ElideRight
-                                }
-
-                                PanelField {
-                                    width: 300
-                                    height: 24
-                                    text: fmtRow.command
-                                    placeholderText: fmtRow.defaultCommand
-                                    color: root.textColor
-                                    placeholderTextColor: root.mutedColor
-                                    font.pixelSize: 11
-                                    selectByMouse: true
-                                    leftPadding: 6
-                                    rightPadding: 6
-                                    onEditingFinished: {
-                                        Fmt.setToolFor(fmtRow.id, text)
-                                        /*
-                                         * 把这一行刷成 C++ 侧规范化过的值（用户填了
-                                         * "  clang-format  "，落盘的是 trim 过的，界面得跟着）。
-                                         *
-                                         * 只写这一行的 model，谁也不重建 —— 这是原来那个
-                                         * Qt.callLater(root.refreshFormatTools) 的主要罪状：
-                                         * 换整个数组 = Repeater 把 15 行全销毁重建，而这一步
-                                         * 恰好发生在"点进另一个输入框"的那一瞬（点中的框一起
-                                         * 被换掉、焦点落空，于是要么顿一下、要么得再点一次）。
-                                         *
-                                         * setProperty 那两下是给"真改了命令"准备的：C++ 会
-                                         * 发 toolsChanged，refreshFormatTools 也会原地刷一遍，
-                                         * 这里再写一次是**失焦但没改**那条路的兜底 —— 那条路
-                                         * 不发信号，不写就看不到 trim 之后的样子。
-                                         */
-                                        fmtToolModel.setProperty(fmtRow.index, "command",
-                                                                 Fmt.toolFor(fmtRow.id))
-                                        fmtToolModel.setProperty(fmtRow.index, "available",
-                                                                 Fmt.toolAvailable(fmtRow.id))
-                                        /* text 的绑定被用户输入打断过（见上面 refreshDocRunner
-                                           那段说明），所以这里得手动回填一次 */
-                                        text = Fmt.toolFor(fmtRow.id)
+                                    Text {
+                                        width: 92
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        text: fmtRow.label
+                                        color: root.textColor
+                                        font.pixelSize: 12
                                     }
-                                    onTextChanged: if (!activeFocus) cursorPosition = 0
-                                    background: Rectangle {
-                                        color: Theme.c("#26282b", Theme.rev)
-                                        border.color: root.borderColor
-                                        border.width: 1
+
+                                    /* 装没装那个工具：一个小圆点 + 工具名 */
+                                    Rectangle {
+                                        width: 8
+                                        height: 8
                                         radius: 4
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        color: fmtRow.available ? Theme.c("#7bc47f", Theme.rev) : root.mutedColor
                                     }
+
+                                    Text {
+                                        width: root.fmtToolColWidth
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        /*
+                                         * 「本机没装」说的是**那个外部工具**在不在，不是"模版没找到"
+                                         * —— 模版永远在（第二行就是它）。原来这句写"没找到"，用户
+                                         * 照着问："模版不是有了吗？"
+                                         * 找到了还说清从哪来：项目里装的那份只对这份文件所在的
+                                         * 目录成立，和机器上装的不是一回事。
+                                         * 后缀刻意写短：整行宽度受右栏限制（栏顶那句解释里说了），
+                                         * 之前写"（这份文件的项目里）"把列撑到 181px、整行 605px
+                                         * 就超出右栏 577px 了（自检当场红）。
+                                         */
+                                        text: fmtRow.tool
+                                              + (!fmtRow.available ? "（本机没装）"
+                                                 : fmtRow.source === "project" ? "（项目里）"
+                                                 : fmtRow.source === "npx" ? "（npx）" : "")
+                                        color: fmtRow.available ? root.mutedColor
+                                                                : Theme.c("#d7a85b", Theme.rev)
+                                        font.pixelSize: 11
+                                        elide: Text.ElideRight
+                                    }
+
+                                    PanelField {
+                                        width: 300
+                                        height: 24
+                                        text: fmtRow.command
+                                        placeholderText: fmtRow.defaultCommand
+                                        color: root.textColor
+                                        placeholderTextColor: root.mutedColor
+                                        font.pixelSize: 11
+                                        selectByMouse: true
+                                        leftPadding: 6
+                                        rightPadding: 6
+                                        onEditingFinished: {
+                                            Fmt.setToolFor(fmtRow.id, text)
+                                            /*
+                                             * 刷成 C++ 侧规范化过的值：用户填了"  clang-format  "
+                                             * 落盘的是 trim 过的；换成另一个工具，"装没装 /
+                                             * 从哪来的 / 模版能落地几项"也全跟着变。
+                                             *
+                                             * 直接调 refreshFormatTools() 而不是手写四行
+                                             * setProperty：它现在本来就是**按行 setProperty**，
+                                             * 谁也不重建 —— 当年那条 Qt.callLater 的罪状是
+                                             * "换整个数组 = Repeater 把 15 行全销毁重建"，
+                                             * 正好发生在点向另一个输入框的那一瞬（焦点落空、
+                                             * 要么顿一下要么得再点一次）。那个坑在
+                                             * refreshFormatTools 里已经填了，这里就复用它的说法。
+                                             */
+                                            root.refreshFormatTools()
+                                            /* text 的绑定被用户输入打断过（见上面 refreshDocRunner
+                                               那段说明），所以这里得手动回填一次 */
+                                            text = Fmt.toolFor(fmtRow.id)
+                                        }
+                                        onTextChanged: if (!activeFocus) cursorPosition = 0
+                                        background: Rectangle {
+                                            color: Theme.c("#26282b", Theme.rev)
+                                            border.color: root.borderColor
+                                            border.width: 1
+                                            radius: 4
+                                        }
+                                    }
+                                }
+
+                                /* 这一份格式模版：观感数字 + 当前工具能吃掉几项 */
+                                Text {
+                                    width: parent.width
+                                    wrapMode: Text.WordWrap
+                                    text: fmtRow.style
+                                    color: root.mutedColor
+                                    font.pixelSize: 10
+                                }
+
+                                /*
+                                 * 模版文件读坏了要说出来 —— 改文件这件事没有别的
+                                 * 地方报错，闷着的话用户只会觉得"我改了它没反应"。
+                                 */
+                                Text {
+                                    width: parent.width
+                                    wrapMode: Text.WordWrap
+                                    visible: fmtRow.styleError.length > 0
+                                    text: "模版文件：" + fmtRow.styleError
+                                    color: Theme.c("#d7a85b", Theme.rev)
+                                    font.pixelSize: 10
                                 }
                             }
                         }

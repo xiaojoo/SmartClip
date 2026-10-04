@@ -56,6 +56,9 @@ set(SMARTCLIP_SOURCES
     # 代码格式化（右键菜单那一条，见 src/Formatter.h）：认外部工具 + 三种内置
     src/Formatter.h
     src/Formatter.cpp
+    # 格式化的**格式模版**：每种语言一份 IDEA 风格，翻成各工具的参数（见 src/CodeStyle.h）
+    src/CodeStyle.h
+    src/CodeStyle.cpp
     # 编辑区校验（中文用词 / 代码语法，见 src/Checker.h）：本地规则 + 大模型
     src/Checker.h
     src/Checker.cpp

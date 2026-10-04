@@ -4481,6 +4481,42 @@ int EditorViewItem::highlightMatches(const QString &text, bool caseSensitive,
     return count;
 }
 
+QVariantMap EditorViewItem::matchStats(const QString &text, bool caseSensitive,
+                                       bool wholeWord, bool regex) const {
+    QVariantMap out;
+    out.insert(QStringLiteral("total"), 0);
+    out.insert(QStringLiteral("current"), 0);
+    if (!m_sci || !hasDocument() || text.isEmpty())
+        return out;
+
+    /*
+     * 和 highlightMatches 同一套扫法（同一个 searchFrom、同一个前进规则），
+     * 所以"总数"和正文上那一圈指示器**必然同一个数** —— 两份实现各扫各的，
+     * 早晚会在边界（零宽命中、跨行）上分叉，界面上就是"3/12"和数出来的圈对不上。
+     */
+    const long docLen = m_sci->SendScintilla(QsciScintillaBase::SCI_GETLENGTH);
+    const long selStart =
+        m_sci->SendScintilla(QsciScintillaBase::SCI_GETSELECTIONSTART);
+
+    int total = 0;
+    int current = 0;
+    long pos = 0;
+    while (pos <= docLen) {
+        const long hit = searchFrom(pos, docLen, text, caseSensitive, wholeWord, regex);
+        if (hit < 0)
+            break;
+        const long hitEnd = m_sci->SendScintilla(QsciScintillaBase::SCI_GETTARGETEND);
+        ++total;
+        if (hit == selStart)
+            current = total;
+        pos = (hitEnd > hit) ? hitEnd : hit + 1;
+    }
+
+    out.insert(QStringLiteral("total"), total);
+    out.insert(QStringLiteral("current"), current);
+    return out;
+}
+
 void EditorViewItem::clearHighlights() {
     if (!m_sci)
         return;

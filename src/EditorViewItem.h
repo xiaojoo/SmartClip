@@ -537,6 +537,19 @@ public:
                          bool regex, bool forward);
     Q_INVOKABLE int highlightMatches(const QString &text, bool caseSensitive,
                                      bool wholeWord, bool regex);
+    /*
+     * 命中统计 { total, current }，给查找栏那个"3 / 12"用。
+     *
+     * current 从 1 开始，**0 = 当前选区不落在任何命中上**（刚打开查找栏、
+     * 或者正文被改过之后就是这个状态）。为什么不猜一个"光标之后第一个"：
+     * 那个数会和正文里真正高亮的那一圈不一致，界面上就成了假计数。
+     *
+     * 它自己扫一遍全文（和 highlightMatches 同一套 searchFrom 循环），
+     * 不在内部存状态 —— 存了就要管失效（改字、换标签、换开关），
+     * 而这条只在人敲键的时候跑，扫一遍比养一份状态便宜。
+     */
+    Q_INVOKABLE QVariantMap matchStats(const QString &text, bool caseSensitive,
+                                       bool wholeWord, bool regex) const;
     Q_INVOKABLE void clearHighlights();
     Q_INVOKABLE bool replaceCurrent(const QString &text, const QString &replacement,
                                     bool caseSensitive, bool wholeWord, bool regex);

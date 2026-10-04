@@ -2851,6 +2851,14 @@ Rectangle {
             findPanelRightGap: editor.findBar.panelRightGap,
             findPanelRadius: editor.findBar.panelRadius,
             findBarHeight: editor.findBar.barHeight,
+            /*
+             * 新排法的两件事（见 FindBar 文件头）：勾选框现在是竖排还是横排、
+             * 计数那句原文。布局是 QML 算的，只有它知道最终结果。
+             */
+            findOptionRows: editor.findBar.optionRowCount,
+            findCounterText: editor.findBar.counterText,
+            findCloseCenterY: editor.findBar.closeCenterY,
+            findReplaceCenterY: editor.findBar.replaceCenterY,
 
             /*
              * 工具提示的配色（自检用）。

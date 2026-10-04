@@ -1876,8 +1876,11 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
         const double gapR = ui.value(QStringLiteral("findPanelRightGap")).toDouble();
         const double radius = ui.value(QStringLiteral("findPanelRadius")).toDouble();
         const double barH = ui.value(QStringLiteral("findBarHeight")).toDouble();
-        const QString geom = QStringLiteral("栏高 %1 / 查找框 %2 / 替换框 %3 / 左 %4 右 %5 / 圆角 %6")
-                                 .arg(barH).arg(findW).arg(replW).arg(gapL).arg(gapR).arg(radius);
+        const QString geom = QStringLiteral("栏高 %1 / 查找框 %2 / 替换框 %3 / 左 %4 右 %5 / 圆角 %6 "
+                                            "/ ✕ 中线 %7 / 替换 中线 %8")
+                                 .arg(barH).arg(findW).arg(replW).arg(gapL).arg(gapR).arg(radius)
+                                 .arg(ui.value(QStringLiteral("findCloseCenterY")).toDouble())
+                                 .arg(ui.value(QStringLiteral("findReplaceCenterY")).toDouble());
 
         out() << "        （查找栏：" << geom << "）" << Qt::endl;
         /* 高度为 0 说明 implicitHeight 那个绑定炸了（踩过：绑到已删掉的 id），
@@ -1888,6 +1891,126 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
         check(gapL >= 6 && gapR >= 6 && qAbs(gapL - gapR) <= 1,
               QStringLiteral("面板左右各有间隙（不再顶到卡片两边）"), geom);
         check(radius >= 6, QStringLiteral("面板是圆角的"), geom);
+
+        /*
+         * ✕ 不再垂直居中：它要和「替换」同一行（用户 2026-10-05 点名）。
+         * 两条一起钉：两个中线相等 = 真的同一行；✕ 的中线落在栏上半 = 真的没居中
+         * （居中时它正好压在栏高一半那条线上，只量第一条的话会被"两个都居中"蒙过去）。
+         */
+        {
+            const QVariantMap u2 = uiState();
+            const double closeY = u2.value(QStringLiteral("findCloseCenterY")).toDouble();
+            const double replY = u2.value(QStringLiteral("findReplaceCenterY")).toDouble();
+            const QString d = QStringLiteral("✕ 中线 %1 / 替换 中线 %2（该相等）/ 栏高 %3 的一半 %4")
+                                  .arg(closeY).arg(replY).arg(barH).arg(barH / 2.0);
+            check(qAbs(closeY - replY) <= 0.5 && closeY < barH / 2.0,
+                  QStringLiteral("✕ 钉在右上角、和「替换」同一行（中线 Δ≤0.5px）"), d);
+        }
+    }
+
+    /*
+     * 查找栏照参考图重做之后要钉的三件事：
+     *   1) **"当前 / 总数" 是真数出来的**。参考图那个 "0/0" 的口径是"当前第几处 /
+     *      共几处"，而后端原来只回一个总数 —— 所以加了 EditorViewItem::matchStats。
+     *      这里在正文里造 3 处命中，把光标钉到一个不是命中的位置上读 "0 / 3"，
+     *      再跳一次下一个看它前进（不前进就是那个序号根本没在跟选区走，
+     *      界面上就是个不动的假计数）。
+     *   2) 三个勾选框的排法：展开替换行 = 竖排 3 行，收起 = 横排 1 行。
+     *   3) 那三档**真的驱动搜索**：正文混了大小写，勾一下"区分大小写"要从 3 处
+     *      变 1 处，取消再变回来（用户 2026-10-05 把 "Aa ▾" 和替换那颗 ▾ 的弹层
+     *      都点名删了，所以这三档现在只有勾选框一个入口 —— 更得钉住它通到 C++）。
+     */
+    {
+        const QString savedText = view->currentText();
+        /*
+         * setText 一定会把文档标脏（EditorViewItem::setText 末尾那句
+         * `d->modified = true`），而后面「closeAllTabs / 未保存问句」那一族判据
+         * 就是靠脏不脏来判"该不该弹卡片"的 —— 不还原这个标记，它们会连着红十条
+         * （实测：改完这一扇之后 closeAllTabs 剩 18 个标签）。
+         */
+        const bool wasModified = view->modified();
+        view->setText(QStringLiteral("Alpha beta alpha gamma ALPHA\n"));
+        view->gotoLine(2);        // 光标落在文末：那儿不是任何一处的起点
+
+        QObject *bar = qmlRoot->findChild<QObject *>("findBar");
+        QObject *fld = qmlRoot->findChild<QObject *>("findField");
+        if (!bar || !fld) {
+            check(false, QStringLiteral("查找栏的计数：当前第几处 / 共几处"),
+                  QStringLiteral("抓不到 findBar / findField（objectName 掉了？）"));
+        } else {
+            const bool caseWas = bar->property("caseOn").toBool();
+            const bool wordWas = bar->property("wordOn").toBool();
+            const bool regexWas = bar->property("regexOn").toBool();
+
+            fld->setProperty("text", QStringLiteral("alpha"));
+            settle();
+            QString counter = uiState().value(QStringLiteral("findCounterText")).toString();
+            check(counter == QStringLiteral("0 / 3"),
+                  QStringLiteral("敲进查找框：计数是「0 / 3」（3 处命中、当前不在任何一处上）"),
+                  counter);
+
+            /*
+             * 走应用真正的命令（dispatch("findNext") -> Main.qml findStep -> 这一扇的
+             * findNext），不去 invokeMethod 那个带 bool 参数的 QML 函数：
+             * QML 里声明的函数参数是无类型的，`Q_ARG(bool, true)` 对不上签名时
+             * invokeMethod **返回 false 什么都不做**（实测就是这样静默空转了一轮，
+             * 看着像"序号不前进"的功能坏了）。要调也得把返回值钉进判据。
+             */
+            dispatch(QStringLiteral("findNext"));
+            settle();
+            const QString afterFirst =
+                uiState().value(QStringLiteral("findCounterText")).toString();
+            check(afterFirst == QStringLiteral("1 / 3"),
+                  QStringLiteral("跳一次下一个：当前那一位前进成「1 / 3」"), afterFirst);
+
+            dispatch(QStringLiteral("findNext"));
+            settle();
+            const QString afterSecond =
+                uiState().value(QStringLiteral("findCounterText")).toString();
+            check(afterSecond == QStringLiteral("2 / 3"),
+                  QStringLiteral("再跳一次：变成「2 / 3」（不是停在 1 的假计数）"), afterSecond);
+
+            /* 勾选框：展开态竖排 3 行 */
+            check(bar->property("optionRowCount").toInt() == 3,
+                  QStringLiteral("展开替换行时三个勾选框竖排"),
+                  QStringLiteral("optionRowCount=%1").arg(bar->property("optionRowCount").toInt()));
+            bar->setProperty("replaceVisible", false);
+            settle();
+            check(uiState().value(QStringLiteral("findOptionRows")).toInt() == 1,
+                  QStringLiteral("收起替换行时三个勾选框横排成一行（不留空的那一行）"),
+                  uiState().value(QStringLiteral("findOptionRows")).toString());
+            /*
+             * 三档开关得**真的驱动搜索**，不是画给人看的方框。
+             *
+             * 正文是 "Alpha beta alpha gamma ALPHA"：忽略大小写 3 处，
+             * 区分大小写只剩中间那个 "alpha" 一处。勾上之后计数从 "2 / 3"
+             * 变 "1 / 1"（当前那一处正好就是唯一命中的那个），这一枪才打得到
+             * "标志位 → options() → C++ 搜索" 整条链。
+             */
+            bar->setProperty("caseOn", true);
+            settle();
+            const QString caseOn =
+                uiState().value(QStringLiteral("findCounterText")).toString();
+            check(caseOn == QStringLiteral("1 / 1"),
+                  QStringLiteral("勾上「区分大小写」：立刻重扫，计数从「2 / 3」变「1 / 1」"),
+                  caseOn);
+            bar->setProperty("caseOn", false);
+            settle();
+            check(uiState().value(QStringLiteral("findCounterText")).toString()
+                          == QStringLiteral("2 / 3"),
+                  QStringLiteral("再取消：退回「2 / 3」（换档两次都跟得上，不是只认第一次）"),
+                  uiState().value(QStringLiteral("findCounterText")).toString());
+            bar->setProperty("replaceVisible", true);
+            settle();
+
+            bar->setProperty("caseOn", caseWas);
+            bar->setProperty("wordOn", wordWas);
+            bar->setProperty("regexOn", regexWas);
+            fld->setProperty("text", QString());
+        }
+        view->setText(savedText);
+        if (!wasModified)
+            view->setModified(false);
     }
 
     /*
@@ -8435,6 +8558,52 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
                           .arg(nav).arg(rows).arg(names.size()).arg(names.join("|")));
             } else {
                 check(false, QStringLiteral("设置里有「配色方案」这一栏，而且列出了 Dark / Light"),
+                      QStringLiteral("找不到 settingsPanel，整栏无从谈起"));
+            }
+
+            /*
+             * 格式化那一栏：每行下面那句**格式模版**必须真在界面上看得见。
+             *
+             * 只有 C++ 侧算得出来、界面上没地方看，等于没做（他问过的原话是
+             * "配置做好了，入口在设置哪里？"—— 同款判据见上面配色方案那段）。
+             * 数三样：侧栏有这一栏、行建出来了、每一行那句摘要非空。
+             */
+            if (QObject *sp = qmlRoot->findChild<QObject *>("settingsPanel")) {
+                /*
+                 * 启动那一路一次都没扫过（面板建完那一刻的快照必须是 0）。
+                 *
+                 * 钉的是"164 毫秒不在开程序的路上"：refreshFormatTools() 一旦回到
+                 * Component.onCompleted，这里立刻红（那一行是启动就建的顶层窗）。
+                 */
+                const int atStartup = sp->property("fmtRefreshesAtStartup").toInt();
+                check(atStartup == 0,
+                      QStringLiteral("开程序时不预扫格式化工具（冷扫那一次 164 毫秒不在启动路上）"),
+                      QStringLiteral("面板建完那一刻刷了 %1 次").arg(atStartup));
+
+                sp->setProperty("section", QStringLiteral("format"));
+                settle();
+                QVariant probe;
+                QMetaObject::invokeMethod(sp, "fmtSectionProbe", Q_RETURN_ARG(QVariant, probe));
+                const QVariantMap m = probe.toMap();
+                const int rows = m.value(QStringLiteral("rows")).toInt();
+                const int styled = m.value(QStringLiteral("styled")).toInt();
+                const QString first = m.value(QStringLiteral("firstStyle")).toString();
+                const double rowW = m.value(QStringLiteral("rowWidth")).toDouble();
+                const double availW = m.value(QStringLiteral("availWidth")).toDouble();
+                const double toolCol = m.value(QStringLiteral("toolCol")).toDouble();
+                out() << "        （格式化栏：建出" << rows << "行，工具列" << toolCol
+                      << "px，整行" << rowW << "px / 右栏可用" << availW << "px）" << Qt::endl;
+                check(m.value(QStringLiteral("nav")).toBool() && rows > 0
+                          && styled == rows && first.contains(QStringLiteral("缩进"))
+                          && first.contains(QStringLiteral("行宽"))
+                          && rowW <= availW,
+                      QStringLiteral("设置→格式化：每行下面列出了这一语言的格式模版"),
+                      QStringLiteral("导航=%1 建出 %2 行 / 摘要非空 %3 行｜整行 %4 可用 %5")
+                          .arg(m.value(QStringLiteral("nav")).toBool() ? 1 : 0)
+                          .arg(rows).arg(styled).arg(rowW).arg(availW)
+                          + QStringLiteral("｜%1").arg(first));
+            } else {
+                check(false, QStringLiteral("设置→格式化：每行下面列出了这一语言的格式模版"),
                       QStringLiteral("找不到 settingsPanel，整栏无从谈起"));
             }
 

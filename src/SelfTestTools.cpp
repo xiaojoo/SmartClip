@@ -370,24 +370,34 @@ int SelfTest::runTools(Formatter *fmt, DiffEngine *differ, Checker *check, LlmCl
             const QString messy = QStringLiteral("a   \n\n\n\nb\t\n");
             const QString out = fmt->format(messy, QStringLiteral("plain"),
                                             QStringLiteral("x.txt"));
-            tcheck(out == QStringLiteral("a\n\nb\n"),
-                  QStringLiteral("纯文本清理：去行尾空白、连续空行收成一个、末尾补换行"),
+            /*
+             * 空行上限现在是 2（IDEA 的 KEEP_BLANK_LINES_IN_CODE），所以三个换行
+             * 而不是原来写死的一个 —— 这条跟着格式模版改，见下面"格式化模版"那段。
+             */
+            tcheck(out == QStringLiteral("a\n\n\nb\n"),
+                  QStringLiteral("纯文本清理：去行尾空白、连续空行收到模版的上限、末尾补换行"),
                   QString(out).replace(QLatin1Char('\n'), QLatin1String("\\n")));
         }
 
-        /* 本机没装的工具：要**报名字**，不能悄悄什么都不做 */
+        /*
+         * 本机没装的工具：要**报名字**，不能悄悄什么都不做。
+         *
+         * 这里用 csharp 而不是 cpp，是因为下面"端到端"那一段要拿 cpp 的真命令去跑：
+         * 这一条会把 format/tool/cpp **清成空**，同一份自检里前后打架，
+         * 于是"装了工具的机器上端到端那条永远显示跳过"（换了语言，判据一个字没变）。
+         */
         {
-            fmt->setToolFor(QStringLiteral("cpp"),
+            fmt->setToolFor(QStringLiteral("csharp"),
                             QStringLiteral("绝对不存在的格式化工具-xyz"));
             const QString in = QStringLiteral("int main(){return 0;}\n");
-            const QString out = fmt->format(in, QStringLiteral("cpp"), QStringLiteral("x.cpp"));
+            const QString out = fmt->format(in, QStringLiteral("csharp"), QStringLiteral("x.cs"));
             tcheck(out == in, QStringLiteral("工具跑不起来：正文原样不动"));
             tcheck(fmt->lastError().contains(QStringLiteral("绝对不存在的格式化工具-xyz")),
                   QStringLiteral("工具跑不起来：错误里点名了是哪个命令"),
                   fmt->lastError());
-            tcheck(!fmt->supported(QStringLiteral("cpp")),
+            tcheck(!fmt->supported(QStringLiteral("csharp")),
                   QStringLiteral("工具跑不起来：菜单那条会置灰（supported 为假）"));
-            fmt->setToolFor(QStringLiteral("cpp"), QString());
+            fmt->setToolFor(QStringLiteral("csharp"), QString());
         }
 
         /* 没装 clang-format 的机器上，"这个语言能不能格式化"要说真话 */
@@ -408,6 +418,466 @@ int SelfTest::runTools(Formatter *fmt, DiffEngine *differ, Checker *check, LlmCl
             tcheck(first.contains(QStringLiteral("id"))
                        && first.contains(QStringLiteral("defaultCommand")),
                   QStringLiteral("工具表每行都有 id / 默认命令（设置面板要显示）"));
+        }
+
+    }
+
+    /* ------------------------------------------------------------------
+     * 2b. 格式模版（src/CodeStyle.h）：每语言一份 IDEA 风格，真去指挥工具
+     * ------------------------------------------------------------------ */
+    std::fputs("\n-- 格式化模版（IDEA 风格） --\n", stdout);
+    if (!fmt) {
+        tcheck(false, QStringLiteral("格式化器传进来了（模版判据要它）"));
+    } else {
+        const QString stylesDir = fmt->stylesDir();
+
+        /*
+         * 模版放在**程序自己那个目录**（安装包 / 绿色 zip 一起带走），不是 AppData。
+         * 这条钉的是位置本身：路径漂回 AppData 的话，用户按安装目录去找就找不到，
+         * 而"改完立刻生效"也要看那一档可写 —— 两件事一起量。
+         */
+        {
+            const QString inPackage = QDir(QCoreApplication::applicationDirPath())
+                                          .absoluteFilePath(QStringLiteral("styles"));
+            tout(QStringLiteral("模版目录 %1（程序目录 %2）")
+                     .arg(stylesDir, QCoreApplication::applicationDirPath()));
+            tcheck(QDir(stylesDir).absolutePath() == QDir(inPackage).absolutePath(),
+                  QStringLiteral("模版目录就是 <安装目录>/styles"),
+                  QStringLiteral("实际 %1 / 该是 %2").arg(stylesDir, inPackage));
+            tcheck(fmt->stylesWritable(),
+                  QStringLiteral("那一档可写（面板那句「改完立刻生效」才成立）"));
+        }
+
+        /* 播种：工具表里每个语言都得有一个模版文件（设置面板那一行靠它） */
+        {
+            int missing = 0;
+            QStringList missingIds;
+            const QVariantList list = fmt->toolList();
+            for (const QVariant &v : list) {
+                const QString id = v.toMap().value(QStringLiteral("id")).toString();
+                if (!QFile::exists(QDir(stylesDir).absoluteFilePath(id + QStringLiteral(".json")))) {
+                    ++missing;
+                    missingIds << id;
+                }
+            }
+            tcheck(missing == 0,
+                  QStringLiteral("每个语言都有一份能改的模版文件（缺了几个：%1）").arg(missing),
+                  missingIds.join(QLatin1Char(' ')));
+            tout(QStringLiteral("模版目录 %1（%2 个文件）")
+                     .arg(stylesDir)
+                     .arg(QDir(stylesDir).entryList({QStringLiteral("*.json")},
+                                                    QDir::Files).size()));
+        }
+
+        /* IDEA 那几个数：缩进 4 / 续行 8 / 行宽 120 / case 缩进 / 空行≤2 */
+        {
+            const QVariantMap cpp = fmt->styleFor(QStringLiteral("cpp"));
+            /* 设置面板每行下面那句就是这一串，打出来免得只能靠"判据绿"猜长什么样 */
+            tout(QStringLiteral("界面那句（cpp）：%1").arg(fmt->styleSummary(QStringLiteral("cpp"))));
+            tout(QStringLiteral("界面那句（json，内置）：%1")
+                     .arg(fmt->styleSummary(QStringLiteral("json"))));
+            /*
+             * 那行话里只能有**这门语言兑现得了**的项：JSON 行上挂着"case 缩进"
+             * 不是在描述 JSON，是在描述模版里的一个数 —— 读数的人会被它带偏。
+             *
+             * 这里直接给 summaryText 喂引擎名而不是问 Fmt：界面上那句会随本机
+             * 装没装 clang-format 变（没装就没有"全项落地"那一档），拿它当判据
+             * 的话这条在一半的机器上恒红。
+             */
+            const fmtstyle::Style cppStyle = fmtstyle::styleFor(QStringLiteral("cpp"));
+            const fmtstyle::Style jsonStyle = fmtstyle::styleFor(QStringLiteral("json"));
+            tcheck(fmtstyle::summaryText(cppStyle, fmtstyle::Engine::ClangFormat,
+                                         QStringLiteral("cpp"))
+                       .contains(QStringLiteral("case"))
+                       && !fmtstyle::summaryText(jsonStyle, fmtstyle::Engine::Prettier,
+                                                 QStringLiteral("json"))
+                            .contains(QStringLiteral("case"))
+                       && !fmtstyle::summaryText(cppStyle, fmtstyle::Engine::Prettier,
+                                                 QStringLiteral("cpp"))
+                            .contains(QStringLiteral("case")),
+                  QStringLiteral("大括号 / case 那两项只出现在摆得了大括号的那几行上"),
+                  fmtstyle::summaryText(jsonStyle, fmtstyle::Engine::Prettier,
+                                        QStringLiteral("json")));
+            tcheck(cpp.value(QStringLiteral("indentSize")).toInt() == 4
+                       && cpp.value(QStringLiteral("continuationIndent")).toInt() == 8
+                       && cpp.value(QStringLiteral("rightMargin")).toInt() == 120
+                       && cpp.value(QStringLiteral("keepBlankLines")).toInt() == 2
+                       && cpp.value(QStringLiteral("indentCaseFromSwitch")).toBool()
+                       && !cpp.value(QStringLiteral("declarationBraceOnNextLine")).toBool(),
+                  QStringLiteral("C++ 模版 = IDEA 平台默认那套数（4 / 8 / 120 / case 缩进 / 空行≤2）"),
+                  QStringLiteral("缩进 %1 续行 %2 行宽 %3 空行 %4")
+                      .arg(cpp.value(QStringLiteral("indentSize")).toInt())
+                      .arg(cpp.value(QStringLiteral("continuationIndent")).toInt())
+                      .arg(cpp.value(QStringLiteral("rightMargin")).toInt())
+                      .arg(cpp.value(QStringLiteral("keepBlankLines")).toInt()));
+            /* JSON 是查到的**覆写**值 2，不是平台默认 4 —— 这条同时把"逐语言一份"钉住 */
+            tcheck(fmt->styleFor(QStringLiteral("json"))
+                       .value(QStringLiteral("indentSize"))
+                       .toInt()
+                   == 2,
+                  QStringLiteral("JSON 模版是 IDEA 的 2 空格（和 C++ 的 4 不一样 = 真的每语言一份）"));
+            tcheck(fmt->styleFor(QStringLiteral("bash"))
+                       .value(QStringLiteral("indentSize"))
+                       .toInt()
+                   == 2,
+                  QStringLiteral("Shell 模版是 IDEA 的 2 空格"));
+        }
+
+        /*
+         * 内置那条路真的读模版，不是写死的数。
+         *
+         * 判据能分辨是因为期望值来自**模版文件**：内置 JSON 过去固定 4 空格，
+         * 而 IDEA 的 JSON 是 2 —— 要是代码还在写死，这里读回来就是 4 ≠ 2。
+         */
+        {
+            const QVariant saved = settings.value(QStringLiteral("format/tool/json"));
+            fmt->setToolFor(QStringLiteral("json"), QString());
+            const int want = fmt->styleFor(QStringLiteral("json"))
+                                 .value(QStringLiteral("indentSize"))
+                                 .toInt();
+            const QString out = fmt->format(QStringLiteral("{\"a\":{\"b\":2}}\n"),
+                                            QStringLiteral("json"),
+                                            QStringLiteral("x.json"));
+            settings.setValue(QStringLiteral("format/tool/json"), saved);
+
+            int lead = 0;
+            const QStringList lines = out.split(QLatin1Char('\n'));
+            if (lines.size() > 1)
+                while (lead < lines.at(1).size() && lines.at(1).at(lead) == QLatin1Char(' '))
+                    ++lead;
+            tcheck(lead == want,
+                  QStringLiteral("内置 JSON 的缩进 = 模版里那个数（不是写死的 4）"),
+                  QStringLiteral("模版 %1，实际行首 %2 空格｜%3")
+                      .arg(want).arg(lead).arg(QString(out).replace(QLatin1Char('\n'), QLatin1Char(' '))));
+        }
+
+        /* 纯文本清理的空行上限也来自模版（IDEA 保留 2 个空行，原来这里写死 1 个） */
+        {
+            const QVariant saved = settings.value(QStringLiteral("format/tool/plain"));
+            fmt->setToolFor(QStringLiteral("plain"), QString());
+            const int keep = fmt->styleFor(QStringLiteral("plain"))
+                                 .value(QStringLiteral("keepBlankLines"))
+                                 .toInt();
+            const QString out = fmt->format(QStringLiteral("a\n\n\n\n\nb\n"),
+                                            QStringLiteral("plain"),
+                                            QStringLiteral("x.txt"));
+            settings.setValue(QStringLiteral("format/tool/plain"), saved);
+            const int aAt = out.indexOf(QLatin1Char('a'));
+            const int bAt = out.indexOf(QLatin1Char('b'));
+            const int blanks = (aAt >= 0 && bAt > aAt)
+                                   ? out.mid(aAt + 1, bAt - aAt - 1).count(QLatin1Char('\n')) - 1
+                                   : -1;
+            tcheck(blanks == keep,
+                  QStringLiteral("连续空行收到模版允许的上限（IDEA 保留 2 个，这里原来写死 1 个）"),
+                  QStringLiteral("模版 ≤%1，实际 %2｜%3")
+                      .arg(keep).arg(blanks)
+                      .arg(QString(out).replace(QLatin1Char('\n'), QLatin1String("\\n"))));
+        }
+
+        /*
+         * 模版文件：改一项立刻生效、写错的项只丢那一条、整份坏了则一个字都不覆盖。
+         *
+         * 用一个假语言 id（_selftest）来测，不碰任何真语言的模版文件 —— 那些是他
+         * 自己可能改过的活配置，自检往里写一下都是越界（便签那边栽过一次，
+         * 见 memory: notes-test wipes the user store）。
+         */
+        {
+            const QString path = QDir(stylesDir).absoluteFilePath(
+                QStringLiteral("_selftest.json"));
+            QFile::remove(path);
+
+            QFile f(path);
+            if (f.open(QIODevice::WriteOnly)) {
+                f.write("{\"indentSize\": 7, \"这一项我们不认识\": 1}");
+                f.close();
+            }
+            const QVariantMap s = fmt->styleFor(QStringLiteral("_selftest"));
+            tcheck(s.value(QStringLiteral("indentSize")).toInt() == 7,
+                  QStringLiteral("模版文件改一个数，读回来就是那个数（不用重启）"));
+            tcheck(s.value(QStringLiteral("continuationIndent")).toInt() == 8,
+                  QStringLiteral("同一条里有个不认识的项，其它项照样生效（不是整份作废）"));
+            tcheck(fmt->styleError(QStringLiteral("_selftest"))
+                       .contains(QStringLiteral("不认识")),
+                  QStringLiteral("那个不认识的项有被说出来"),
+                  fmt->styleError(QStringLiteral("_selftest")));
+
+            /* 整份 JSON 读不下去（漏了收尾的括号）：一个字都不覆盖 */
+            if (QFile::exists(path)) {
+                QFile g(path);
+                if (g.open(QIODevice::WriteOnly)) {
+                    g.write("{\"indentSize\": 3");
+                    g.close();
+                }
+                const QVariantMap back = fmt->styleFor(QStringLiteral("_selftest"));
+                tcheck(back.value(QStringLiteral("indentSize")).toInt() == 4
+                           && !fmt->styleError(QStringLiteral("_selftest")).isEmpty(),
+                      QStringLiteral("模版文件整份坏了：退回内置默认，并且说清楚没生效"),
+                      fmt->styleError(QStringLiteral("_selftest")));
+            }
+
+            QFile::remove(path);
+            tcheck(!QFile::exists(path), QStringLiteral("自检留下的模版文件收干净了"));
+        }
+
+        /*
+         * PATH 之外的两层：这份文件所在项目里的 node_modules / venv，和 npx 缓存。
+         *
+         * 为什么必须有：这台机上 prettier 只装在两个项目的 node_modules 里
+         * （实测 H:\mall-ui\node_modules\.bin\prettier.CMD 能跑出 3.8.1，而
+         * %APPDATA%\npm 这个全局 bin 是空的）。只查 PATH 的话，JS / JSON / HTML
+         * 三行永远写着"本机没装"，可同一份文件在编辑区里其实格式化得了 ——
+         * 面板和执行两头说的话不一样。
+         *
+         * 判据不依赖这台机装没装：现造一个假项目（只放一个空 .cmd，**不去执行它**，
+         * toolAvailable 只看文件在不在）。
+         */
+        {
+            QTemporaryDir proj;
+            if (!proj.isValid()) {
+                tcheck(false, QStringLiteral("假项目建不出来，项目级识别无从验证"));
+            } else {
+                const QString bin = QDir(proj.path())
+                                        .absoluteFilePath(QStringLiteral("node_modules/.bin"));
+                QDir().mkpath(bin);
+                QFile stub(QDir(bin).absoluteFilePath(QStringLiteral("prettier.cmd")));
+                if (stub.open(QIODevice::WriteOnly))
+                    stub.write("@echo off\n");
+                stub.close();
+
+                const QString inProj = QDir(proj.path())
+                                           .absoluteFilePath(QStringLiteral("a.js"));
+                QString srcProj;
+                bool availProj = false;
+                const QVariantList withPath = fmt->toolList(inProj);
+                for (const QVariant &v : withPath) {
+                    const QVariantMap m = v.toMap();
+                    if (m.value(QStringLiteral("id")).toString() == QLatin1String("javascript")) {
+                        srcProj = m.value(QStringLiteral("source")).toString();
+                        availProj = m.value(QStringLiteral("available")).toBool();
+                    }
+                }
+                tcheck(availProj && srcProj == QLatin1String("project"),
+                      QStringLiteral("工具装在这份文件的项目里也算装（往上找 node_modules/.bin）"),
+                      QStringLiteral("available=%1 source=%2").arg(availProj ? 1 : 0).arg(srcProj));
+
+                /*
+                 * 反证：换到没有 node_modules 的地方问同一行，不能再报 "project"
+                 * （它可能报 npx 或空 —— 那台机上 npx 缓存里确实有 prettier，
+                 * 所以这里只钉"不是项目里来的"，不钉死成"没装"）。
+                 */
+                const QString elsewhere = QDir(QDir::tempPath())
+                                              .absoluteFilePath(QStringLiteral("no-such-proj.js"));
+                QString srcElse;
+                const QVariantList plain = fmt->toolList(elsewhere);
+                for (const QVariant &v : plain) {
+                    const QVariantMap m = v.toMap();
+                    if (m.value(QStringLiteral("id")).toString() == QLatin1String("javascript"))
+                        srcElse = m.value(QStringLiteral("source")).toString();
+                }
+                tcheck(srcElse != QLatin1String("project"),
+                      QStringLiteral("反证：不在那个项目里问，就不报「项目里」"),
+                      QStringLiteral("source=%1").arg(srcElse));
+            }
+        }
+
+        /*
+         * 用户级 bin 那一层：装了、但没写进 PATH。
+         *
+         * 真实会撞上的例子：`go install mvdan.cc/sh/v3/cmd/shfmt@latest` 落在
+         * `%USERPROFILE%\go\bin`，而实测那一档**不在**这台机的用户 PATH 上
+         * （pip 的 Scripts 和 scoop\shims 在，所以那两个不用这一层也能找到）。
+         *
+         * 判据走 SMARTCLIP_TOOL_DIRS 这个测试缝：指到一个临时目录，里面放一个
+         * 假 shfmt.exe（**只判在不在，不会去执行它**）。撤掉之后同一行必须回到
+         * "没装" —— 不然这条判据只是"环境变量读得到"，分辨不出识别逻辑。
+         */
+        {
+            QTemporaryDir bin;
+            if (!bin.isValid()) {
+                tcheck(false, QStringLiteral("假的用户 bin 目录建不出来，用户级识别无从验证"));
+            } else {
+                /*
+                 * 用一个**不可能存在**的程序名，不用 shfmt：这台机上 2026-10-05 之后
+                 * `~\go\bin\shfmt.exe` 是真的存在（刚装的），于是"撤掉环境变量就该查不到"
+                 * 这个前提没了 —— 反证红成"撤了=1"。反证要能红才叫反证。
+                 * 名字挂在 bash 那一档的自定义命令上（那条路优先，且落盘前先存后还）。
+                 */
+                const QString probeName = QStringLiteral("shfmt-probe-xyz");
+                QFile stub(QDir(bin.path()).absoluteFilePath(probeName + QStringLiteral(".exe")));
+                if (stub.open(QIODevice::WriteOnly))
+                    stub.write("stub");
+                stub.close();
+
+                const QVariant savedBash = settings.value(QStringLiteral("format/tool/bash"));
+                fmt->setToolFor(QStringLiteral("bash"), probeName);
+
+                const QString savedEnv = qEnvironmentVariable("SMARTCLIP_TOOL_DIRS");
+                qputenv("SMARTCLIP_TOOL_DIRS",
+                        QDir::toNativeSeparators(bin.path()).toLocal8Bit());
+                const bool found = fmt->toolAvailable(QStringLiteral("bash"));
+                qputenv("SMARTCLIP_TOOL_DIRS", savedEnv.toLocal8Bit());
+                const bool gone = fmt->toolAvailable(QStringLiteral("bash"));
+
+                fmt->setToolFor(QStringLiteral("bash"), savedBash.toString());
+                tcheck(found && !gone,
+                      QStringLiteral("装在用户级 bin（没进 PATH）里也算装，撤掉环境变量就不算"),
+                      QStringLiteral("设了=%1 撤了=%2").arg(found ? 1 : 0).arg(gone ? 1 : 0));
+            }
+        }
+
+        /*
+         * 参数翻译：谁的开关该加、谁的不该加。
+         *
+         * 这一段不跑工具（工具装没装是环境问题），钉的是"我们交给它的那串参数"。
+         */
+        {
+            const fmtstyle::Style cpp = fmtstyle::styleFor(QStringLiteral("cpp"));
+            const fmtstyle::Style js = fmtstyle::styleFor(QStringLiteral("javascript"));
+            const fmtstyle::Style go = fmtstyle::styleFor(QStringLiteral("go"));
+
+            const QStringList cf = fmt->withStyleArgs(QStringLiteral("clang-format"), cpp);
+            const QString styleArg = cf.value(1);
+            tcheck(cf.size() == 2 && styleArg.startsWith(QStringLiteral("--style={"))
+                       && styleArg.contains(QStringLiteral("IndentWidth: 4"))
+                       && styleArg.contains(QStringLiteral("ContinuationIndentWidth: 8"))
+                       && styleArg.contains(QStringLiteral("ColumnLimit: 120"))
+                       && styleArg.endsWith(QLatin1Char('}')),
+                  QStringLiteral("clang-format：追加一条完整的 --style={…}"),
+                  styleArg);
+            /*
+             * --style 的值里有空格，所以它必须**是一整段参数**。
+             * 这一条钉的是"拼回字符串再 split"那个坑：真有人改回去，这里会数出
+             * 十几段（clang-format 收到的是散架的参数，实测报
+             * "Error parsing -style: invalid argument" 然后整条格式化失败）。
+             */
+            tcheck(cf.size() == 2 && styleArg.count(QLatin1Char(' ')) >= 5,
+                  QStringLiteral("带空格的 --style 传过去还是一整段"),
+                  QStringLiteral("%1 段、这段里有 %2 个空格").arg(cf.size())
+                      .arg(styleArg.count(QLatin1Char(' '))));
+
+            const QStringList owned =
+                fmt->withStyleArgs(QStringLiteral("clang-format --style=file"), cpp);
+            tcheck(owned.size() == 2 && owned.value(1) == QStringLiteral("--style=file"),
+                  QStringLiteral("命令里自己写了 --style 就不追加（用户那半句优先）"),
+                  owned.join(QLatin1Char(' ')));
+
+            const QStringList pre = fmt->withStyleArgs(
+                QStringLiteral("prettier --stdin-filepath x.js"), js);
+            tcheck(pre.contains(QStringLiteral("--tab-width"))
+                       && pre.contains(QStringLiteral("--print-width")),
+                  QStringLiteral("prettier：追加 --tab-width / --print-width"),
+                  pre.join(QLatin1Char(' ')));
+            const int widthAt = pre.indexOf(QStringLiteral("--tab-width"));
+            tcheck(widthAt >= 0 && pre.value(widthAt + 1) == QString::number(js.indentSize),
+                  QStringLiteral("prettier 拿到的数字就是模版里那个"),
+                  QStringLiteral("模版 %1，参数 %2")
+                      .arg(js.indentSize).arg(pre.value(widthAt + 1)));
+
+            tcheck(fmt->withStyleArgs(QStringLiteral("gofmt"), go).size() == 1,
+                  QStringLiteral("gofmt 没有风格开关：一个参数都不追加"));
+
+            /*
+             * rustfmt：--config 里带 tab_spaces 和 max_width。
+             * 这一档以前是空的、界面上还写着"没有风格开关" —— 那是错的，
+             * 它默认 100 列而我们模版是 120，不传 max_width 就一直是它的默认。
+             */
+            const fmtstyle::Style rs = fmtstyle::styleFor(QStringLiteral("rust"));
+            const QStringList rfmt = fmt->withStyleArgs(QStringLiteral("rustfmt"), rs);
+            const int cfgAt = rfmt.indexOf(QStringLiteral("--config"));
+            tcheck(cfgAt >= 0
+                       && rfmt.value(cfgAt + 1).contains(QStringLiteral("tab_spaces=4"))
+                       && rfmt.value(cfgAt + 1).contains(QStringLiteral("hard_tabs=false"))
+                       && rfmt.value(cfgAt + 1).contains(QStringLiteral("max_width=120")),
+                  QStringLiteral("rustfmt：追加 --config tab_spaces / hard_tabs / max_width"),
+                  rfmt.join(QLatin1Char(' ')));
+
+            /*
+             * rubocop：风格只能写在 .rubocop.yml 里。
+             * 反证用 php 那一档：它没有能落地的项，必须**不给**配置文件 ——
+             * 不然就是"每次都写一份没人读的文件"。
+             */
+            const QPair<QString, QString> rb
+                = fmtstyle::engineConfigFile(fmtstyle::styleFor(QStringLiteral("ruby")),
+                                             fmtstyle::Engine::Rubocop);
+            tcheck(rb.first == QLatin1String(".rubocop.yml")
+                       && rb.second.contains(QStringLiteral("Width: 2"))
+                       && rb.second.contains(QStringLiteral("EnforcedStyle: spaces"))
+                       && rb.second.contains(QStringLiteral("Max: 120"))
+                       && rb.second.contains(QStringLiteral("NewCops: disable")),
+                  QStringLiteral("rubocop：由模版生成 .rubocop.yml（缩进 2 / 空格 / 行宽 120）"),
+                  QString(rb.second).replace(QLatin1Char('\n'), QLatin1Char(' ')).left(90));
+            tcheck(fmtstyle::engineConfigFile(fmtstyle::styleFor(QStringLiteral("php")),
+                                              fmtstyle::Engine::PhpCsFixer)
+                         .first.isEmpty(),
+                  QStringLiteral("反证：php-cs-fixer 没有能落地的项，就不生成配置文件"));
+            tcheck(fmt->withStyleArgs(QStringLiteral("我的包装脚本 -x"), cpp).size() == 2,
+                  QStringLiteral("认不出的命令不追加参数（猜错会把人家的命令弄坏）"));
+        }
+
+        /*
+         * 端到端：本机有工具才跑，没有就**把跳过说出来**。
+         *
+         * 前面钉的都是"我们交出去的那串参数"，这几条才是"工具真的把观感改成了这样"。
+         * 判断按 toolAvailable()，所以用户在设置里填的完整路径同样算数。
+         *
+         * 每根的针都是**只有我们的参数生效才会出现**的那个形状：
+         *   clang-format 的 4 空格（它自己的默认是 2）、prettier 的 4 空格（默认 2）、
+         *   black 把 {"x":1} 补成 {"x": 1}（顺便证明"就地改文件再读回来"这条路通了 ——
+         *   原来那条 `black -` 要么 30 秒超时、要么退出码 123，两样都到不了这儿）、
+         *   shfmt 的 2 空格（**它默认是制表符**，所以这一根针量的就是模版那个 -i 2 有没有传进去）、
+         *   gofmt 的制表符缩进。
+         */
+        {
+            struct Probe {
+                const char *language;
+                const char *file;
+                const char *src;
+                const char *needle;
+                const char *tool;
+            };
+            static const Probe probes[] = {
+                {"cpp", "x.cpp", "int f(int a){if(a){return a;}}\n", "    if (a) {", "clang-format"},
+                {"javascript", "x.js", "function f(a){return a>1?1:0}\n", "    return a > 1", "prettier"},
+                {"python", "x.py", "def f(a):\n    return {\"x\":1,\"y\":2}\n", "\"x\": 1", "black"},
+                {"bash", "x.sh", "a=1\nif [ $a = 1 ];then echo x\nfi\n", "  echo x", "shfmt"},
+                /*
+                 * 针要能分辨：`"  puts 1"` 是 `"    puts 1"` 的子串，用当行开头才算
+                 * 真折成了 2 空格（第一版就栽在这儿，红了才发现针不尖）。
+                 */
+                {"ruby", "x.rb", "def f\n    puts 1\nend\n", "\n  puts 1\n", "rubocop"},
+                {"php", "x.php", "<?php\nfunction f($a){if($a){return 1;}}\n", "if ($a) {",
+                 "php-cs-fixer"},
+                /*
+                 * rustfmt 的针是**量出来的**，不是推出来的：同一份输入（三个 20 字符的实参），
+                 * `--config max_width=100`（rustfmt 自己的默认）把它拆成四行，
+                 * `max_width=120`（我们模版里那个数）留在**一行**。
+                 * 所以这根针分辨的是"模版那个 max_width 有没有真传到手"，
+                 * 而不是"有没有跑起来一个格式化工具"。
+                 */
+                {"rust", "x.rs",
+                 "fn main() { foo(aaaaaaaaaaaaaaaaaaaa, bbbbbbbbbbbbbbbbbbbb, "
+                 "cccccccccccccccccccc); }\n",
+                 "    foo(aaaaaaaaaaaaaaaaaaaa, bbbbbbbbbbbbbbbbbbbb, cccccccccccccccccccc);",
+                 "rustfmt"},
+                {"go", "x.go", "package main\nfunc main(){if true{x()}\n}\n", "\tif true {", "gofmt"},
+            };
+            for (const Probe &p : probes) {
+                const QString language = QString::fromLatin1(p.language);
+                if (!fmt->toolAvailable(language)) {
+                    tout(QStringLiteral("跳过端到端（%1）：本机没有 %2 —— 装了工具、或在设置→格式化里填上它的路径，这条才会跑")
+                             .arg(language, QString::fromLatin1(p.tool)));
+                    continue;
+                }
+                const QString in = QString::fromUtf8(p.src);
+                const QString out = fmt->format(in, language, QString::fromLatin1(p.file));
+                tcheck(out.contains(QString::fromUtf8(p.needle)) && out != in,
+                      QStringLiteral("端到端 %1：%2 真的按模版排出来了").arg(language, p.tool),
+                      QStringLiteral("引擎 %1｜%2")
+                          .arg(fmt->lastEngine())
+                          .arg(QString(out).replace(QLatin1Char('\n'), QLatin1Char(' '))
+                                   .replace(QLatin1Char('\t'), QLatin1String("\\t"))
+                                   .left(64)));
+            }
         }
     }
 
