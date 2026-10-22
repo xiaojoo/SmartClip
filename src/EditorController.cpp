@@ -6,12 +6,14 @@
 #include <QAction>
 #include <QClipboard>
 #include <QCoreApplication>
+#include <QDateTime>
 #include <QDesktopServices>
 #include <QDir>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QGuiApplication>
 #include <QImage>
+#include <QKeyEvent>
 #include <QKeySequence>
 #include <QRegularExpression>
 #include <QSettings>
@@ -110,6 +112,39 @@ QString themedCss(const QString &css) {
     }
     return out + css.mid(last);
 }
+
+/*
+ * 挂在 QApplication 上的事件过滤器：把按键转给 DoubleShiftDetector
+ * （那个判定类在 EditorController.h 里，自检直接驱动它）。
+ *
+ * 为什么是 qApp 级而不是主窗口的 keyPressEvent：编辑区是原生 QScintilla
+ * 子窗口，它自己就是焦点所有者，按键先到它那儿；QML 的 Shortcut 又够不着
+ * 原生控件（见 EditorController.h 开头讲 QAction 那一段）。挂在 qApp 上是
+ * 唯一一处"焦点在 QML 还是在原生控件都看得见"的位置。
+ *
+ * **永远返回 false**：这个过滤器一次都不许消费事件。Shift 是打字要用的键，
+ * 吃掉一下就是"大写字母打不出来"那种事故。
+ */
+class DoubleShiftFilter final : public QObject {
+public:
+    explicit DoubleShiftFilter(EditorController *owner)
+        : QObject(owner), m_owner(owner) {}
+
+    bool eventFilter(QObject *, QEvent *event) override {
+        const bool press = event->type() == QEvent::KeyPress;
+        if (press || event->type() == QEvent::KeyRelease) {
+            auto *ke = static_cast<QKeyEvent *>(event);
+            if (m_detector.feed(ke->key(), press, ke->isAutoRepeat(),
+                                QDateTime::currentMSecsSinceEpoch()))
+                m_owner->activateCommand(QStringLiteral("findInFiles"));
+        }
+        return false;
+    }
+
+private:
+    EditorController *m_owner;
+    DoubleShiftDetector m_detector;
+};
 
 #if defined(Q_OS_WIN)
 
@@ -272,6 +307,14 @@ EditorController::EditorController(QObject *parent) : QObject(parent) {
      * 与界面无关的（文件对话框用）。
      */
     m_lastDir = QSettings().value(settingsKey(QStringLiteral("lastDir"))).toString();
+
+    /*
+     * 双击 Shift -> 「在文件中查找」。
+     *
+     * 挂在构造函数而不是 attachWidget()：那个可能被调多次（挂一次就够，
+     * 挂两次会把一次双击判成两次）。
+     */
+    qApp->installEventFilter(new DoubleShiftFilter(this));
 }
 
 QString EditorController::settingsKey(const QString &key) {
@@ -323,6 +366,15 @@ const ShortcutEntry kShortcutTable[] = {
     {"nextTab",       "下一个标签", "文件", "Ctrl+Tab"},
     {"prevTab",       "上一个标签", "文件", "Ctrl+Shift+Tab"},
     {"find",          "查找",       "查找", "Ctrl+F"},
+    /*
+     * 「在文件中查找」那扇弹框（见 qml/components/FileSearchPanel.qml）。
+     *
+     * 出厂默认**不给组合键**：召唤它的手势是双击 Shift（见 DoubleShiftFilter），
+     * 而 Ctrl+Shift+F 这一档在出厂时是"格式化代码"，用户点名不动它。
+     * 留这一条在表里是为了让它出现在设置面板的可改键清单里 —— 想要一个
+     * 真组合键的人可以自己在那儿绑上，绑了之后 QAction 和手势两条路都通。
+     */
+    {"findInFiles",   "在文件中查找", "查找", ""},
     {"replace",       "替换",       "查找", "Ctrl+H"},
     {"findNext",      "查找下一个", "查找", "F3"},
     {"findPrev",      "查找上一个", "查找", "Shift+F3"},

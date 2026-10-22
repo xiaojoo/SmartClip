@@ -191,6 +191,7 @@ qt_add_qml_module(SmartClip
         qml/components/EditorArea.qml
         qml/components/MarkdownView.qml
         qml/components/FindBar.qml
+        qml/components/FileSearchPanel.qml
         qml/components/AskCard.qml
         qml/components/DiffPane.qml
         qml/components/DocCard.qml

@@ -150,6 +150,36 @@ public:
     /* 重扫磁盘刷新元数据缓存（启动 / F5 / 建删改文件之后都会调） */
     Q_INVOKABLE void rescan();
 
+    /* ---- 全文搜索（「在文件中查找」，见 qml/components/FileSearchPanel.qml）---- */
+
+    /*
+     * 在所有已索引文件的**正文**里找 query，返回命中行。
+     *
+     * 每项 { path, name, folder, line, pre, mid, post }：
+     *   line  行号（1 起）
+     *   mid   命中的那一段（就是 query 本身，界面上着色）
+     *   pre/post  命中处左右各留一截上下文；整行太长时只给这一截，
+     *             截断的两端各带一个省略号（所以 pre 开头那个点不是正文）
+     *
+     * 走哪条路由 query 的长度决定，见 .cpp：3 个字以上走 trigram 索引，
+     * 1-2 个字索引帮不上忙、只能全表扫（所以这一档慢，是量出来的结论）。
+     *
+     * caseSensitive 只影响"留哪些行"（对已经拿到的命中行做二次筛选），
+     * 索引本身是大小写不敏感的。
+     *
+     * limit 是给界面兜底的：命中太多时只给前 limit 行，QML 那边按
+     * "行数 == limit" 提示"已截断"。
+     */
+    Q_INVOKABLE QVariantList searchContent(const QString &query, int limit = 300,
+                                           bool caseSensitive = false) const;
+
+    /* 索引里现在有多少行；0 且文件不为 0 说明还没建起来 */
+    Q_INVOKABLE int searchIndexRows() const;
+    /* FTS5 这块到底建起来没有（没建起来搜索只能按文件名，界面上要如实说） */
+    Q_INVOKABLE bool searchIndexReady() const;
+    /* 推倒重建全文索引，返回索引的行数（弹框右下角"重建索引"那一条用） */
+    Q_INVOKABLE int rebuildSearchIndex();
+
     /* ---- 文件操作 ---- */
 
     /* 在今天这一组里新建一个 md 并返回它的路径（左侧树那个 "+"）；失败返回空串 */
@@ -323,6 +353,19 @@ private:
     /* 搜索：命中 query 的文件路径集合（按条目标题 / 摘要 + 文件名） */
     QSet<QString> searchFiles(const QString &query) const;
 
+    /*
+     * 建 clip_fts 这张全文索引表，并在"表是空的、可库里已经有文件"时
+     * 从磁盘补一次（老库升上来就是这种情况）。
+     *
+     * 建表失败不是致命错误：m_ftsOk 置 false，searchContent 一律返回空，
+     * 界面上把"索引没建起来"这句话如实写出来（见 searchIndexReady）。
+     */
+    void ensureSearchIndex();
+    /* 把一个文件的正文按行喂进索引（先清掉它自己的旧行） */
+    void indexFileLines(const QString &path, const QString &text);
+    /* 把一个文件的索引行全清掉（文件没了 / 变成二进制 / 被跳过） */
+    void dropFileLines(const QString &path);
+
     /* 归档里那些文件的路径集合（tree() 和 sectionsInRange 都要按它筛掉） */
     QSet<QString> archivedPathSet() const;
     /* 把分类名洗成一个能当文件名的串（去掉 /\:*?"<>| 和首尾空白，空了给"未分类"） */
@@ -373,6 +416,8 @@ private:
     static QString previewFor(const QString &text);
 
     QSqlDatabase m_db;
+    /* clip_fts 建好了没（见 ensureSearchIndex；false 时全文搜索整块不可用） */
+    bool m_ftsOk = false;
     QString m_rootPath;
     QStringList m_imported;
     /*

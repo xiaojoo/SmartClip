@@ -2086,6 +2086,28 @@ Rectangle {
                  })
     }
 
+    /*
+     * 「在文件中查找」那扇弹框（见 qml/components/FileSearchPanel.qml）。
+     *
+     * 召唤它有两条路，走的是同一个命令名：双击 Shift（C++ 那个事件过滤器）
+     * 和「搜索」菜单里那一条。菜单里那条必须一直在 —— 手势是"看不见的功能"，
+     * 没人读代码的话用户不会知道有这回事。
+     */
+    function showFileSearch() { fileSearch.openPanel() }
+
+    /*
+     * 弹框里点中一条结果：打开那个文件，把光标落到那一行。
+     *
+     * 只到"行"这一档，不到列 —— EditorViewItem 上只有 gotoLine()，
+     * 要精确停在命中的那几个字上得再给编辑器加一个接口，这一版没做。
+     */
+    function openSearchHit(path, line) {
+        openTreeFile(path)
+        var v = activeView()
+        if (v && v.hasDocument && line > 0)
+            v.gotoLine(line)
+    }
+
     /* 换行 / 行号 / 空白字符是**视图级**设置，两栏一起改（见 applyToPanes） */
     function toggleWrap() {
         var on = !view.wrapEnabled
@@ -2538,6 +2560,7 @@ Rectangle {
         if (act === "findNext") { findStep(true); return }
         if (act === "findPrev") { findStep(false); return }
         if (act === "goto") { gotoLine(); return }
+        if (act === "findInFiles") { showFileSearch(); return }
 
         /* ---- 视图（这一组都是**视图级**设置，两栏一起改，见 applyToPanes） ---- */
         if (act === "zoomIn") { applyToPanes(function (v) { v.zoomIn() }); return }
@@ -3466,6 +3489,19 @@ Rectangle {
         askText: function (title, hint, value, then) {
             window.askInput(title, hint, value, {}, then)
         }
+    }
+
+    /*
+     * 「在文件中查找」那扇弹框（双击 Shift 召唤）。
+     *
+     * 它和设置面板一样是**独立的顶层 Window**，不是这块窗口里的子项：编辑区是
+     * 原生 QScintilla 子窗口，场景内的浮层压不过它（详见 FileSearchPanel.qml
+     * 文件头那一段）。所以这里也不给它挂 parent / anchors。
+     */
+    FileSearchPanel {
+        id: fileSearch
+        objectName: "fileSearchPanel"
+        onPicked: (path, line) => window.openSearchHit(path, line)
     }
 
     /*

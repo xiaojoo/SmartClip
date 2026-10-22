@@ -65,6 +65,26 @@ QString readAllText(const QString &path) {
 constexpr qint64 kMaxParseBytes = 4 * 1024 * 1024;
 
 /*
+ * 全文索引（clip_fts）的四个数。
+ *
+ * kMaxIndexLineChars：一行最多索引多少字符。压缩过的 js / json 整个文件就是
+ * 一"行"，几兆的东西喂进 trigram 索引会生成几百万个 gram —— 索引体积是被
+ * 撑爆的那个，而那种行搜出来人也看不了。截断只影响索引，磁盘上的文件不动。
+ *
+ * kSnippetCtx：「在文件中查找」的结果里，命中处左右各留多少字符。
+ *
+ * kTrigramMinChars：trigram 的 gram 就是 3 个字符，短于它索引里没有对应的
+ * 条目，只能全表扫（这条不是猜的，见 searchContent 里那两个实测数）。
+ *
+ * kFtsSchema：索引版本号，落在 clip_meta 的 'fts' 那一行。改了切行的规矩、
+ * 或者补上了某条"以前不喂索引"的写路径，就把这个数 +1（见 ensureSearchIndex）。
+ */
+constexpr int kMaxIndexLineChars = 8192;
+constexpr int kSnippetCtx = 60;
+constexpr int kTrigramMinChars = 3;
+constexpr int kFtsSchema = 1;
+
+/*
  * 只列名字、不读内容的目录：依赖包 / 构建产物 / 版本库内部。
  *
  * 主流编辑器都是这个路子（VS Code 的 files.exclude、PyCharm 的 Excluded
@@ -249,6 +269,8 @@ bool ClipboardStore::open() {
     query.exec(QStringLiteral("CREATE INDEX IF NOT EXISTS idx_entries_hash "
                               "ON clip_entries(hash)"));
 
+    ensureSearchIndex();
+
     migrateFromLegacy();
     rescan();
     return true;
@@ -426,6 +448,23 @@ bool ClipboardStore::appendEntry(const QDateTime &now, const QString &type, cons
         return false;
 
     recordEntry(target, now, type, title, previewFor(payload), block.size(), hash, assetPath);
+
+    /*
+     * 全文索引必须跟着这次追加走，而且这一步漏不得。
+     *
+     * 漏了不是"这一阵搜不到"，是**永远搜不到**：紧接着的 refreshFileRow 会把
+     * 新的大小和修改时间写进 clip_files，而 rescan 判"这个文件要不要重解析"
+     * 用的正是那两个数（见 reindexFile 那个 cache）—— 于是它下次一看"没变"就
+     * 跳过，这段内容再也没有进索引的机会。
+     * （2026-10-05 在真实库里抓到一条：053715.md 有 2 条条目、索引里零行。）
+     *
+     * 重读整个文件而不是只索引 block：block 落在第几行取决于文件原来多长，
+     * 而一份 md 上限 20KB（见 kFileLimit），重读这一份的代价可以忽略。
+     */
+    QString afterAppend;
+    if (readTextFile(QFileInfo(target), &afterAppend))
+        indexFileLines(target, afterAppend);
+
     refreshFileRow(target, dateKey, false);
     recount();
     emit changed();
@@ -509,6 +548,9 @@ void ClipboardStore::forgetFile(const QString &filePath) {
     query.prepare(QStringLiteral("DELETE FROM clip_files WHERE path = ?"));
     query.addBindValue(filePath);
     query.exec();
+
+    /* 全文索引跟着元数据一起走：留着它，搜索就会命中一个树上已经没有的文件 */
+    dropFileLines(filePath);
 }
 
 void ClipboardStore::recount() {
@@ -725,6 +767,14 @@ void ClipboardStore::reindexFile(const QString &path, bool imported,
 
     dropOld();
 
+    /*
+     * 全文索引按**整个文件**喂，不按分段后的条目喂。
+     *
+     * 行号必须是文件里的真实行号 —— 「在文件中查找」点一条结果要跳到编辑区的
+     * 那一行上去，条目正文的行号和文件行号是两套数，跳过去会偏。
+     */
+    indexFileLines(path, text);
+
     /* 按 "## 时分秒" 分段（和汇总用的是同一个函数，见 parseSections） */
     QList<Section> segments = parseSections(text);
 
@@ -800,6 +850,262 @@ QSet<QString> ClipboardStore::searchFiles(const QString &query) const {
     if (files.exec()) {
         while (files.next())
             out.insert(files.value(0).toString());
+    }
+    return out;
+}
+
+/* ------------------------------------------------------------------ */
+/* 全文索引（「在文件中查找」）                                            */
+/* ------------------------------------------------------------------ */
+
+void ClipboardStore::ensureSearchIndex() {
+    QSqlQuery query(m_db);
+    m_ftsOk = query.exec(QStringLiteral(
+        "CREATE VIRTUAL TABLE IF NOT EXISTS clip_fts USING fts5("
+        "path UNINDEXED, line UNINDEXED, text, tokenize='trigram')"));
+    if (!m_ftsOk) {
+        qWarning("全文索引：clip_fts 建表失败（%s）—— 「在文件中查找」整块不可用",
+                 qUtf8Printable(query.lastError().text()));
+        return;
+    }
+    query.exec(QStringLiteral(
+        "CREATE TABLE IF NOT EXISTS clip_meta (k TEXT PRIMARY KEY, v TEXT NOT NULL)"));
+
+    /*
+     * 索引版本号，存在 clip_meta 的 'fts' 那一行。
+     *
+     * 为什么要有这一层：这份索引是**磁盘上算出来的缓存**，光看"表里有没有行"
+     * 判断不了它是不是按**现在这版代码**算的。补一个洞（比如 appendEntry 以前
+     * 不喂索引）或者改了切行规矩，老库里那批行不会自己变对，而 rescan 又按
+     * "大小 + 修改时间没变"跳过它们 —— 于是洞一直留着，还没有任何报错。
+     *
+     * 所以：版本对不上就整张重建一次，然后把新版本写回去。一次成本是本机
+     * 675 个文件 0.7 秒（2026-10-05 量），只在升级那一启动付。
+     */
+    QString stored;
+    QSqlQuery ver(m_db);
+    if (ver.exec(QStringLiteral("SELECT v FROM clip_meta WHERE k = 'fts'")) && ver.next())
+        stored = ver.value(0).toString();
+    const QString wanted = QString::number(kFtsSchema);
+    if (stored == wanted && searchIndexRows() > 0)
+        return;
+
+    rebuildSearchIndex();
+
+    QSqlQuery put(m_db);
+    if (put.prepare(QStringLiteral("INSERT INTO clip_meta(k, v) VALUES('fts', ?) "
+                                   "ON CONFLICT(k) DO UPDATE SET v = excluded.v"))) {
+        put.addBindValue(wanted);
+        put.exec();
+    }
+}
+
+void ClipboardStore::indexFileLines(const QString &path, const QString &text) {
+    if (!m_ftsOk)
+        return;
+    dropFileLines(path);
+
+    QSqlQuery ins(m_db);
+    if (!ins.prepare(QStringLiteral("INSERT INTO clip_fts(path, line, text) VALUES(?, ?, ?)")))
+        return;
+    ins.addBindValue(path);
+
+    const QStringList rows = text.split(QLatin1Char('\n'));
+    for (int i = 0; i < rows.size(); ++i) {
+        QString line = rows.at(i);
+        if (line.endsWith(QLatin1Char('\r')))
+            line.chop(1);
+        /*
+         * 空行不进索引：一份 md 里空行能占到三成，它们一个字符都命中不了，
+         * 却照样占一行记录和一份 gram。行号照旧用文件里的真实行号（i + 1），
+         * 所以跳过空行不会把跳转跳偏。
+         */
+        if (line.trimmed().isEmpty())
+            continue;
+        if (line.size() > kMaxIndexLineChars)
+            line = line.left(kMaxIndexLineChars);
+        ins.bindValue(1, i + 1);
+        ins.bindValue(2, line);
+        ins.exec();
+    }
+}
+
+void ClipboardStore::dropFileLines(const QString &path) {
+    if (!m_ftsOk)
+        return;
+    QSqlQuery del(m_db);
+    if (!del.prepare(QStringLiteral("DELETE FROM clip_fts WHERE path = ?")))
+        return;
+    del.addBindValue(path);
+    del.exec();
+}
+
+bool ClipboardStore::searchIndexReady() const {
+    return m_ftsOk;
+}
+
+int ClipboardStore::searchIndexRows() const {
+    if (!m_ftsOk)
+        return 0;
+    QSqlQuery query(m_db);
+    if (query.exec(QStringLiteral("SELECT COUNT(*) FROM clip_fts")) && query.next())
+        return query.value(0).toInt();
+    return 0;
+}
+
+int ClipboardStore::rebuildSearchIndex() {
+    if (!m_ftsOk)
+        return 0;
+
+    QSqlQuery del(m_db);
+    if (!del.exec(QStringLiteral("DELETE FROM clip_fts")))
+        return 0;
+
+    QStringList paths;
+    QSqlQuery all(m_db);
+    if (all.exec(QStringLiteral("SELECT path FROM clip_files"))) {
+        while (all.next())
+            paths << all.value(0).toString();
+    }
+
+    /*
+     * 整批包在一个事务里。
+     *
+     * 不是习惯问题：这份库开着 journal_mode=WAL + synchronous=NORMAL，
+     * 一条 INSERT 一次落盘的话，重建三万个文件要 fsync 三万多次
+     * （rescan 那边同一个道理，见它的 batched 分支）。
+     */
+    const bool batched = m_db.transaction();
+    for (const QString &path : std::as_const(paths)) {
+        QString text;
+        if (!readTextFile(QFileInfo(path), &text))
+            continue;                 /* 二进制 / 超大 / 已经没了：本来就不该在里面 */
+        indexFileLines(path, text);
+    }
+    if (batched)
+        m_db.commit();
+
+    return searchIndexRows();
+}
+
+QVariantList ClipboardStore::searchContent(const QString &query, int limit,
+                                           bool caseSensitive) const {
+    QVariantList out;
+    const QString needle = query.trimmed();
+    if (needle.isEmpty() || !m_ftsOk || limit <= 0)
+        return out;
+
+    QSqlQuery sql(m_db);
+    if (needle.size() >= kTrigramMinChars) {
+        /*
+         * 整条 query 当成**一个带引号的短语**传进去。
+         *
+         * 不引起来的话 FTS5 把空格读成 AND："foo bar" 会命中所有含 foo
+         * 或 bar 的行 —— 而用户要的是"这两个词挨着出现"的那一句原文。
+         * 引号本身按 FTS5 的规矩双写。
+         */
+        QString phrase = needle;
+        phrase.replace(QLatin1Char('"'), QStringLiteral("\"\""));
+        if (!sql.prepare(QStringLiteral("SELECT path, line, text FROM clip_fts "
+                                        "WHERE clip_fts MATCH ? LIMIT ?")))
+            return out;
+        sql.bindValue(0, QLatin1Char('"') + phrase + QLatin1Char('"'));
+        sql.bindValue(1, limit);
+    } else {
+        /*
+         * 1-2 个字：trigram 里最短的 gram 就是 3 个字符，索引帮不上，只能全表扫。
+         *
+         * 这一档有多慢是量出来的（本机真实语料复制放大，2026-10-05）：
+         *   2.7MB / 1.4 万行 -> 4.0ms      109MB / 55 万行 -> 210ms
+         * 同一批数据走索引是 0.2ms。所以现在这个量级上它无所谓；哪天导入到
+         * 几十 MB，2 个字的查询会开始卡手（弹框的状态行会如实说走的是哪条）。
+         *
+         * % 和 _ 在 LIKE 里是通配符，用户打出这两个字符时不能当通配符用。
+         */
+        QString pattern = needle;
+        pattern.replace(QLatin1Char('\\'), QStringLiteral("\\\\"));
+        pattern.replace(QLatin1Char('%'), QStringLiteral("\\%"));
+        pattern.replace(QLatin1Char('_'), QStringLiteral("\\_"));
+        if (!sql.prepare(QStringLiteral("SELECT path, line, text FROM clip_fts "
+                                        "WHERE text LIKE ? ESCAPE '\\' LIMIT ?")))
+            return out;
+        sql.bindValue(0, QLatin1Char('%') + pattern + QLatin1Char('%'));
+        sql.bindValue(1, limit);
+    }
+    if (!sql.exec())
+        return out;
+
+    /*
+     * 归档掉的文件不列 —— 和左树同一个口径（见 tree() 里那句"归档掉的文件不列"）。
+     * 不然搜到一条点开，树里却没有它，用户会以为文件丢了。
+     */
+    const QSet<QString> archived = archivedPathSet();
+
+    struct Hit {
+        QString path;
+        int line = 0;
+        QString pre;
+        QString mid;
+        QString post;
+    };
+    QList<Hit> hits;
+
+    while (sql.next()) {
+        const QString path = sql.value(0).toString();
+        if (archived.contains(path))
+            continue;
+        const QString text = sql.value(2).toString();
+        const int at = text.indexOf(needle, 0,
+                                    caseSensitive ? Qt::CaseSensitive : Qt::CaseInsensitive);
+        /*
+         * 索引本身是大小写不敏感的（trigram 默认如此，中文不受影响），
+         * 所以"区分大小写"这一档在这里筛回来。
+         *
+         * 顺带当一道正确性守卫：真找不到 needle（比如索引被截断过）就丢掉这行，
+         * 别在界面上摆一条其实没有命中的结果。
+         */
+        if (at < 0)
+            continue;
+
+        const int start = qMax(0, at - kSnippetCtx);
+        const int end = qMin(text.size(), at + needle.size() + kSnippetCtx);
+        Hit hit;
+        hit.path = path;
+        hit.line = sql.value(1).toInt();
+        hit.pre = text.mid(start, at - start);
+        hit.mid = text.mid(at, needle.size());
+        hit.post = text.mid(at + needle.size(), end - at - static_cast<int>(needle.size()));
+        if (start > 0)
+            hit.pre.prepend(QChar(0x2026));       /* …：左边还有没显示的 */
+        if (end < text.size())
+            hit.post.append(QChar(0x2026));
+        hits.append(hit);
+    }
+
+    /*
+     * 按（文件，行号）排。
+     *
+     * FTS5 给的是 rowid 顺序 = 建索引的先后，同一个文件的命中会散在整张结果里。
+     * 界面是按文件分组的（一个文件头 + 它底下若干命中），不排序就得在 QML 里
+     * 再分一次组，而且同一个文件会被切成好几段。
+     */
+    std::sort(hits.begin(), hits.end(), [](const Hit &a, const Hit &b) {
+        if (a.path != b.path)
+            return a.path < b.path;
+        return a.line < b.line;
+    });
+
+    for (const Hit &hit : std::as_const(hits)) {
+        const QFileInfo info(hit.path);
+        out.append(QVariantMap{
+            {QStringLiteral("path"), hit.path},
+            {QStringLiteral("name"), info.fileName()},
+            {QStringLiteral("folder"), info.absolutePath()},
+            {QStringLiteral("line"), hit.line},
+            {QStringLiteral("pre"), hit.pre},
+            {QStringLiteral("mid"), hit.mid},
+            {QStringLiteral("post"), hit.post},
+        });
     }
     return out;
 }
@@ -1280,6 +1586,22 @@ bool ClipboardStore::renameFile(const QString &path, const QString &newName) {
     query.addBindValue(to);
     query.addBindValue(from);
     query.exec();
+
+    /*
+     * 全文索引里的路径也要跟着换。
+     *
+     * 不换的后果有两条，第二条比第一条难查：旧路径那批行还留在索引里，
+     * 于是「在文件中查找」会列出一条**点不开**的结果（那个路径已经没有文件了），
+     * 而新名字这份文件反而搜不到。
+     *
+     * 走"从磁盘重读 + 重插"而不是 UPDATE clip_fts：path 是 UNINDEXED 列，
+     * FTS5 上更新它的写法没有可靠保证，而文件刚刚已经改好名了，重读一次
+     * 就是权威结果（一份 md 上限 20KB）。
+     */
+    dropFileLines(from);
+    QString renamed;
+    if (readTextFile(QFileInfo(to), &renamed))
+        indexFileLines(to, renamed);
 
     recount();
     emit changed();

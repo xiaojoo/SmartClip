@@ -35,6 +35,70 @@ class QWidget;
  * 抢过来只会更差。工具栏按钮走 commandRequested 直接调 EditorView 的方法，
  * 不走键盘映射。因此这几个动作也**不在可改键列表**里（见 shortcutItems()）。
  */
+/*
+ * 双击 Shift 的判定 —— 「在文件中查找」那扇弹框的召唤手势。
+ *
+ * 放在头文件里（而不是 EditorController.cpp 的匿名 namespace）只有一个理由：
+ * 自检要能直接驱动它。把时钟当参数传进来，就能拿一串写死的按键序列量出
+ * "这一下该不该响"，不用真的等手速 —— 合成输入驱动不了时序类的东西，
+ * 量不出稳定结果的断言不如不写。
+ *
+ * 三条判据，每条都对应一种误响：
+ *   * autoRepeat 不算第二下 —— 按住 Shift 不放会连发 KeyPress。
+ *   * 中间敲过别的键就作废 —— 打大写字母是"Shift + A"，A 那一下要记下来。
+ *   * 两次按下隔 400ms 以内 —— IDEA 那一档在 300 上下；给到 400 是手慢的人
+ *     300 会漏，再往上就会在正常打字时误响。
+ */
+class DoubleShiftDetector {
+public:
+    static constexpr qint64 kWindowMs = 400;
+
+    /* 喂一个按键；返回 true = 这一下正好凑成双击 */
+    bool feed(int key, bool press, bool autoRepeat, qint64 nowMs) {
+        if (autoRepeat)
+            return false;
+        if (key == Qt::Key_Shift) {
+            if (!press)
+                return false;               /* 只看按下；抬起不参与判定 */
+            const bool doubled = m_lastShiftMs >= 0 && !m_otherKeySince
+                                 && nowMs - m_lastShiftMs <= kWindowMs;
+            /* 成了就把状态清掉：连按三下 Shift 只算一次双击，不算两次 */
+            m_lastShiftMs = doubled ? -1 : nowMs;
+            m_otherKeySince = false;
+            return doubled;
+        }
+        if (press && !isModifierLikeKey(key))
+            m_otherKeySince = true;
+        return false;
+    }
+
+    void reset() { m_lastShiftMs = -1; m_otherKeySince = false; }
+
+    /*
+     * 会不会和 Shift 一起按、但自己不产生字符的那几个键。
+     *
+     * 判"中间有没有敲过别的键"时要放过它们：按 Ctrl 再按 Shift 不该把双击判废。
+     */
+    static bool isModifierLikeKey(int key) {
+        switch (key) {
+        case Qt::Key_Control:
+        case Qt::Key_Alt:
+        case Qt::Key_Meta:
+        case Qt::Key_Shift:
+        case Qt::Key_CapsLock:
+        case Qt::Key_NumLock:
+        case Qt::Key_ScrollLock:
+            return true;
+        default:
+            return false;
+        }
+    }
+
+private:
+    qint64 m_lastShiftMs = -1;
+    bool m_otherKeySince = false;
+};
+
 class EditorController final : public QObject {
     Q_OBJECT
 

@@ -4627,6 +4627,285 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
         dispatch(QStringLiteral("closeTab"));
 
         /*
+         * ================= 「在文件中查找」：全文索引 + 弹框 + 手势 =========
+         *
+         * 这一段跑在临时保存目录上（和上面新建 / 改名 / 删除同一个窗口期），
+         * 夹具文件都落在临时根目录里，换回真实目录时那批记录会被
+         * "扫不到的文件"那一步清掉（见 rescan）。
+         *
+         * 几条"必须能变红"的反证放在各自那组里：不可能存在的串要 0 命中、
+         * 区分大小写要能把同一条查询从 1 处打成 0 处、limit 要真的截断、
+         * 改名 / 删除之后老路径要消失。少了它们，"命中 N 处"那几条
+         * 可能只是在量"随便什么都算命中"。
+         */
+        {
+            check(store->searchIndexReady(),
+                  QStringLiteral("全文索引：FTS5 在 Qt 自带的 SQLite 里建得起来"),
+                  QStringLiteral("clip_fts 建表失败 —— 「在文件中查找」整块不可用"));
+
+            const QString marker = QStringLiteral("ZQXJ7413");
+            const QString fixture = store->createFile(
+                QStringLiteral("索引自检的第一行\n%1 这一行要被搜出来\n最后一行").arg(marker));
+            check(!fixture.isEmpty() && QFileInfo::exists(fixture),
+                  QStringLiteral("全文索引：建出一份夹具文件"), fixture);
+
+            /*
+             * 行号对不对，拿磁盘上那份文件自己数一遍来对 ——
+             * 不写死"第 4 行"：createFile 的抬头格式哪天改了，写死的断言
+             * 会跟着一起变绿或变红，而它俩其实没关系。
+             */
+            int wantLine = -1;
+            {
+                QFile f(fixture);
+                const QString body = f.open(QIODevice::ReadOnly)
+                                         ? QString::fromUtf8(f.readAll()) : QString();
+                const QStringList ls = body.split(QLatin1Char('\n'));
+                for (int i = 0; i < ls.size(); ++i) {
+                    if (ls.at(i).contains(marker)) {
+                        wantLine = i + 1;
+                        break;
+                    }
+                }
+            }
+            check(wantLine > 0, QStringLiteral("全文索引：夹具文件里确实写着那一行"),
+                  QStringLiteral("wantLine=%1").arg(wantLine));
+
+            const QVariantList hits = store->searchContent(marker, 50, false);
+            check(hits.size() == 1,
+                  QStringLiteral("全文索引：3 个字以上的查询走 trigram 索引，命中 1 处"),
+                  QStringLiteral("命中 %1 处").arg(hits.size()));
+            if (!hits.isEmpty()) {
+                const QVariantMap h = hits.first().toMap();
+                check(h.value(QStringLiteral("line")).toInt() == wantLine,
+                      QStringLiteral("命中行的行号 = 磁盘上数出来的那一行（点结果才跳得对）"),
+                      QStringLiteral("索引给 %1，磁盘上是 %2")
+                          .arg(h.value(QStringLiteral("line")).toInt()).arg(wantLine));
+                check(h.value(QStringLiteral("mid")).toString() == marker,
+                      QStringLiteral("mid 就是命中的那几个字（界面拿它着色）"),
+                      h.value(QStringLiteral("mid")).toString());
+                const QString stitched = h.value(QStringLiteral("pre")).toString()
+                        + h.value(QStringLiteral("mid")).toString()
+                        + h.value(QStringLiteral("post")).toString();
+                check(stitched.contains(marker) && !stitched.contains(QChar(0x2026)),
+                      QStringLiteral("pre / mid / post 拼回去就是那一行的原文"), stitched);
+                check(!h.value(QStringLiteral("name")).toString().isEmpty()
+                          && !h.value(QStringLiteral("folder")).toString().isEmpty(),
+                      QStringLiteral("命中带着文件名和所在目录（弹框里那一行文件头要用）"));
+            }
+
+            /* ---- 中文：3 字走索引、2 字走全表扫，两条路都要出东西 ---- */
+            check(!store->searchContent(QStringLiteral("要被搜"), 50, false).isEmpty(),
+                  QStringLiteral("全文索引：3 个汉字走 trigram 命中（中文没有空格，"
+                                 "默认分词器会把整句切成一个词）"));
+            const QVariantList two = store->searchContent(QStringLiteral("要被"), 50, false);
+            bool twoHasFixture = false;
+            for (const QVariant &v : two) {
+                twoHasFixture = twoHasFixture
+                        || v.toMap().value(QStringLiteral("path")).toString() == fixture;
+            }
+            check(twoHasFixture,
+                  QStringLiteral("全文索引：2 个汉字走 LIKE 兜底也命中得到（这一档索引帮不上，"
+                                 "但绝不能静默返回空）"));
+
+            /* ---- 反证一：不可能存在的串必须 0 命中 ---- */
+            check(store->searchContent(QStringLiteral("ZQXJ0000NOTANYWHERE"), 50,
+                                       false).isEmpty(),
+                  QStringLiteral("反证：没写过的串 0 命中（不然上面那几条是在量\"什么都算命中\"）"));
+
+            /* ---- 反证二：区分大小写只能破一边 ---- */
+            check(store->searchContent(marker.toLower(), 50, false).size() == 1
+                      && store->searchContent(marker.toLower(), 50, true).isEmpty(),
+                  QStringLiteral("反证：小写查大写的内容 —— 不勾\"Aa\"命中 1 处、勾上 0 处"),
+                  QStringLiteral("不分 %1 处 / 分 %2 处")
+                      .arg(store->searchContent(marker.toLower(), 50, false).size())
+                      .arg(store->searchContent(marker.toLower(), 50, true).size()));
+
+            /* ---- 反证三：limit 要真的截断 ---- */
+            const QString dense = QStringLiteral("DENSE7788");
+            for (int i = 0; i < 3; ++i)
+                store->captureText(QStringLiteral("追加的一行 %1-%2").arg(dense).arg(i));
+            const int all = store->searchContent(dense, 500, false).size();
+            const int cut = store->searchContent(dense, 2, false).size();
+            check(all == 3 && cut == 2,
+                  QStringLiteral("全文索引：limit 真的在截断（弹框那句\"只显示前 N 处\"不是空话）"),
+                  QStringLiteral("给 500 回 %1 条，给 2 回 %2 条").arg(all).arg(cut));
+
+            /*
+             * 这一条守的是量产后最容易静默烂掉的地方：往剪贴板里追加一条内容，
+             * 当场就得搜得到。
+             *
+             * 以前它**永远搜不到**，而且不报错：appendEntry 只写 clip_entries +
+             * refreshFileRow，而 refreshFileRow 顺手把新的大小和修改时间写进了
+             * clip_files —— 下一次 rescan 正是拿这两个数判"要不要重解析"的，
+             * 于是它认为没变、直接跳过，这段内容再也没有进索引的机会。
+             * （2026-10-05 在真实库里抓到一条：053715.md 有 2 条条目、索引里零行。）
+             */
+            check(!store->searchContent(QStringLiteral("DENSE7788-1"), 50, false).isEmpty(),
+                  QStringLiteral("反证：追加的内容当场就进索引（漏了这一步是永久搜不到，"
+                                 "因为 refreshFileRow 已经把 mtime 报成\"没变\"）"));
+
+            /* ---- 改名：老路径不能再出现在结果里，新路径要能搜到 ---- */
+            const QString newName = QStringLiteral("索引自检改名后.md");
+            const QString newFull =
+                QFileInfo(fixture).absolutePath() + QLatin1Char('/') + newName;
+            check(store->renameFile(fixture, newName),
+                  QStringLiteral("全文索引：夹具改名成功"),
+                  QStringLiteral("%1 -> %2").arg(fixture, newFull));
+            {
+                const QVariantList after = store->searchContent(marker, 50, false);
+                bool onNew = false;
+                bool onOld = false;
+                for (const QVariant &v : after) {
+                    const QString p = v.toMap().value(QStringLiteral("path")).toString();
+                    onNew = onNew || p == newFull;
+                    onOld = onOld || p == fixture;
+                }
+                check(after.size() == 1 && onNew && !onOld,
+                      QStringLiteral("反证：改名之后命中挂在新路径上，老路径从索引里消失了"),
+                      QStringLiteral("%1 处，新=%2 老=%3")
+                          .arg(after.size()).arg(onNew).arg(onOld));
+            }
+
+            /* ---- 删除：文件没了，索引行跟着没了 ---- */
+            check(store->deleteFile(newFull), QStringLiteral("全文索引：夹具删除成功"));
+            check(store->searchContent(marker, 50, false).isEmpty(),
+                  QStringLiteral("反证：删掉文件之后它的索引行一起消失（不跟着删就会列出点不开的结果）"));
+
+            /* ---- 双击 Shift 的判定：该响和不该响 ---- */
+            {
+                DoubleShiftDetector d;
+                check(!d.feed(Qt::Key_Shift, true, false, 1000)
+                          && d.feed(Qt::Key_Shift, true, false, 1200),
+                      QStringLiteral("双击 Shift：400ms 内两下 = 响一次"));
+                d.reset();
+                check(!d.feed(Qt::Key_Shift, true, false, 0)
+                          && !d.feed(Qt::Key_A, true, false, 50)
+                          && !d.feed(Qt::Key_Shift, true, false, 100),
+                      QStringLiteral("反证：中间敲过 A（打大写字母）不算双击"));
+                d.reset();
+                check(!d.feed(Qt::Key_Shift, true, false, 0)
+                          && !d.feed(Qt::Key_Shift, true, false, 500),
+                      QStringLiteral("反证：隔 500ms 的两下不算双击"));
+                d.reset();
+                check(!d.feed(Qt::Key_Shift, true, false, 0)
+                          && !d.feed(Qt::Key_Shift, true, true, 50),
+                      QStringLiteral("反证：按住不放的自动重发不算第二下"));
+                d.reset();
+                const bool first = d.feed(Qt::Key_Shift, true, false, 0)
+                                   || d.feed(Qt::Key_Shift, true, false, 50);
+                check(first && !d.feed(Qt::Key_Shift, true, false, 90),
+                      QStringLiteral("反证：连按三下只算一次双击（不会一路弹框）"));
+                d.reset();
+                check(!d.feed(Qt::Key_Shift, true, false, 0)
+                          && !d.feed(Qt::Key_Control, true, false, 10)
+                          && d.feed(Qt::Key_Shift, true, false, 20),
+                      QStringLiteral("Ctrl 那一下不作废双击（修饰键不产生字符）"));
+            }
+
+            /* ---- 弹框本身：命令分发要真能把它开出来，而且要看得见 ---- */
+            {
+                QObject *panel = qmlRoot ? qmlRoot->findChild<QObject *>("fileSearchPanel")
+                                         : nullptr;
+                if (!panel) {
+                    check(false, QStringLiteral("弹框：抓不到 fileSearchPanel（整扇无从谈起）"));
+                } else {
+                    check(!panel->property("visible").toBool(),
+                          QStringLiteral("弹框：没召唤之前是收着的"));
+                    dispatch(QStringLiteral("findInFiles"));
+                    settle();
+                    check(panel->property("visible").toBool(),
+                          QStringLiteral("反证：走\"搜索\"菜单 / 双击 Shift 同一条命令能把弹框开出来"));
+                    /* 开出来得是块**独立原生窗**：场景内浮层会被原生编辑区盖住 */
+                    check(panel->inherits("QQuickWindow"),
+                          QStringLiteral("弹框是顶层窗口，不是场景里的浮层"
+                                         "（编辑区是原生子窗口，浮层压不过它）"),
+                          QStringLiteral("实际类型=%1")
+                              .arg(QString::fromLatin1(panel->metaObject()->className())));
+
+                    /*
+                     * 用 dense 而不是 marker 来查：marker 那份夹具在上面几步
+                     * 已经改名 + 删掉了，这里再查它必然是空的（第一版就栽在这儿，
+                     * 报出来的 display=0 是真的，错的是断言的取材）。
+                     *
+                     * 3 条内容都在同一个文件里 -> 显示行 = 1 行文件头 + 3 行命中，
+                     * 顺带把 regroup() 那个分组也验了。
+                     */
+                    panel->setProperty("query", dense);
+                    QMetaObject::invokeMethod(panel, "run");
+                    settle();
+                    const QVariantList shown = panel->property("display").toList();
+                    int heads = 0;
+                    int hitsShown = 0;
+                    for (const QVariant &v : shown) {
+                        if (v.toMap().value(QStringLiteral("kind")).toString()
+                            == QLatin1String("file"))
+                            ++heads;
+                        else
+                            ++hitsShown;
+                    }
+                    check(heads == 1 && hitsShown == 3,
+                          QStringLiteral("弹框：列表是\"一个文件头 + 它底下三条命中\"这样分组的"),
+                          QStringLiteral("display=%1（文件头 %2，命中 %3）")
+                              .arg(shown.size()).arg(heads).arg(hitsShown));
+
+                    /*
+                     * 状态那一行要读**界面真正算出来的字符串**，不能只读 C++ 的返回值。
+                     *
+                     * 第一版这里漏了：面板上那条 `scanned` 绑定写成了
+                     * `query.trimmed()`（QString 的方法，QML 的 JS 字符串没有），
+                     * 运行时甩一句 TypeError，但没有任何断言读它，于是自检 960 项
+                     * 全绿、弹框照旧起不来。这一条就是补上的那把尺子。
+                     */
+                    QObject *status = panel->findChild<QObject *>("fileSearchStatus");
+                    check(status != nullptr,
+                          QStringLiteral("弹框：抓得到状态那一行（objectName 掉了？）"));
+                    if (status) {
+                        const QString s = status->property("text").toString();
+                        check(s.contains(QStringLiteral("trigram"))
+                                  && s.contains(QStringLiteral("ms"))
+                                  && s.contains(QStringLiteral("3 处")),
+                              QStringLiteral("弹框：状态行报出\"几处 / 多少 ms / 走哪条路\"这三件事"),
+                              s);
+                        panel->setProperty("query", QStringLiteral("索引"));
+                        QMetaObject::invokeMethod(panel, "run");
+                        settle();
+                        check(status->property("text").toString()
+                                  .contains(QStringLiteral("全表扫")),
+                              QStringLiteral("反证：查询缩到 2 个字，状态行换成\"走全表扫\""
+                                             "（这条读的就是 scanned 那条绑定）"),
+                              status->property("text").toString());
+                    }
+
+                    panel->setProperty("query", QStringLiteral("ZQXJ0000NOTANYWHERE"));
+                    QMetaObject::invokeMethod(panel, "run");
+                    settle();
+                    check(panel->property("display").toList().isEmpty(),
+                          QStringLiteral("反证：查一个没有的东西，列表是空的（不是留着上一次的）"));
+                    panel->setProperty("query", QString());
+                    QMetaObject::invokeMethod(panel, "closePanel");
+                    settle();
+                    check(!panel->property("visible").toBool(),
+                          QStringLiteral("弹框：closePanel 收得回去"));
+                }
+            }
+
+            /* ---- 可改键清单里得有这么一条（设置面板那一栏是它的第二个入口） ---- */
+            {
+                const QVariantList items = cmd ? cmd->property("shortcutItems").toList()
+                                                : QVariantList();
+                bool listed = false;
+                for (const QVariant &v : items) {
+                    if (v.toMap().value(QStringLiteral("name")).toString()
+                        == QLatin1String("findInFiles"))
+                        listed = true;
+                }
+                check(listed,
+                      QStringLiteral("设置 → 快捷键：列着\"在文件中查找\"这一条"
+                                     "（想绑真组合键的人有地方绑）"));
+            }
+        }
+
+        /*
          * 收尾：保存位置换回用户原来那个。
          *
          * setRootPath 会顺带重扫一遍，所以元数据也跟着回到真实目录上

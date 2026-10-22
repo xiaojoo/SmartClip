@@ -254,7 +254,10 @@ function editMenu(view, ov, md) {
 
 function searchMenu(view, ov) {
     var hasDoc = !!view && view.hasDocument
-    return applyOverrides([
+    var items = applyOverrides([
+        /* 这一条右侧的文字在下面单独兜（见那一段注释），这里给什么都不影响结果 */
+        { label: "在文件中查找…", act: "findInFiles", shortcut: "", icon: "search" },
+        { separator: true },
         { label: "查找…", act: "find", shortcut: "Ctrl+F", icon: "search",
           disabled: !hasDoc },
         { label: "替换…", act: "replace", shortcut: "Ctrl+H", icon: "replace",
@@ -268,6 +271,21 @@ function searchMenu(view, ov) {
         { label: "转到行…", act: "goto", shortcut: "Ctrl+G", icon: "goto",
           disabled: !hasDoc }
     ], ov)
+
+    /*
+     * 「在文件中查找」这一条的快捷键文字要单独兜。
+     *
+     * applyOverrides 会把清单里的当前组合键原样盖到 shortcut 上，而这一条出厂
+     * **没有**组合键（召唤它的手势是双击 Shift，见 src/EditorController.cpp 的
+     * DoubleShiftFilter），盖上来就是个空串 —— 菜单右侧空着，这扇弹框在界面上
+     * 变成"没人知道怎么开"的入口。所以：用户真绑了组合键就显示组合键，
+     * 没绑就显示手势。
+     */
+    for (var i = 0; i < items.length; ++i) {
+        if (items[i] && items[i].act === "findInFiles" && !items[i].shortcut)
+            items[i].shortcut = "双击 Shift"
+    }
+    return items
 }
 
 function viewMenu(view, ov) {
