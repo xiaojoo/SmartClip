@@ -51,6 +51,23 @@ Rectangle {
     /* 渲染结果为空时的提示语（空文件 / 还没渲染出来） */
     property string emptyHint: "没有可预览的内容"
 
+    /*
+     * 正文基准字号。由 Main.qml 灌成**编辑区那个生效字号**（applyFontScheme 里），
+     * 不是写死 14 —— 预览和源码是同一份文档的两种看法，字不一样大就别扭。
+     * 另一半在 C++：toHtml() 会在 <body> 上写行内 font-size:9pt（=12px），
+     * 行内压过这里，所以那份也被剥掉了，见 EditorController.cpp。
+     */
+    property int bodyPixelSize: 14
+
+    /*
+     * 真正能放字的像素宽度（正文宽 - 左右内衬）。
+     *
+     * 给 Main.qml 传回 Cmd.markdownHtml() 的第三个参数：代码块里的超长行要按这个
+     * 宽度**硬切**出续行缩进（为什么不能在渲染端做，见 EditorController.h 的 wrapPx）。
+     * 窗口一改大小这条就变，Main.qml 那边挂着它做防抖重渲染。
+     */
+    readonly property int textWidthPx: Math.max(0, body.width - body.leftPadding - body.rightPadding)
+
     /* 点了一个链接（Main.qml 接住，交给系统默认程序打开） */
     signal linkActivated(string link)
 
@@ -128,8 +145,8 @@ Rectangle {
              */
             selectionColor: root.palette.highlight
             selectedTextColor: root.palette.highlightedText
-            /* 字号在渲染出来的 HTML 里是相对的（em），基准字号在这里 */
-            font.pixelSize: 14
+            /* 字号在渲染出来的 HTML 里是相对的（em），基准字号在这里 —— 跟编辑区同源 */
+            font.pixelSize: root.bodyPixelSize
             /* 内边距：四周留白，像一篇文章而不是一块日志 */
             leftPadding: 24
             rightPadding: 24

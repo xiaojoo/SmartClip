@@ -12,6 +12,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QJsonDocument>
+#include <QRegularExpression>
 #include <QSettings>
 #include <QTemporaryDir>
 #include <QTextDocument>
@@ -1053,6 +1054,163 @@ int SelfTest::runTools(Formatter *fmt, DiffEngine *differ, Checker *check, LlmCl
               QStringLiteral("行内代码用等宽字体那一档"));
         tcheck(html.contains(QStringLiteral("d6d7da")),
               QStringLiteral("配色是深色主题那一套（默认是白纸黑字，会把正文藏起来）"));
+
+        /*
+         * 间距那三条：量的全是"toHtml() 写死的行内 margin 有没有被剥掉"。
+         *
+         * toHtml() 给每个块都写 style="margin-top:0px; margin-bottom:0px"，行内样式
+         * 压过样式表 —— 不剥的话 kMarkdownCss 里那些间距一条都不生效（实测段间只剩
+         * 6px，同一位置 Typora 19px）。给 CSS 加 !important 也只救回一半（11px）。
+         * 左右两条要留着：列表缩进和引用那 40px 的行内 margin-left 指着它们。
+         */
+        {
+            static const QRegularExpression kInlineV(
+                QStringLiteral("margin-(top|bottom):0px"));
+            /* 先把 <style> 整段挖掉：样式表里 pre 就写着 margin-top: 0px，不挖的话这条
+               会把样式表那一行当成没剥干净的内联残留。
+               而且量的是一份**没有代码块**的渲染 —— 代码块那两行内衬空行是我们自己往
+               格子里写 margin-top:0px 的（不写 0 会把底色断出一条缝），拿整份文档去数
+               就是在数自己。 */
+            static const QRegularExpression kStyleBlock(
+                QStringLiteral("<style[^>]*>.*?</style>"),
+                QRegularExpression::DotMatchesEverythingOption);
+            const QString onlyMarkup =
+                QString(controller.markdownHtml(QStringLiteral("甲\n\n乙\n"), QString(), 0))
+                    .remove(kStyleBlock);
+            const QRegularExpressionMatch m = kInlineV.match(onlyMarkup);
+            tcheck(!m.hasMatch(),
+                   QStringLiteral("行内的上下 margin 已剥掉（不剥则预览样式表里的间距全部不生效）"),
+                   m.hasMatch() ? onlyMarkup.mid(m.capturedStart(), 70)
+                                : QStringLiteral("无残留"));
+            tcheck(html.contains(QStringLiteral("margin-left")),
+                   QStringLiteral("左右方向的行内 margin 没被连坐剥掉（列表缩进靠它）"));
+            tcheck(html.contains(QStringLiteral("line-height: 1.3"))
+                       && html.contains(QStringLiteral("margin-top: 0.62em")),
+                   QStringLiteral("样式表里带上了 Typora 那一档的行高与段间距"));
+        }
+
+        /*
+         * 代码长行按宽度硬切。
+         *
+         * 预览是 QTextDocument，整份文档只有一个换行选项 —— 没有"只让代码块不折行"
+         * 的口子，所以续行缩进只能切在内容上（见 EditorController.cpp 的
+         * wrapLongCodeLines）。三条判据各钉一样：切了、续行补了 4 空格、
+         * 没传宽度时一个字节都不许动。
+         */
+        {
+            const QString mdWrap = QStringLiteral("```\n")
+                + QStringLiteral("qt.qml.context: ") + QString(200, QLatin1Char('a'))
+                + QStringLiteral(" tail\n短的一行\n```\n");
+            const QString wrapped = controller.markdownHtml(mdWrap, QString(), 400);
+            const QString plain = controller.markdownHtml(mdWrap, QString(), 0);
+            /* 全文的 `<br />` 只可能来自代码块：N 行代码有 N-1 个行间的，加上块首块尾
+               那两个**内衬空行**（见 EditorController.cpp 的 kPadLine），共 N+1 个，
+               所以减一才是行数。不能再数 Courier New（那个行内家族名正是被我们剥掉的
+               东西，数它量不到行数） */
+            auto codeLines = [](const QString &h) {
+                return int(h.count(QLatin1String("<br />"))) - 1;
+            };
+            /* 计数前先把 <style> 整段挖掉：CSS 注释里写着字面 <pre>，不挖会多算一个
+               （上一条判据已经因为 `pre { margin-top: 0px }` 假阳性红过一次） */
+            static const QRegularExpression kStyleBlock(
+                QStringLiteral("<style[^>]*>.*?</style>"),
+                QRegularExpression::DotMatchesEverythingOption);
+            auto markupOnly = [](const QString &h) {
+                return QString(h).remove(kStyleBlock);
+            };
+            auto countPre = [&markupOnly](const QString &h) {
+                return markupOnly(h).count(QStringLiteral("<pre"));
+            };
+            const int nW = codeLines(wrapped), nP = codeLines(plain);
+            tcheck(nP == 2 && nW > 2,
+                   QStringLiteral("超长代码行按 400px 切成了多条（不传宽度时一个字都不切）"),
+                   QStringLiteral("不切 %1 行 / 切了 %2 行").arg(nP).arg(nW));
+            tcheck(wrapped.contains(QStringLiteral("\">    ")),
+                   QStringLiteral("续行前面补了 4 个空格（pre 里前导空格照原样画 = 悬挂缩进）"),
+                   QStringLiteral("切出来 %1 行").arg(nW));
+            tcheck(wrapped.contains(QStringLiteral("短的一行")),
+                   QStringLiteral("放得下的行原样保留"));
+
+            /*
+             * 一份围栏的代码必须只有**一个** <pre> —— 这才是"块之间有缝"的根因。
+             *
+             * toHtml() 本来一行代码一个块，每块底色只盖住自己那一行的字身，
+             * 行距多出来的余量没人涂色（实测行与行之间 6 行没底色 = 一根一根条纹）。
+             * 并成一块之后底色是一整张，余量落在块内部。
+             *
+             * 上下那两行内衬也在这同一个 <pre> 里（不是另起格子）—— 分成三行表格的话
+             * 行之间会断出 7px 的预览底色，真机量过。
+             */
+            const QString oneFence = controller.markdownHtml(
+                QStringLiteral("```\n甲\n乙\n丙\n```\n"), QString(), 0);
+            tcheck(countPre(oneFence) == 1
+                       && codeLines(oneFence) == 3,
+                   QStringLiteral("一份围栏代码块并成一个 <pre>（不并就是一根一根条纹）"),
+                   QStringLiteral("<pre> 块数=%1，代码行数=%2")
+                       .arg(countPre(oneFence)).arg(codeLines(oneFence)));
+            const QString twoFence = controller.markdownHtml(
+                QStringLiteral("```\n甲\n```\n\n中间正文\n\n```\n乙\n```\n"), QString(), 0);
+            tcheck(countPre(twoFence) == 2,
+                   QStringLiteral("隔着正文的两个围栏不会被误并成一块"),
+                   QStringLiteral("<pre> 块数=%1").arg(countPre(twoFence)));
+
+            /*
+             * 四边内衬：表格右移 13 + 代码 <pre> 左 margin 13（左右），上下各一行空行。
+             * 第二条钉的是"别连坐"—— 正文表格那 4 格不能被涂成代码底色。
+             */
+            const QString fenced = controller.markdownHtml(
+                QStringLiteral("```\n甲\n```\n\n| A | B |\n|---|---|\n| 1 | 2 |\n"), QString(), 0);
+            tcheck(oneFence.count(QStringLiteral("margin-left:13px")) == 1
+                       && !oneFence.contains(QStringLiteral("margin-right:13px"))
+                       && oneFence.contains(QStringLiteral("margin-top:16px"))
+                       && oneFence.contains(QStringLiteral("margin-bottom:2px"))
+                       && oneFence.count(QStringLiteral("</td></tr></table>")) == 1,
+                   QStringLiteral("代码块：内衬只写在 <pre> 的左 margin（底色往左撑、字缩进），"
+                                  "块外上下缝写在表格上（上 16 / 下 2，邻居不一样）；"
+                                  "cellpadding / 格子 padding / 格子 border 真机都量到 1px"),
+                   QStringLiteral("左=%1 右=%2 上外=%3 下外=%4 格子=%5")
+                       .arg(oneFence.count(QStringLiteral("margin-left:13px")))
+                       .arg(oneFence.count(QStringLiteral("margin-right:13px")))
+                       .arg(oneFence.contains(QStringLiteral("margin-top:16px")))
+                       .arg(oneFence.contains(QStringLiteral("margin-bottom:2px")))
+                       .arg(oneFence.count(QStringLiteral("</td></tr></table>"))));
+            tcheck(fenced.count(QStringLiteral("background-color:#26282c")) == 1
+                       && fenced.count(QStringLiteral("<td")) >= 5,
+                   QStringLiteral("代码底色只在那一格：正文表格的单元格没被连坐涂灰"),
+                   QStringLiteral("底色格=%1 / td 总数=%2（正文表格应有 4 格）")
+                       .arg(fenced.count(QStringLiteral("background-color:#26282c")))
+                       .arg(fenced.count(QStringLiteral("<td"))));
+            /*
+             * toHtml() 给每段代码写了行内 font-family:'Courier New'，行内压过样式表
+             * —— 结果预览里的代码不是编辑区那套 Consolas（抓屏量到 6.97 px/字，
+             * Courier New 12px 才是这个数）。这条钉"行内那个家族名已经不在了"。
+             */
+            tcheck(!markupOnly(fenced).contains(QStringLiteral("font-family:'Courier New'")),
+                   QStringLiteral("代码块没被行内 Courier New 盖住（要用编辑区那套字）"),
+                   QStringLiteral("残留 %1 处")
+                       .arg(markupOnly(fenced).count(QStringLiteral("Courier New"))));
+            tcheck(markupOnly(fenced).contains(QStringLiteral("line-height:")),
+                   QStringLiteral("代码行高写成 <pre> 的行内样式（包进表格后样式表那一档不落渲染："
+                                  "抓屏量到 15~17 px，Typora 是 23 px）"),
+                   QStringLiteral("正文里的行内 line-height=%1")
+                       .arg(markupOnly(fenced).contains(QStringLiteral("line-height:"))));
+            /*
+             * 两条"行内压过样式表"的拦路虎，各钉一条：
+             *   1) toHtml() 在 <pre> 上写 margin-left:0px / margin-right:0px ——
+             *      不清掉，格子的内衬会被它抵消（抓屏量到内衬只有 1px）；
+             *   2) toHtml() 在 <body> 上写 font-size:9pt（=12px）—— 不剥掉，整份预览
+             *      比编辑区小一号（抓屏量到代码 6.95 px/字，Consolas 14px 是 7.37）。
+             */
+            const QString preTag = fenced.mid(fenced.indexOf(QLatin1String("<pre")), 120);
+            tcheck(!preTag.contains(QStringLiteral("margin-left:0px"))
+                       && !preTag.contains(QStringLiteral("margin-right:0px")),
+                   QStringLiteral("<pre> 上的行内左右 margin 已清掉（不然格子的内衬进不了渲染）"),
+                   preTag.left(100));
+            const QString bodyTag = fenced.mid(fenced.indexOf(QLatin1String("<body")), 140);
+            tcheck(!QRegularExpression(QStringLiteral("font-size:[0-9.]+pt")).match(bodyTag).hasMatch(),
+                   QStringLiteral("<body> 上的 font-size:9pt 已剥掉（不然预览整体小一号）"),
+                   bodyTag.left(110));
+        }
 
         /*
          * 相对图片路径：按文档所在目录改成绝对 file:// 路径。

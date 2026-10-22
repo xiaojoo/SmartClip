@@ -850,6 +850,34 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
               QStringLiteral("实际 %1 px（应为 %2 px）").arg(view->lineHeight()).arg(natural));
 
         /*
+         * 出厂默认那一档**画出来**多高（2026-10-22 对齐 VS Code 那次钉的就是这个数）。
+         *
+         * VS Code 的 editor.lineHeight 默认是 0，落到 round(1.35 × 字号) = 19 px；
+         * 这边 Consolas 14px 的自然行高是 18px，18 × 1.05 = 18.9 → 19px。
+         * 单位换算、倍数夹取、extra 摊到上下这三处任何一处被改坏，这 1px 就掉回 18
+         * 或跳到 20 —— 而"看起来松了一点"没人能量，所以按默认那两个值实量一次。
+         */
+        {
+            const int savedPx = view->fontPixelSize();
+            const QString savedFam = view->fontFamily();
+            view->setFontFamily(QStringLiteral("Consolas"));
+            view->setFontPixelSize(14);
+            view->setLineHeightFactor(1.05);
+            QCoreApplication::processEvents();
+            const int atDefault = view->lineHeight();
+            const int natDefault = view->naturalLineHeight();
+            check(atDefault == 19,
+                  QStringLiteral("出厂默认（Consolas 14px × 行高 1.05）渲染出的行高 = 19 px，"
+                                 "与 VS Code 的默认行高同一个数"),
+                  QStringLiteral("实际 %1 px（自然行高 %2 px，应为 round(%2 × 1.05)）")
+                      .arg(atDefault).arg(natDefault));
+            view->setFontPixelSize(savedPx);
+            view->setFontFamily(savedFam);
+        }
+        view->setLineHeightFactor(savedLineHeightFactor);
+        QCoreApplication::processEvents();
+
+        /*
          * 行高那一组档位（表在 js/EditorMenus.js 的 kLineHeightFactors）：档位数、
          * 档位边界、以及**点下去真的会改行高** —— 三样一起钉。
          *
@@ -863,15 +891,16 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
             QMetaObject::invokeMethod(qmlRoot, "lineHeightSteps", Q_RETURN_ARG(QVariant, steps));
             for (const QVariant &f : steps.toList())
                 factors << f.toString();
-            check(factors.size() == 7,
-                  QStringLiteral("行高有 7 档（含\"跟随字体\"=1.0）"),
+            check(factors.size() == 8,
+                  QStringLiteral("行高有 8 档（含\"跟随字体\"=1.0）"),
                   QStringLiteral("实际 %1 档：%2")
                       .arg(factors.size()).arg(factors.join(QLatin1Char('/'))));
             check(factors.value(0) == QStringLiteral("1")
-                      && factors.value(1) == QStringLiteral("1.15")
+                      && factors.value(1) == QStringLiteral("1.05")
                       && factors.contains(QStringLiteral("1.5"))
                       && factors.contains(QStringLiteral("2.5")),
-                  QStringLiteral("档位从 1.0 起、最松 2.5 倍（没有比 1.0 更紧的档）"),
+                  QStringLiteral("档位从 1.0 起、最松 2.5 倍（没有比 1.0 更紧的档），"
+                                 "第二档 1.05 = 14px 下的 19px（VS Code 默认行高）"),
                   factors.join(QLatin1Char('/')));
 
             /* 点 1.15 倍那一档，走的就是菜单条目的 act */
@@ -2041,14 +2070,14 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
     check(view->whitespaceVisible(), QStringLiteral("dispatch(toggleWhitespace) 生效"));
     dispatch(QStringLiteral("toggleWhitespace"));
 
-    /* 字号：默认 12，可通过“设置”菜单的命令改 */
+    /* 字号：默认 14（2026-10-22 对齐 VS Code），可通过“设置”菜单的命令改 */
     dispatch(QStringLiteral("fontSize:18"));
     check(view->fontPixelSize() == 18,
           QStringLiteral("dispatch(fontSize:18) 改编辑器字号"),
           QStringLiteral("实际 %1").arg(view->fontPixelSize()));
-    dispatch(QStringLiteral("fontSize:12"));
-    check(view->fontPixelSize() == 12,
-          QStringLiteral("dispatch(fontSize:12) 回到默认字号"),
+    dispatch(QStringLiteral("fontSize:14"));
+    check(view->fontPixelSize() == 14,
+          QStringLiteral("dispatch(fontSize:14) 回到默认字号"),
           QStringLiteral("实际 %1").arg(view->fontPixelSize()));
 
     dispatch(QStringLiteral("lang:python"));
@@ -8741,7 +8770,18 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
 
                 const QString storedSize = readReg("editor/fontSize");
                 const QString storedLine = readReg("editor/lineHeight");
-                const int storedPx = storedSize.isEmpty() ? 12 : storedSize.toInt();
+                const int storedPx = storedSize.isEmpty() ? 14 : storedSize.toInt();
+
+                /*
+                 * 出厂默认从 12px/1.0 换成 14px/1.05 那次（2026-10-22，对齐 VS Code）
+                 * 是一次性的搬运，不是每次都改：跑过的标记就是 editor/fontPreset。
+                 * 这条只量"搬运跑过没有"，不量字号 —— 用户后来自己调回 12 是合法的，
+                 * 那条判据会把他的选择读成红。
+                 */
+                check(readReg("editor/fontPreset") == QLatin1String("vscode"),
+                      QStringLiteral("出厂默认搬运跑过一次（editor/fontPreset 已落，"
+                                     "旧的 12/1 那次已经升到 14/1.05）"),
+                      QStringLiteral("fontPreset=[%1]").arg(readReg("editor/fontPreset")));
 
                 /* 这一段全程用 _selftest 那份：先切过去，之后每次改完文件 reloadSchemes */
                 writeScheme(R"({"basedOn":"Dark","font":{"size":16,"lineHeight":1.5}})");

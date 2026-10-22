@@ -255,11 +255,11 @@ private:
     QVector<TerminalCell> m_rowScratch;
 
     /* 基线：设置里那位用户自己选的（由 QML 灌进来） */
-    QString m_fontFamily = QStringLiteral("Cascadia Mono");
-    qreal m_fontSize = 13;
+    QString m_fontFamily = QStringLiteral("Consolas");
+    qreal m_fontSize = 14;
     /* 实际用来画字的：基线被方案钉住时就是方案那个值（见 applySchemeFont） */
-    QString m_usedFamily = QStringLiteral("Cascadia Mono");
-    qreal m_usedSize = 13;
+    QString m_usedFamily = QStringLiteral("Consolas");
+    qreal m_usedSize = 14;
     QColor m_fg { QStringLiteral("#d4d4d4") };
     QColor m_bg { QStringLiteral("#1e1f22") };
     /* updatePaintNode 用的画布：尺寸不对就重建，避免每帧 malloc 一张 4K 图 */

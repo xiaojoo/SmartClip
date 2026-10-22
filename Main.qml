@@ -113,8 +113,8 @@ Rectangle {
      * 键名和 Theme.h 那个 SCHEMEFONT_CASE 清单一一对应；终端那两项不在这里，
      * 它由 TerminalView 自己在 C++ 侧应用（见那边的 applySchemeFont）。
      */
-    property var storedFont: ({ family: "Consolas", size: 12, commentSize: 0,
-                                lineHeight: 1.0, wrap: false })
+    property var storedFont: ({ family: "Consolas", size: 14, commentSize: 0,
+                                lineHeight: 1.05, wrap: false })
     /* 这一项现在生效的是哪个值：方案写了就以方案为准，没写就用注册表那份 */
     function fontEffective(key) {
         const o = Theme.fontOverride
@@ -168,6 +168,9 @@ Rectangle {
         const size = fontEffective("size")
         if (editor.editorFontSize !== size)
             editor.editorFontSize = size      // 走绑定，别直接写 view.fontPixelSize
+        /* 预览和源码是同一份文档的两种看法，字号要一起走（另一半在 C++ 剥 body 的 9pt） */
+        if (editor.markdownFontPixelSize !== size)
+            editor.markdownFontPixelSize = size
         const fam = fontEffective("family")
         const csize = fontEffective("commentSize")
         const lh = fontEffective("lineHeight")
@@ -258,8 +261,27 @@ Rectangle {
         var v = activeView()
         var path = v ? String(v.filePath || "") : ""
         var dir = path !== "" ? path.substring(0, path.lastIndexOf("/")) : ""
-        markdownHtml = Cmd.markdownHtml(v.currentText(), dir)
+        markdownHtml = Cmd.markdownHtml(v.currentText(), dir, editor.markdownTextWidthPx,
+                                        editor.markdownFontPixelSize)
         markdownHint = markdownHtml === "" ? "这份文档是空的" : ""
+    }
+
+    /*
+     * 预览区宽度变了，代码长行要按新宽度重切一遍（切列是按像素算的，
+     * 见 EditorController.cpp 的 wrapLongCodeLines）。
+     *
+     * 防抖 150ms：拖着窗口边界走时 width 每帧都变，逐帧重渲染会把
+     * setMarkdown + toHtml 跑上几十遍。
+     */
+    Timer {
+        id: mdWrapTimer
+        interval: 150
+        onTriggered: window.refreshMarkdown()
+    }
+
+    Connections {
+        target: editor
+        function onMarkdownTextWidthPxChanged() { mdWrapTimer.restart() }
     }
 
     /*
@@ -3096,11 +3118,37 @@ Rectangle {
             terminalHeight = Math.max(terminalMinHeight, Math.min(700, termH))
         terminalHidden = true
 
+        /*
+         * 2026-10-22：出厂默认对齐 VS Code（编辑器 Consolas 14px、行高 1.05 = 19px，
+         * 终端 Consolas 14px）。但注册表里这几项**早就被写过**了，只改代码里的默认值，
+         * 这台机器上的界面一个字也不会变 —— 所以这里做一次性的搬运：只有当值仍然
+         * 等于旧出厂值（12 / 1 / Consolas，终端 Cascadia Mono / 13）才升，
+         * 手动改过的（哪怕只把字号改成 13）一律不碰。
+         *
+         * editor/fontPreset 是"搬过了"的标记。没有它，后来故意把字号调回 12 的人
+         * 下次启动又被抬回 14。这一段必须跑在终端基线和 storedFont 那两次 recall
+         * **之前**，否则改完这一版要重启才看得见。
+         */
+        if (Cmd.recall("fontPreset", "") !== "vscode") {
+            if (Cmd.recall("fontSize", "12") === "12"
+                    && Cmd.recall("lineHeight", "1") === "1"
+                    && Cmd.recall("fontFamily", "Consolas") === "Consolas") {
+                Cmd.remember("fontSize", "14")
+                Cmd.remember("lineHeight", "1.05")
+            }
+            if (Cmd.recall("termFontSize", "13") === "13"
+                    && Cmd.recall("termFontFamily", "Cascadia Mono") === "Cascadia Mono") {
+                Cmd.remember("termFontSize", "14")
+                Cmd.remember("termFontFamily", "Consolas")
+            }
+            Cmd.remember("fontPreset", "vscode")
+        }
+
         /* 终端字体的基线（方案钉住时上面那两条只是"没钉才用"的那份） */
-        var tf = Cmd.recall("termFontFamily", "Cascadia Mono")
+        var tf = Cmd.recall("termFontFamily", "Consolas")
         if (tf !== "")
             terminal.termFamily = tf
-        var ts = parseInt(Cmd.recall("termFontSize", "13"))
+        var ts = parseInt(Cmd.recall("termFontSize", "14"))
         if (!isNaN(ts) && ts >= 8 && ts <= 40)
             terminal.termSize = ts
 
@@ -3140,7 +3188,7 @@ Rectangle {
 
         /*
          * 恢复上次的字号 / 换行 / 行号 / 空白字符设置。
-         * 字号出厂默认 12（见 EditorArea.editorFontSize 与 EditorViewItem）。
+         * 字号出厂默认 14（见 EditorArea.editorFontSize 与 EditorViewItem）。
          * 这些是**视图级**设置，两栏一起设（第二栏这会儿还没建出来，
          * 它在 EditorArea 里直接绑 editorFontSize / 自己读同一份设置，
          * 见分栏那一段）。
@@ -3150,14 +3198,14 @@ Rectangle {
          * applyFontScheme() 把方案的 font 段盖上去。顺序不能反：方案那一档以后
          * 改动或删掉，回落的是这里记下的 storedFont，不是出厂默认。
          */
-        var size = parseInt(Cmd.recall("fontSize", "12"))
+        var size = parseInt(Cmd.recall("fontSize", "14"))
         var commentSize = parseInt(Cmd.recall("commentFontSize", "0"))
-        var lineHeight = parseFloat(Cmd.recall("lineHeight", "1"))
+        var lineHeight = parseFloat(Cmd.recall("lineHeight", "1.05"))
         var family = Cmd.recall("fontFamily", "Consolas")
-        storedFont.size = (!isNaN(size) && size >= 6 && size <= 72) ? size : 12
+        storedFont.size = (!isNaN(size) && size >= 6 && size <= 72) ? size : 14
         storedFont.commentSize = (!isNaN(commentSize) && commentSize >= 0 && commentSize <= 72)
                                  ? commentSize : 0
-        storedFont.lineHeight = isNaN(lineHeight) ? 1.0 : lineHeight
+        storedFont.lineHeight = isNaN(lineHeight) ? 1.05 : lineHeight
         storedFont.family = family !== "" ? family : "Consolas"
         storedFont.wrap = Cmd.recall("wrap", "0") === "1"
         applyFontScheme()

@@ -90,7 +90,7 @@ class EditorViewItem : public QQuickItem {
      *
      * 1.0 = 跟随字体：就是 Scintilla 按当前字体自己算出来的行高，不额外加空。
      * 更大的值把行按比例拉开。基准取**自然行高**而不是字号 —— 字体家族换掉时
-     * 字形的 ascent+descent 是不一样的（Consolas 12px 是 15px，别的字体可能
+     * 字形的 ascent+descent 是不一样的（Consolas 14px 是 18px，别的字体可能
      * 是 17px），按自然行高算才不会算出比字形还矮的行。
      *
      * 实现上 Scintilla 没有"直接设行高"的口子，只有给每一行加额外上下空白
@@ -1379,12 +1379,17 @@ private:
     /* 最近一次量到的最长行宽（像素），自检诊断用，见 horizontalScrollState() */
     long m_lastContentWidth = 0;
 
-    int m_fontPixelSize = 12;
+    int m_fontPixelSize = 14;
     /* 正文字体家族；注释字号 0 = 跟随正文 */
     QString m_fontFamily = QStringLiteral("Consolas");
     int m_commentFontPixelSize = 0;
-    /* 行高倍数：1.0 = 跟随字体（见 Q_PROPERTY 里的说明） */
-    qreal m_lineHeightFactor = 1.0;
+    /*
+     * 行高倍数：1.0 = 跟随字体（见 Q_PROPERTY 里的说明）。
+     * 出厂默认 1.05 —— 2026-10-22 对齐 VS Code：它 14px 字号的行高是
+     * round(GOLDEN_LINE_HEIGHT_RATIO 1.35 × 14) = 19 px，而 Consolas 14px 的
+     * 自然行高实量 18px，18 × 1.05 = 18.9 → 19px，正好落在同一个数上。
+     */
+    qreal m_lineHeightFactor = 1.05;
     int m_zoomPercent = 100;
     QColor m_textColor{0xd6, 0xd7, 0xda};
     QColor m_paperColor{0x1e, 0x1f, 0x22};

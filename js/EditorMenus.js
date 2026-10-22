@@ -340,12 +340,14 @@ function viewMenu(view, ov) {
 /*
  * 行高倍数（单位是"倍"，不是像素）。
  *
- * 1.0 = 跟随字体：就是字体自带的那个行高（Consolas 12px 约 15px），
+ * 1.0 = 跟随字体：就是字体自带的那个行高（Consolas 14px 约 18px），
  * 不再额外加空。往上是把行拉开 —— Scintilla 侧是按倍数把差额平均加到
  * 每行的上下两侧（见 EditorViewItem::applyLineSpacing）。
  * 只给 ≥ 1.0 的值：比字体自带的还紧会压字。
+ * 1.05 是 2026-10-22 为对齐 VS Code 加的一档：14px × 1.05 = 18.9 → 19px，
+ * 就是它 editor.lineHeight 默认值（1.35 × 字号）算出来的那个数。
  */
-var kLineHeightFactors = [1.0, 1.15, 1.3, 1.5, 1.75, 2.0, 2.5]
+var kLineHeightFactors = [1.0, 1.05, 1.15, 1.3, 1.5, 1.75, 2.0, 2.5]
 
 /* 自检读的：档位表现在只喂"行高 − / +"和设置页，菜单里那份撤了，判据得有入口 */
 function lineHeightFactors() { return kLineHeightFactors }

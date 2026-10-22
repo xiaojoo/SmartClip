@@ -121,8 +121,8 @@ Window {
     ]
 
     /* 终端字体的基线（由 Main.qml 从终端面板那两个属性转过来） */
-    property string termFamilyNow: "Cascadia Mono"
-    property int termSizeNow: 13
+    property string termFamilyNow: "Consolas"
+    property int termSizeNow: 14
     /*
      * 终端那两行的**生效值**：方案钉住就是方案那个值，否则是用户在设置里选的基线。
      * 编辑区那五行不用这么算 —— Main.qml 已经把方案的值推到 view 上了。

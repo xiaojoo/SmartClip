@@ -162,13 +162,13 @@ Rectangle {
     readonly property color gutterLineColor: Theme.c("#333840", Theme.rev)
 
     /*
-     * 正文默认字号（12）。
+     * 正文默认字号（14，和 VS Code 在 Windows 上的默认一致）。
      *
      * 写成可写属性而不是常量：启动时会按上次保存的设置覆盖它（Main.qml），
      * "设置"菜单里改字号也改这里 —— EditorView 的 fontPixelSize 一直绑着它，
      * 免得直接给 fontPixelSize 赋值把绑定打断。
      */
-    property int editorFontSize: 12
+    property int editorFontSize: 14
     readonly property bool hasDocument: root.view.hasDocument
     readonly property bool hasTabs: root.hasDocument || root.previewItem !== null
                                     || root.diffTabs.length > 0
@@ -200,6 +200,11 @@ Rectangle {
     readonly property string previewSelectedText: markdownView.selectedText
     readonly property bool previewHasSelection: markdownView.selectedText !== ""
     function previewSelectAll() { markdownView.selectAll() }
+
+    /* 预览能放字的像素宽度，Main.qml 拿它当"代码长行切在第几列"的依据 */
+    readonly property int markdownTextWidthPx: markdownView.textWidthPx
+    /* 预览的基准字号：Main.qml 灌成编辑区那个生效字号（两边字要一样大） */
+    property int markdownFontPixelSize: 14
 
     /* ---- 分栏（两个对等的编辑组，见文件头那段） ---- */
 
@@ -1076,6 +1081,7 @@ Rectangle {
                 visible: root.markdownPreview
                 html: root.markdownHtml
                 emptyHint: root.markdownHint
+                bodyPixelSize: root.markdownFontPixelSize
                 onLinkActivated: (link) => root.markdownLinkActivated(link)
                 onContextMenuRequested: (x, y) => root.markdownContextMenuRequested(x, y)
             }

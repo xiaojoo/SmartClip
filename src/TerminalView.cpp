@@ -188,7 +188,7 @@ TerminalView::TerminalView(QQuickItem *parent) : QQuickItem(parent)
      * 那条留成纯黑。
      */
 
-    m_fontFamily = QStringLiteral("Cascadia Mono");
+    m_fontFamily = QStringLiteral("Consolas");
     rebuildFont();
 
     connect(m_engine, &TerminalEngine::contentsChanged, this, [this] {

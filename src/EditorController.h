@@ -176,9 +176,19 @@ public:
      *      不靠 QML 那边再猜一遍。
      *
      * baseDir 传这份文档所在的目录（用来拼图片的绝对路径；空串 = 不解析）。
+     *
+     * wrapPx = 预览区能放字的像素宽度（0 = 不按宽度切代码长行）。
+     *      Qt 的富文本**没有按块关换行的口子**：整份文档只有一个换行选项，
+     *      所以一条超长代码行会被软折成几行、续行顶格，看着像另一条日志。
+     *      给 pre 加悬挂缩进也不行（量过：能把续行推开的只有 margin-left，
+     *      而它会把整块底色一起推走，首行反而跑到色块外面）。
+     *      唯一不动布局就能做出"续行缩进"的办法，是在这里按真实字宽
+     *      **把长行硬切开**、续行补 4 个空格 —— 见 .cpp 的 wrapLongCodeLines。
+     *
      * 返回空串 = 没有内容可渲染。
      */
-    Q_INVOKABLE QString markdownHtml(const QString &markdown, const QString &baseDir);
+    Q_INVOKABLE QString markdownHtml(const QString &markdown, const QString &baseDir,
+                                      int wrapPx = 0, int fontPx = 14);
 
     /*
      * 交给系统默认程序打开一个链接 / 路径（预览里点链接用）。

@@ -11,6 +11,8 @@
 #include <QDir>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QFont>
+#include <QFontMetricsF>
 #include <QGuiApplication>
 #include <QImage>
 #include <QKeyEvent>
@@ -55,37 +57,92 @@ const GlobalHotkeyEntry kGlobalHotkeys[] = {
 /*
  * Markdown 预览那份 HTML 的样式（见 EditorController::markdownToPreviewHtml）。
  *
- * 给的是 QTextDocument 的 defaultStyleSheet —— 也就是**渲染时**用的样式，
- * 而不是渲染完再往上糊一层（toHtml() 会把 defaultStyleSheet 原样带出去，
- * 所以预览那边的 Text 拿到的就已经是这份配色了）。
+ * 这一份是**渲染完贴回去**的：插在 toHtml() 出来的 </head> 前面。为什么不能靠
+ * setDefaultStyleSheet：实测 toHtml() 并不把它带出来，head 里只剩 Qt 自己那段
+ * `p, li { white-space: pre-wrap; }`。
  *
  * 为什么每一处颜色都要写死：QML 的 Text 只认行内的这些属性，它**不读**
  * QTextDocument 那一套调色板。默认样式表是一份白纸黑字，留着不管的话，
  * 深色界面上就是一片黑字（几乎等于什么都没显示）。颜色值和界面其它地方
  * 对齐：正文 / 标题用 #d6d7da 系，次要文字 #9aa0a6，代码块底 #26282c。
  *
- * 段间距用 em 而不是 px：字号是用户在设置里能改的，跟着字号缩放才协调。
+ * 间距那一套是照 Typora 的 github 主题量的（本机 D:\Program\Typora 里那份 CSS），
+ * 用真实管线一段一段量出来对表。三条要记的换算：
+ *   1) **必须先把 toHtml() 写的行内 margin-top/bottom:0px 摘掉**（见下面那个正则），
+ *      行内样式压过样式表，不摘的话这里的 margin 一条都不生效。
+ *   2) Qt 不认 rem，而 em 是**按本元素自己的字号**解析的 —— 想要"标题上下留常量
+ *      12.5px"，每一档字号都得各除一遍，所以下面 h1~h6 那五个数不一样。
+ *   3) Qt 的 line-height 乘的是**自然行高**（雅黑 14px 是 18px），浏览器乘的是字号
+ *      —— Typora 的 1.6 在这边要写 1.3 才落到同一个 23px 行距。
+ * 标题的 margin-bottom 写了也没用（Qt 富文本不吃，10.5 / 7.5 / 6px 三档量出来一样），
+ * 所以只写 margin-top；标题下面那条缝由行盒余量 + 下一块的 margin-top 决定。
+ * pre 的上下 margin 在这里保持 0：块外那圈缝是给**表格**的（见 kCodeGapTopPx），
+ * 给到 pre 上落不进渲染（行内写 13px，块内只量到 3px —— 块级 margin 塌到格子外面）。
  */
+/*
+ * 代码块四边的内衬像素数（写在 <pre> 的行内 margin 上，见 markdownToPreviewHtml）。
+ *
+ * 钉的是 Typora 那张参考图的实测值：内容↔背景 左 13 / 上 12 / 下 12。
+ */
+constexpr int kCodePadPx = 13;
+
+/*
+ * 代码块**外面**上下留的缝（底色和正文之间，不是块内部）。
+ *
+ * 之前是 0：样式表里 `pre { margin-top:0; margin-bottom:0 }` 写死，因为那时一行代码
+ * 一个 <pre>，给了就把代码行距顶开。现在一块围栏只有一个 <pre>，这笔可以给了。
+ *
+ * 两头分开是因为上下邻居不一样（都是真机量的，目标 = Typora 那张的 19 px）：
+ *   上：上面多半是标题，而标题的 margin-bottom 在 Qt 里**完全不生效**，这一头只能块自己出；
+ *   下：下面是正文段，它自带 0.62em（≈8.7 px）的上边距，块再加 14 就顶到 36 px 去了。
+ */
+constexpr int kCodeGapTopPx = 16;
+constexpr int kCodeGapBottomPx = 2;
+
+/*
+ * 代码块的行高倍数（乘的是字体的自然行高）。这个 1.43 是真机反推的：行内写 1.3 时
+ * 抓屏量到 21 px（band tops 20/21/20/21/21/21/21/20），说明这条路上 Consolas 14px
+ * 的自然行高只有 21 / 1.3 ≈ 16.1 px，要对上 Typora 那一档的 23 px 就得 23 / 16.1。
+ * 样式表里那一档在包进表格之后不落渲染（抓屏量到 15~17 px），所以这个数是以
+ * **行内样式**写进 <pre> 的（见 markdownToPreviewHtml 里 openTag 那段）。
+ */
+constexpr double kCodeLineHeight = 1.43;
+
 const char *const kMarkdownCss = R"CSS(
 body { color: #d6d7da; }
-p { color: #d6d7da; margin-top: 0.45em; margin-bottom: 0.45em; }
-h1, h2, h3, h4, h5, h6 { color: #e8e8e8; font-weight: bold;
-                         margin-top: 0.9em; margin-bottom: 0.4em; }
-h1 { font-size: 1.7em; }
-h2 { font-size: 1.45em; }
-h3 { font-size: 1.25em; }
-h4 { font-size: 1.12em; }
-h5, h6 { font-size: 1em; }
+p { color: #d6d7da; margin-top: 0.62em; margin-bottom: 0.62em; line-height: 1.3; }
+h1, h2, h3, h4, h5, h6 { color: #e8e8e8; font-weight: bold; line-height: 1.15; }
+h1 { font-size: 1.7em;  margin-top: 0.525em; }
+h2 { font-size: 1.45em; margin-top: 0.616em; }
+h3 { font-size: 1.25em; margin-top: 0.714em; }
+h4 { font-size: 1.12em; margin-top: 0.797em; }
+h5, h6 { font-size: 1em; margin-top: 0.893em; }
 a { color: #4c96d8; }
 code { font-family: Consolas, "Courier New", monospace; color: #d7ba7d; }
 pre { font-family: Consolas, "Courier New", monospace; color: #d6d7da;
-      background-color: #26282c; }
-blockquote { color: #9aa0a6; margin-left: 1.2em; }
-li { color: #d6d7da; }
-table { border-width: 1px; border-style: solid; border-color: #4b4d4f; }
+      background-color: transparent; line-height: 1.3;
+      margin-top: 0px; margin-bottom: 0px; }
+blockquote { color: #9aa0a6; margin-left: 1.2em;
+             margin-top: 0.62em; margin-bottom: 0.62em; line-height: 1.3; }
+li { color: #d6d7da; line-height: 1.3; }
+ul, ol { margin-top: 0.62em; margin-bottom: 0.62em; line-height: 1.3; }
+table { border-width: 1px; border-style: solid; border-color: #4b4d4f;
+        margin-top: 0.62em; margin-bottom: 0.62em; line-height: 1.3; }
 th { background-color: #2b2d30; color: #e8e8e8; font-weight: bold;
      border-width: 1px; border-style: solid; border-color: #4b4d4f; }
 td { border-width: 1px; border-style: solid; border-color: #4b4d4f; }
+/*
+ * 代码块的四边内衬只能这么给。
+ *
+ * CSS 的 padding 和 border 在 Qt 的**块**上都不生效（各量过一档：加 padding:12px
+ * 与不加逐位相同，连 8px 的红框都没画出来），类选择器也不认（给 table.codeblock
+ * 或 td.codecell 写 background-color，代码区整块是白的）—— 能画出"底色往里缩一圈"
+ * 的只有**表格单元格 + 元素选择器**。所以生成 HTML 时把整块 <pre> 包进一个 1x1 的
+ * table，底色写在那格的内联样式上（见 markdownToPreviewHtml 里那个 wrapper，
+ * 它单独过一遍 themedCss，浅色档跟着翻）。
+ *
+ * 这里**不能**给 td 写 background-color：那条会连正文里的 markdown 表格一起涂灰。
+ */
 hr { color: #4b4d4f; }
 )CSS";
 
@@ -749,6 +806,135 @@ QString EditorController::markdownToPreviewHtml(const QString &markdown,
     doc.setBaseUrl(QUrl(QString()));    /* 上面已经落成绝对路径，这里不再兜底解析 */
 
     QString html = doc.toHtml();
+
+    /*
+     * 行内样式必须先把**上下 margin** 摘掉，否则下面那段样式表一条 margin 都不生效。
+     *
+     * toHtml() 给每一个块都写了 `style=" margin-top:0px; margin-bottom:0px; ..."`，
+     * 而行内样式的优先级高于 <style> —— 实测段与段之间只剩 6px（全是行盒自带的余量），
+     * 同一个位置 Typora 是 19px。给 CSS 加 !important 也只救回一半（量到 11px）。
+     * 只摘 margin-top / margin-bottom：**左右要留着**，列表缩进（-qt-block-indent）
+     * 和引用那 40px 的行内 margin-left 还指着它。
+     */
+    static const QRegularExpression kInlineVMargin(
+        QStringLiteral("(margin-top|margin-bottom)\\s*:\\s*[0-9.]+px;?\\s*"));
+    html.remove(kInlineVMargin);
+
+    /*
+     * 把相邻的 <pre> 并成一块 —— 这才是"代码块中间那道缝"的根因。
+     *
+     * toHtml() 是**一行代码一个 <pre>**：一份 4 行的围栏出来 4 个块，每个块的底色
+     * 只盖住自己那一行的字身，行距（line-height 1.3）多出来的那 6px 余量没人涂底色
+     * （实测：行与行之间 6 行没有底色 → 看着就是一根一根的条纹）。
+     * 并成一块之后底色是一整张，行距的余量落在块内部，缝就没了 —— 和 Typora
+     * 那份 .md-fences 一个连续色块的做法一致。
+     *
+     * 只并**紧邻**的：两个围栏中间隔着正文/空行时，中间会有 <p>，不会被并到一起。
+     * 中间要补的是 `<br />` 而不是换行符 —— 补换行的话 Qt 的 HTML 读入器会把
+     * `</span>` 与 `<span>` 之间的空白**折叠掉**，四行塌成一行（量过：文档高
+     * 116 → 42，底色行数 76 → 19）。
+     */
+    static const QRegularExpression kAdjacentPre(
+        QStringLiteral("</pre>[\\r\\n]*<pre[^>]*>"));
+    html.replace(kAdjacentPre, QStringLiteral("<br />"));
+
+    /*
+     * 去掉 toHtml() 写在每个代码 span 上的行内 `font-family:'Courier New'`。
+     *
+     * 行内样式压过样式表，所以 kMarkdownCss 里 `pre { font-family: Consolas… }`
+     * 从来没生效过 —— 抓屏量过：预览里代码 6.97 px/字，那是 Courier New 12px 的宽度
+     * （Consolas 14px 实测 7.37）。去掉之后代码跟着样式表走，和编辑区同一套字。
+     */
+    static const QRegularExpression kCourierSpan(
+        QStringLiteral("font-family:'Courier New';[ ]*"));
+    html.remove(kCourierSpan);
+
+    /*
+     * 每块 <pre> 包进一个 1x1 表格：底色只有表格单元格吃（Qt 的块不吃 padding、
+     * 不吃 border、也不吃背景），td 上那串 border-width:0 是压样式表里通用的
+     * `td { border-width:1px }` —— 不压掉，代码块外面会多出一圈框线。
+     */
+    {
+        static const QRegularExpression kPreBlock(
+            QStringLiteral("(<pre[^>]*>)(.*?)</pre>"),
+            QRegularExpression::DotMatchesEverythingOption);
+        static const QRegularExpression kZeroSideMargin(
+            QStringLiteral("margin-(left|right):0px;[ ]*"));
+        /*
+         * 内衬**不靠格子的 padding**：cellpadding、格子的 inline padding、格子的 inline
+         * border 三条都单独试过，界面上量出来全是 1px（真机抓屏）。左右靠 <pre> 的
+         * margin-left，而它在格子里是**把底色往左撑**（字不动）：表本来占 353..1413
+         * （= 正文那一栏），pre 左 margin 13 ⇒ 底色左沿到 340、代码字在 354。
+         *
+         * 两条**不要再加**的账，都是量过才知道走不通的：
+         *   · 表格自己 `margin-left:13px` —— 那会把整张表连底色一起推到正文栏右边
+         *     （量到底色左沿 353 vs 标题 342，左边多出一条不该有的缝）；
+         *   · pre 的 `margin-right` —— 底色右沿会被撑到正文栏外面去。左右只留左这一笔。
+         *
+         * 上下两头也不能用 margin：块级 margin 会塌到格子外面（行内写 margin-top:13
+         * 之后，底色上沿到第一行字只量到 3px）。**更不能拆成三行表格**：Qt 的格子底色
+         * 只画到里面各块自己的矩形，行与行之间会断出一条 7px 的预览底色（真机量到
+         * y 385..391）。所以上下各在 <pre> 里加一行空行 —— 它是这个块自己的一行，
+         * 底色连着，代价是内衬只能是一整个行高（25 px，Typora 那一档 12）。
+         */
+        const QString cellWrap = themedCss(QStringLiteral(
+            "<table width=\"100%\" cellspacing=\"0\" border=\"0\""
+            " style=\"margin-top:%1px; margin-bottom:%2px;\">"
+            "<tr><td style=\"background-color:#26282c; border-width:0; border-style:none;\">")
+            .arg(kCodeGapTopPx)
+            .arg(kCodeGapBottomPx));
+        const QString cellEnd = QStringLiteral("</td></tr></table>");
+        QString built;
+        int last = 0;
+        QRegularExpressionMatchIterator it = kPreBlock.globalMatch(html);
+        while (it.hasNext()) {
+            const QRegularExpressionMatch m = it.next();
+            built += html.mid(last, int(m.capturedStart()) - last);
+            /*
+             * toHtml() 在 <pre> 的行内样式里写了 margin-left:0px / margin-right:0px，
+             * 行内压过样式表 —— 而且**同一个 style 串里后写的赢**，我注入的左右 margin
+             * 写在前面，不先清掉这两个 0px 就会被它们盖回去。
+             * 只清 pre 标签上、值为 0 的那两个：引用的 40px 缩进和列表缩进是**非零**
+             * 的，别的块上也指着它们。
+             *
+             * 同一处注入行高：包进表格之后，样式表里 `pre { line-height }` 那一档在
+             * 界面上不落渲染（抓屏量到 15~17 px，Typora 23 px），行内这一份量到了 23 px。
+             */
+            QString openTag = QString(m.captured(1)).remove(kZeroSideMargin);
+            openTag.replace(QStringLiteral("style=\""),
+                            QStringLiteral("style=\"margin-left:%1px; line-height:%2; ")
+                                .arg(kCodePadPx)
+                                .arg(kCodeLineHeight));
+            /* 上下内衬 = 块内各一行空行（底色连着，代价是一整个行高） */
+            static const QString kPadLine = QStringLiteral("<br />");
+            built += cellWrap + openTag + kPadLine + m.captured(2) + kPadLine
+                   + QStringLiteral("</pre>") + cellEnd;
+            last = int(m.capturedEnd());
+        }
+        html = built + html.mid(last);
+    }
+
+    /*
+     * 把 toHtml() 写在 <body> 行内样式里的 `font-size:9pt` 摘掉。
+     *
+     * 9pt 在 96 DPI 下就是 12px —— 行内样式压过 TextEdit 自己的 font.pixelSize，
+     * 所以整份预览（正文和代码一起）都比编辑区小一号（抓屏量到代码 6.95 px/字，
+     * 编辑区 Consolas 14px 是 7.37）。摘掉之后字号由 MarkdownView 那个
+     * font.pixelSize 定，而它绑的是编辑区生效字号 —— 两边就同步了。
+     * 只动 <body ...> 这一个标签：标题那些 `font-size:xx-large` 的行内样式要留着。
+     */
+    {
+        const int bodyAt = html.indexOf(QStringLiteral("<body"));
+        const int bodyEnd = html.indexOf(QLatin1Char('>'), bodyAt);
+        if (bodyAt >= 0 && bodyEnd > bodyAt) {
+            static const QRegularExpression kBodyFontSize(
+                QStringLiteral("font-size:[0-9.]+pt;?[ ]*"));
+            QString tag = html.mid(bodyAt, bodyEnd - bodyAt + 1);
+            tag.remove(kBodyFontSize);
+            html.replace(bodyAt, tag.size(), tag);
+        }
+    }
+
     const QString styleTag =
         QStringLiteral("<style type=\"text/css\">") + themedCss(QString::fromLatin1(kMarkdownCss))
         + QStringLiteral("</style>");
@@ -866,10 +1052,104 @@ bool EditorController::openExternal(const QString &url) {
  * "没有可预览的内容"，这也让"空文件"和"渲染失败"在界面上是同一句话 ——
  * 而不是一块什么都没有的空白（用户分不清是卡住了还是本来就没内容）。
  */
-QString EditorController::markdownHtml(const QString &markdown, const QString &baseDir) {
+/*
+ * 把围栏代码块里的超长行按像素宽度硬切开，续行补 4 个空格。
+ *
+ * 为什么要切（而不是让它自然折行）：Qt 的富文本整份文档只有一个换行选项，
+ * 没有"按块关换行"的口子 —— 一条 230 字符的日志会被软折成 3 行，续行**顶格**，
+ * 看着就像另一条日志。给 pre 加悬挂缩进也试过，量下来不行：能把续行推开的
+ * 只有 margin-left，而它会把整块底色一起推开，首行反而跑到色块外面
+ * （padding-left 在 Qt 的块上是死的，加与不加逐位相同）。
+ *
+ * 所以断行只能发生在**内容**上：按 Consolas 14px 的真实字宽切，
+ * 续行前面补 4 个空格（pre 里前导空格照原样画出来，这就是那道悬挂缩进）。
+ * 只动 ``` / ~~~ 围栏内部的行；正文段落照旧交给 Qt 折。
+ * 断点优先落在空格上（日志都是空格分开的字段），一个词本身就超宽才按字硬切。
+ *
+ * wrapPx 是预览区能放字的像素宽度（0 = 不切，比如窗口还没量出来）；
+ * fontPx 是预览实际用的字号 —— 它现在跟编辑区同源，所以字宽要按它量，
+ * 不能拿 14px 的度量去套别的档位。
+ */
+QString wrapLongCodeLines(const QString &markdown, int wrapPx, int fontPx)
+{
+    if (wrapPx <= 80)
+        return markdown;
+
+    QFont codeFont(QStringLiteral("Consolas"));
+    codeFont.setPixelSize(qBound(6, fontPx, 72));   // 和 kMarkdownCss 里 pre 那套字体一致
+    const QFontMetricsF fm(codeFont);
+    const int kContIndentPx = qRound(fm.horizontalAdvance(QLatin1String("    ")));
+    /* wrapPx 是预览区的字宽（正文那一栏）。代码块只在**左边**吃掉 kCodePadPx 的内衬
+       —— 右边不留（底色右沿要和正文栏右沿对齐），所以只扣一笔 */
+    const int firstBudget = wrapPx - kCodePadPx - 2;
+    const int restBudget = firstBudget - kContIndentPx;
+    if (restBudget <= 0)
+        return markdown;
+
+    QStringList out;
+    bool inFence = false;
+    QString fenceMark;
+    const QStringList lines = markdown.split(QLatin1Char('\n'));
+    for (const QString &line : lines) {
+        const QString t = line.trimmed();
+        if (t.startsWith(QLatin1String("```")) || t.startsWith(QLatin1String("~~~"))) {
+            if (!inFence) {
+                inFence = true;
+                fenceMark = t.left(3);
+            } else if (t.startsWith(fenceMark)) {
+                inFence = false;
+            }
+            out << line;
+            continue;
+        }
+        if (!inFence || fm.horizontalAdvance(line) <= firstBudget) {
+            out << line;
+            continue;
+        }
+
+        int lead = 0;
+        while (lead < line.size()
+               && (line.at(lead) == QLatin1Char(' ') || line.at(lead) == QLatin1Char('\t')))
+            ++lead;
+        const QString indent = line.left(lead);
+        QString rest = line.mid(lead);
+        bool first = true;
+        while (!rest.isEmpty()) {
+            const QString prefix = first ? indent : indent + QLatin1String("    ");
+            const int budget = first ? firstBudget : restBudget;
+            double w = fm.horizontalAdvance(prefix);
+            int cut = 0;            // 放得下的最后一个下标（含）
+            int lastSpace = -1;
+            for (int i = 0; i < rest.size(); ++i) {
+                const double cw = fm.horizontalAdvance(rest.at(i));
+                if (w + cw > budget)
+                    break;
+                w += cw;
+                cut = i + 1;
+                if (rest.at(i) == QLatin1Char(' '))
+                    lastSpace = i + 1;
+            }
+            if (cut >= rest.size()) {          // 剩下的整段放得下
+                out << prefix + rest;
+                break;
+            }
+            const int brk = lastSpace > 0 ? lastSpace : qMax(1, cut);
+            QString piece = prefix + rest.left(brk);
+            while (piece.endsWith(QLatin1Char(' ')))
+                piece.chop(1);
+            out << piece;
+            rest = rest.mid(brk);
+            first = false;
+        }
+    }
+    return out.join(QLatin1Char('\n'));
+}
+
+QString EditorController::markdownHtml(const QString &markdown, const QString &baseDir,
+                                       int wrapPx, int fontPx) {
     if (markdown.trimmed().isEmpty())
         return QString();
-    return markdownToPreviewHtml(markdown, baseDir);
+    return markdownToPreviewHtml(wrapLongCodeLines(markdown, wrapPx, fontPx), baseDir);
 }
 
 void EditorController::copyText(const QString &text) {

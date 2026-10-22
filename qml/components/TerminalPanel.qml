@@ -79,9 +79,11 @@ Rectangle {
      * 终端字体的**基线**（用户在 设置 → 字体 里选的那一档，启动时由 Main.qml 从
      * 注册表灌进来）。配色方案的 font 段可以钉住这两项 —— 钉住时真正用来画字的是
      * 方案那个值，那个覆盖在 TerminalView::applySchemeFont 里合，不在这里。
+     * 出厂默认 Consolas / 14 和编辑器同一套（VS Code 的终端默认就是跟随
+     * editor.fontFamily，Windows 上落到 Consolas 14px）。
      */
-    property string termFamily: "Cascadia Mono"
-    property int termSize: 13
+    property string termFamily: "Consolas"
+    property int termSize: 14
 
     /*
      * 把基线显式推到每个会话的视图上。**不走委托里的绑定**：这个委托里的绑定换值
