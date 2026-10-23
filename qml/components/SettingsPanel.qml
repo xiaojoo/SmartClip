@@ -1965,11 +1965,8 @@ Window {
                             wrapMode: Text.WordWrap
                             color: root.mutedColor
                             font.pixelSize: 11
-                            text: "翻译卡片（左侧图标条上那个地球图标，或 Ctrl+Alt+T）和编辑区校验"
-                                  + "（左边「校验」那一栏）用的是同一个模型 —— 在这里配一次，"
-                                  + "两边都跟着变。接口按 OpenAI 兼容格式填："
-                                  + "OpenAI / DeepSeek / 通义 / Kimi / Ollama / LM Studio 都是这个格式；"
-                                  + "密钥只存在本机设置里。"
+                            text: "填接口地址和模型名，密钥可选（只存本机）。"
+                                  + "OpenAI / DeepSeek / 通义 / Kimi / Ollama / LM Studio 都是这一种格式。"
                         }
 
                         /* ---- 两种模式：现成的 API 服务 / 本机自己启动一个 ---- */
@@ -2139,8 +2136,7 @@ Window {
                                 wrapMode: Text.WordWrap
                                 color: root.mutedColor
                                 font.pixelSize: 11
-                                text: "已经在跑 Ollama / LM Studio 的话，选这种模式、地址填 "
-                                      + "http://127.0.0.1:11434/v1（Ollama）或它给的地址就行，不用下面那套。"
+                                text: "自己跑 Ollama / LM Studio 的话，地址填本地那个就行，例如 http://127.0.0.1:11434/v1。"
                             }
 
                             Text {
@@ -2148,10 +2144,7 @@ Window {
                                 wrapMode: Text.WordWrap
                                 color: root.mutedColor
                                 font.pixelSize: 11
-                                text: "截图的时候还能认字：框好区域点工具条上的「识别」，"
-                                      + "图会交给这里的视觉模型（识别模型，留空就用上面那个模型名），"
-                                      + "结果摆在选区旁边那张卡片上，可以复制、也可以直接贴到截图上。"
-                                      + "要翻译的话选一下目标语言 —— 认和翻在同一次请求里做完。"
+                                text: "截图时框好区域点工具条上的「识别」，结果出在选区旁边那张卡片上。"
                             }
                         }
 
@@ -2526,8 +2519,7 @@ Window {
                                 wrapMode: Text.WordWrap
                                 color: root.mutedColor
                                 font.pixelSize: 11
-                                text: "Windows 自带：离线、不用配（默认）。PP-OCRv6：跑下面这条本机命令，"
-                                      + "框更准，但要先装好。"
+                                text: "Windows 自带不用配（默认）；PP-OCRv6 要装下面那条命令。"
                             }
 
                             Row {
@@ -2568,12 +2560,8 @@ Window {
                                 wrapMode: Text.WordWrap
                                 color: root.mutedColor
                                 font.pixelSize: 11
-                                text: "PP-OCR 那条路要装：pip install rapidocr onnxruntime（RapidOCR 3.9 "
-                                      + "起内置 PP-OCRv6，模型第一次跑会自动下）。随包那个脚本第一次用到时会"
-                                      + "落到 %APPDATA%/SmartClip/SmartClip/ppocr_runner.py，可以自己改。"
-                                      + "选档：命令后面再接一个词 —— tiny / small / medium（默认 small，"
-                                      + "medium 最准也最慢）；想指到自己下的 ONNX 文件，就把一份 params JSON "
-                                      + "的路径接在后面当第三个参数。"
+                                text: "要装：pip install rapidocr onnxruntime。"
+                                      + "命令后面可以再跟一档：tiny / small / medium（默认 small）。"
                             }
                         }
                     }
@@ -2600,9 +2588,8 @@ Window {
                             wrapMode: Text.WordWrap
                             color: root.mutedColor
                             font.pixelSize: 11
-                            text: "把文件拖进主窗口（或者用「文件 → 识别文档…」）就会认一遍，"
-                                  + "认出来的 Markdown 存成一份新笔记，文档里的插图一起落到笔记目录的 "
-                                  + "assets/ 下。识别跑在后台，右下角那张小卡片显示进展。"
+                            text: "把文件拖进主窗口，或「文件 → 识别文档…」；"
+                                  + "结果存成一份新笔记，进展看右下角那张卡片。"
                         }
 
                         /* ---- 引擎：三个可选项，换的就是下面那条命令 ---- */
@@ -2659,12 +2646,9 @@ Window {
                             wrapMode: Text.WordWrap
                             color: root.mutedColor
                             font.pixelSize: 11
-                            text: "RapidDoc：纯 ONNX，模型随包（约 800MB），CPU 就够，装 "
-                                  + "pip install rapid-doc 即可 —— 默认这个。\n"
-                                  + "PaddleOCR-VL 1.6：精度最高（版面 / 表格 / 公式 / 109 种语言），"
-                                  + "要装 paddlepaddle + paddleocr[doc-parser]，权重约 1.8GB，建议有独显。\n"
-                                  + "Granite-Docling 258M：最省资源（权重约 515MB），表格公式不错，"
-                                  + "但语言以英文为主 —— 中文材料别选它。"
+                            text: "RapidDoc：随包、CPU 就够（默认）。\n"
+                                  + "PaddleOCR-VL 1.6：最准，要装 paddlepaddle + paddleocr[doc-parser]。\n"
+                                  + "Granite-Docling 258M：最省资源，但中文材料别选。"
                         }
 
                         /* ---- 档位 ---- */
@@ -2721,8 +2705,7 @@ Window {
                             wrapMode: Text.WordWrap
                             color: root.mutedColor
                             font.pixelSize: 11
-                            text: "「快」关掉表格和公式识别（一份 PDF 往往快好几倍）；「均衡」是默认；"
-                                  + "「最准」一次处理更多页、更激进的排版还原。"
+                            text: "「快」关掉表格和公式（一份 PDF 快好几倍）；「均衡」默认；「最准」最慢。"
                         }
 
                         /* ---- 用哪个 Python ---- */
@@ -2794,8 +2777,7 @@ Window {
                             wrapMode: Text.WordWrap
                             color: root.mutedColor
                             font.pixelSize: 11
-                            text: "识别包装在虚拟环境里的话，这里要指到那个 venv 的 python.exe —— "
-                                  + "PATH 里的 python 往往是系统那个，会报「No module named 'rapid_doc'」。"
+                            text: "指到那个 venv 的 python.exe —— PATH 里的往往是系统那个，会找不到识别包。"
                         }
 
                         /* ---- 那条命令 ---- */
@@ -2837,9 +2819,7 @@ Window {
                             wrapMode: Text.WordWrap
                             color: root.mutedColor
                             font.pixelSize: 11
-                            text: "这条命令就是「用哪个引擎」唯一的接口：前面是程序，后面接到脚本的档位词"
-                                  + "由上面那个「档位」自动接上。随包那三个脚本第一次用到时会落到 "
-                                  + "%APPDATA%/SmartClip/SmartClip/ 下，可以自己看、自己改。"
+                            text: "这条命令决定用哪个引擎，档位词由上面那档自动接上。"
                         }
 
                         /* ---- 识别程序的健康状况 ---- */
@@ -2879,29 +2859,6 @@ Window {
                          * 让人点了没反应（以为坏了）。要停就在模型那一栏把接口
                          * 清掉，或者干脆别点。
                          */
-                        Text {
-                            width: parent.width
-                            wrapMode: Text.WordWrap
-                            color: root.textColor
-                            font.pixelSize: 12
-                            text: "用法：编辑区里按右键 → 「校验当前文件」（或者按 "
-                                  + Cmd.shortcutFor("checkFile")
-                                  + "）。出问题的地方会在正文里画一条波浪线，"
-                                  + "鼠标停上去看那一条的详情。"
-                        }
-
-                        Text {
-                            width: parent.width
-                            wrapMode: Text.WordWrap
-                            color: root.mutedColor
-                            font.pixelSize: 11
-                            text: "不自动校验：要联网、要花 token 的事不替你做主，点了才发请求。"
-                                  + "先跑本地规则（括号配对、中英文标点混用、重复字、的地得、"
-                                  + "行尾空白 —— 毫秒出结果、不花钱），再把正文发给下面的模型，"
-                                  + "让它查用词和语法（模型报的每一条都会先在正文里核对位置，"
-                                  + "对不上的直接丢掉）。正文一改，波浪线自动清掉。"
-                        }
-
                         /*
                          * 「现在用的是哪个模型」—— 这行由 C++ 侧拼（Checker::modelSummary）。
                          *
@@ -2918,14 +2875,6 @@ Window {
                             text: Check.modelSummary
                         }
 
-                        Text {
-                            width: parent.width
-                            wrapMode: Text.WordWrap
-                            color: root.mutedColor
-                            font.pixelSize: 11
-                            text: "正文字数超过 1.2 万时只跑本地规则：那种长度下模型数的行号会不准，"
-                                  + "而我们宁可少报几条，也不给你一堆点不到的假问题。"
-                        }
                     }
 
                     /* ============ 格式化 ============ */
@@ -2943,50 +2892,6 @@ Window {
                             color: root.textBright
                             font.pixelSize: 14
                             font.bold: true
-                        }
-
-                        Text {
-                            width: parent.width
-                            wrapMode: Text.WordWrap
-                            color: root.mutedColor
-                            font.pixelSize: 11
-                            text: "编辑器里按右键 → 「格式化代码」（或 "
-                                  + Cmd.shortcutFor("formatCode")
-                                  + "）。Qt / QScintilla 本身不带格式化器，所以这里认本机装了"
-                                  + "哪些工具；没装的可以下面填完整路径，或者用内置那几样"
-                                  + "（JSON 重排 / XML 缩进 / 去行尾空白，不需要装任何东西）。"
-                        }
-
-                        Text {
-                            width: parent.width
-                            wrapMode: Text.WordWrap
-                            color: root.mutedColor
-                            font.pixelSize: 11
-                            text: "命令里可以用 {file} 占位（会被换成临时文件路径）；"
-                                  + "不写占位就自动追加在末尾。留空 = 用默认那一行。"
-                        }
-
-                        Text {
-                            width: parent.width
-                            wrapMode: Text.WordWrap
-                            color: root.mutedColor
-                            font.pixelSize: 11
-                            text: "每行下面那一句是这一语言的**格式模版**（照 IDEA 的默认风格：缩进 / 续行 / 行宽 / 大括号 / 空行）。"
-                                  + "观感由这份模版指挥工具，不是工具自己的默认；"
-                                  + "各工具吃得下的项不一样，所以句尾写清了当前这个能落地几项。"
-                        }
-
-                        Text {
-                            width: parent.width
-                            wrapMode: Text.WordWrap
-                            color: root.mutedColor
-                            font.pixelSize: 11
-                            text: "工具按这几档找：PATH（含你在上面填的完整路径）→ **当前这份文件所在项目**的 "
-                                  + "node_modules/.bin、.venv/Scripts → 用户级 bin（~\\go\\bin、~\\.cargo\\bin、"
-                                  + "%APPDATA%\\npm、pip 的 Scripts 这些没写进 PATH 的地方）→ VS 和 Qt Creator "
-                                  + "自带的 clang-format、官方 LLVM 目录 → npx 用过的缓存。"
-                                  + "工具名后面那个括号说的就是它来自哪一档：不标 = 机器上，（项目里）只对这份"
-                                  + "文件成立，（npx）是缓存里那份。"
                         }
 
                         Row {
@@ -3176,41 +3081,6 @@ Window {
                             color: root.textBright
                             font.pixelSize: 14
                             font.bold: true
-                        }
-
-                        Text {
-                            width: parent.width
-                            wrapMode: Text.WordWrap
-                            color: root.textColor
-                            font.pixelSize: 12
-                            text: "用法：选好区间 → 「开始汇总」→ 整理出来的东西先进「待审」，"
-                                  + "在编辑器里看过、改过，再点「采纳」并进 <保存位置>/文档/<分类>.md；"
-                                  + "最后那一步「收进归档」把这一段的原文从左侧树上收起来。"
-                        }
-
-                        Text {
-                            width: parent.width
-                            wrapMode: Text.WordWrap
-                            color: root.mutedColor
-                            font.pixelSize: 11
-                            text: "分类是模型起的，但每轮都会把已有分类报给它，优先往里归 —— "
-                                  + "真归错了不用在界面里改：草稿的文件名就是分类名，"
-                                  + "改个名再采纳，内容并进的就是改完那份。"
-                        }
-
-                        Text {
-                            width: parent.width
-                            wrapMode: Text.WordWrap
-                            color: root.mutedColor
-                            font.pixelSize: 11
-                            text: "用的是「模型」那一栏里配的同一个模型（和翻译、校验共用一套配置）。"
-                                  + "内容按每 6000 字分批发，一批一次请求，一轮最多 30 批 —— "
-                                  + "区间拉太长会直接让你缩短，不会闷着烧 token。"
-                                  + (Sum.imageMode === "none"
-                                     ? "剪贴板里的截图不认（下面那一档可以切）。"
-                                     : ("剪贴板里的截图先按"
-                                        + (Sum.imageMode === "vision" ? "多模态" : "OCR")
-                                        + "认成文字，再和复制的内容一起汇总。"))
                         }
 
                         /* ---- 剪贴板里的截图：认不认、用哪条路认 ---- */
@@ -3661,15 +3531,6 @@ Window {
                             font.bold: true
                         }
 
-                        Text {
-                            width: parent.width
-                            wrapMode: Text.WordWrap
-                            color: root.textColor
-                            font.pixelSize: 12
-                            text: "汇总过、已经从左侧树上收起来的原文。要哪份点「还原」，"
-                                  + "它就重新回到自己的日期目录里去；点「打开」直接看内容。"
-                        }
-
                         Rectangle {
                             width: parent.width
                             height: Math.max(30, archivedColumn.height + 16)
@@ -3777,19 +3638,6 @@ Window {
                             color: root.textBright
                             font.pixelSize: 14
                             font.bold: true
-                        }
-
-                        Text {
-                            width: parent.width
-                            wrapMode: Text.WordWrap
-                            color: root.mutedColor
-                            font.pixelSize: 12
-                            text: "点一行换一套。方案就是一个 json 文件，"
-                                  + "改完存盘界面立刻跟着变，不用重启；"
-                                  + "内置的 Dark / Light 不可改，想改先「另存为…」一份自己的。\n"
-                                  + "除了颜色，文件里还能写 font 那一段（字体、字号、注释字号、行高、"
-                                  + "自动换行、终端字体）：写了哪一项就以方案为准，那一排的开关会置灰，"
-                                  + "没写的项照用你在菜单里设的值。"
                         }
 
                         Rectangle {
@@ -3974,16 +3822,6 @@ Window {
                             color: root.textBright
                             font.pixelSize: 14
                             font.bold: true
-                        }
-
-                        Text {
-                            width: parent.width
-                            wrapMode: Text.WordWrap
-                            color: root.mutedColor
-                            font.pixelSize: 12
-                            text: "这里改的是你自己的默认档。配色方案的 font 段写了哪一项，"
-                                  + "那一行就整行淡一档、控件点不动，下面跟一句是哪个方案定的；"
-                                  + "没写的项照用这里设的值。"
                         }
 
                         FontGroupTitle { title: "编辑区" }
