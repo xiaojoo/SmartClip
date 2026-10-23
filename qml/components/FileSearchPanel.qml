@@ -319,6 +319,7 @@ Window {
                 radius: 5
                 color: root.caseOn ? root.accent : root.fieldBg
                 border.color: root.caseOn ? root.accent : root.panelBorder
+                border.width: 1
                 Text {
                     anchors.centerIn: parent
                     text: "Aa"
@@ -338,11 +339,14 @@ Window {
                 Accessible.role: Accessible.Button
             }
 
+            /* 关闭：底色和描边照左边那颗「Aa」，悬停只换底色（不长边、不加光圈） */
             Rectangle {
                 Layout.preferredWidth: 30
                 Layout.preferredHeight: 30
                 radius: 5
-                color: closeMouse.containsMouse ? root.rowHover : "transparent"
+                color: closeMouse.containsMouse ? root.rowHover : root.fieldBg
+                border.color: root.panelBorder
+                border.width: 1
                 Text {
                     anchors.centerIn: parent
                     text: "✕"
