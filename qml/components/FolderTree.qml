@@ -203,7 +203,6 @@ Rectangle {
     }
 
 
-    readonly property color borderColor: Theme.c("#43454a", Theme.rev)
     readonly property color textBright:  Theme.c("#ced0d6", Theme.rev)
     readonly property color textMuted:   Theme.c("#6f737a", Theme.rev)
     /* 标题 / 按钮的悬停底色：比面板底色亮一点点就够，深色界面上不抢眼 */
@@ -368,10 +367,10 @@ Rectangle {
                 anchors.right: parent.right
                 anchors.bottom: parent.bottom
                 height: 1
-                color: Qt.rgba(root.borderColor.r,
-                               root.borderColor.g,
-                               root.borderColor.b,
-                               0.5)
+                /* 和左栏/编辑区之间那条竖缝同一个颜色 —— 那条缝露的是窗口底
+                   （Main.qml 的 contentRoot，#313335），不是画出来的线。
+                   用同一支，浅色档也跟着同一张表走。 */
+                color: Theme.c("#313335", Theme.rev)
             }
         }
 

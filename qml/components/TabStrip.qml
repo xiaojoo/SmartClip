@@ -408,7 +408,8 @@ Rectangle {
         anchors.right: parent.right
         anchors.bottom: parent.bottom
         height: 1
-        color: Theme.c("#4b4d4f", Theme.rev)
-        opacity: 0.65
+        /* 和左栏/编辑区之间那条竖缝同一个颜色（窗口底 #313335），不再单独一支；
+           原来 #4b4d4f 压到 0.65 是 (59,61,63)，比那条缝亮 10 个级。 */
+        color: Theme.c("#313335", Theme.rev)
     }
 }
