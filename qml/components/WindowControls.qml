@@ -24,13 +24,13 @@ RowLayout {
     property color idleColor:  Theme.c("#b4b8bf", Theme.rev)
 
     /*
-     * 悬停底色：项目里的强调蓝（和左侧图标条选中态、
-     * 编辑区强调色同一个值），三个按钮统一用它。
+     * 悬停底色：灰。用项目里那支现成的灰 #4b4d4f（滚条滑块、各种描边同一支），
+     * 压在顶栏 #313335 上差 26/26/26 —— 亮一档看得出来，但不再抢颜色。
      *
-     * 关闭键原来单独用红色（#c42b1c）表示危险，
-     * 现在按需求改成和另外两个一致：都是蓝色底 + 白色图标。
+     * 以前这里是强调蓝 #4c96d8（对顶栏差 27/99/163），三个按钮统一；
+     * 关闭键更早单独用红色 #c42b1c 表示危险，那条早就撤了。
      */
-    property color hoverColor: "#4c96d8"
+    property color hoverColor: Theme.c("#4b4d4f", Theme.rev)
     property color textColor:  "#ffffff"
 
     /*
@@ -61,7 +61,12 @@ RowLayout {
         id: btn
         Layout.fillHeight: true
         Layout.preferredWidth: 46
-        color: mouse.containsMouse ? root.hoverColor : "transparent"
+        /* 切换那一小段里不画悬停底色（理由见下面 hoverSuppressed 那段说明） */
+        property bool hoverSuppressed: false
+
+        color: (mouse.containsMouse && !btn.hoverSuppressed)
+                   ? root.hoverColor
+                   : "transparent"
 
         property string kind: "win-min"
         property int iconSize: 14
@@ -133,8 +138,11 @@ RowLayout {
              */
             onPressed: {
                 btn.handledOnRelease = false
-                if (btn.prewarmOnPress)
+                if (btn.prewarmOnPress) {
+                    btn.hoverSuppressed = true
+                    hoverOff.restart()
                     Win.prewarmMaximize()
+                }
             }
             onReleased: {
                 if (btn.prewarmOnPress && Win.prewarmRelease())
@@ -147,6 +155,36 @@ RowLayout {
                 }
                 btn.activate()
             }
+        }
+
+        /*
+         * 最大化 / 还原那一小段里不画悬停底色。
+         *
+         * 为什么不是"清掉 containsMouse 就完事"：按下这颗时 MouseArea 抓走了鼠标，
+         * 预热又把整版布局撑到 4K，那颗按钮在场景里跑到别处，而 containsMouse 还留着
+         * "在" —— 于是**预热渲染出来的那一张 4K 图里，那颗按钮就带着悬停底**。
+         * 松手切换完，Qt 先把这张旧图合成了一次（量到：窗口到位后约 30ms 冒出一帧
+         * ≈14ms 的满格悬停底，位置正是 4K 那一版里那颗按钮的 x 3748..3793），
+         * 再往后场景才按"悬停已经没了"重画。属性清得再早也追不上那张图。
+         *
+         * 所以这一段直接把底色压住不画：按下时压住，切换通知到了再续 250ms
+         * （够那张旧图被换掉）。代价：切换后 250ms 之内真的把指针移到按钮上，
+         * 那一会儿不亮 —— 而刚切换完指针基本不在按钮上，看不出来。
+         */
+        Connections {
+            target: Win
+            function onTransitionedChanged() {
+                if (!Win.transitioned)
+                    return
+                btn.hoverSuppressed = true
+                hoverOff.restart()
+            }
+        }
+
+        Timer {
+            id: hoverOff
+            interval: 250
+            onTriggered: btn.hoverSuppressed = false
         }
     }
 
