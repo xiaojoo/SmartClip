@@ -1,0 +1,14 @@
+{
+    "continuationIndent": 8,
+    "controlBraceOnNextLine": false,
+    "declarationBraceOnNextLine": false,
+    "indentCaseFromSwitch": true,
+    "indentSize": 4,
+    "keepBlankLines": 2,
+    "keepSimpleStatementsOnOneLine": false,
+    "newlineAtEnd": true,
+    "note": "IDEA Properties 不覆写缩进 -> 平台默认；「分隔符两侧不留空格」这条落不了地",
+    "rightMargin": 120,
+    "tabSize": 4,
+    "useTabs": false
+}

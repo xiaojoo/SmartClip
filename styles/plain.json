@@ -1,0 +1,14 @@
+{
+    "continuationIndent": 8,
+    "controlBraceOnNextLine": false,
+    "declarationBraceOnNextLine": false,
+    "indentCaseFromSwitch": true,
+    "indentSize": 4,
+    "keepBlankLines": 2,
+    "keepSimpleStatementsOnOneLine": false,
+    "newlineAtEnd": true,
+    "note": "纯文本没有 code style，这里只用得上空行收敛和末尾换行",
+    "rightMargin": 120,
+    "tabSize": 4,
+    "useTabs": false
+}

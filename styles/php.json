@@ -1,0 +1,14 @@
+{
+    "continuationIndent": 8,
+    "controlBraceOnNextLine": false,
+    "declarationBraceOnNextLine": false,
+    "indentCaseFromSwitch": true,
+    "indentSize": 4,
+    "keepBlankLines": 2,
+    "keepSimpleStatementsOnOneLine": false,
+    "newlineAtEnd": true,
+    "note": "php-cs-fixer 的风格由它自己的配置定，本轮没做 --rules 适配",
+    "rightMargin": 120,
+    "tabSize": 4,
+    "useTabs": false
+}

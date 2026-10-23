@@ -1,0 +1,14 @@
+{
+    "continuationIndent": 8,
+    "controlBraceOnNextLine": false,
+    "declarationBraceOnNextLine": false,
+    "indentCaseFromSwitch": false,
+    "indentSize": 2,
+    "keepBlankLines": 2,
+    "keepSimpleStatementsOnOneLine": false,
+    "newlineAtEnd": true,
+    "note": "IDEA Shell：缩进 2、case 不相对 switch 缩进（ShCodeStyleSettings）",
+    "rightMargin": 120,
+    "tabSize": 2,
+    "useTabs": false
+}

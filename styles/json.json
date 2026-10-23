@@ -1,0 +1,14 @@
+{
+    "continuationIndent": 8,
+    "controlBraceOnNextLine": false,
+    "declarationBraceOnNextLine": false,
+    "indentCaseFromSwitch": true,
+    "indentSize": 2,
+    "keepBlankLines": 0,
+    "keepSimpleStatementsOnOneLine": false,
+    "newlineAtEnd": true,
+    "note": "IDEA JSON：缩进 2。另有「对象/数组一律换行」这条 prettier 表达不了 —— 内置那份是每项一行",
+    "rightMargin": 120,
+    "tabSize": 4,
+    "useTabs": false
+}

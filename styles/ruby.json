@@ -1,0 +1,14 @@
+{
+    "continuationIndent": 8,
+    "controlBraceOnNextLine": false,
+    "declarationBraceOnNextLine": false,
+    "indentCaseFromSwitch": true,
+    "indentSize": 2,
+    "keepBlankLines": 2,
+    "keepSimpleStatementsOnOneLine": false,
+    "newlineAtEnd": true,
+    "note": "rubocop 要一份 .rubocop.yml，本轮没做适配（本机没有 ruby，验不了生成的配置）",
+    "rightMargin": 120,
+    "tabSize": 4,
+    "useTabs": false
+}

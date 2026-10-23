@@ -1,0 +1,14 @@
+{
+    "continuationIndent": 2,
+    "controlBraceOnNextLine": false,
+    "declarationBraceOnNextLine": false,
+    "indentCaseFromSwitch": true,
+    "indentSize": 2,
+    "keepBlankLines": 2,
+    "keepSimpleStatementsOnOneLine": false,
+    "newlineAtEnd": true,
+    "note": "IDEA YAML：缩进 2、续行 2（YAMLCodeStyleSettings）",
+    "rightMargin": 120,
+    "tabSize": 4,
+    "useTabs": false
+}

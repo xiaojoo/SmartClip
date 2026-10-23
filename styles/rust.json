@@ -1,0 +1,14 @@
+{
+    "continuationIndent": 8,
+    "controlBraceOnNextLine": false,
+    "declarationBraceOnNextLine": false,
+    "indentCaseFromSwitch": true,
+    "indentSize": 4,
+    "keepBlankLines": 2,
+    "keepSimpleStatementsOnOneLine": false,
+    "newlineAtEnd": true,
+    "note": "rustfmt 的形状由它自己定（4 空格 / 100 列），本轮没往它身上塞 --config",
+    "rightMargin": 120,
+    "tabSize": 4,
+    "useTabs": false
+}

@@ -1,0 +1,14 @@
+{
+    "continuationIndent": 8,
+    "controlBraceOnNextLine": false,
+    "declarationBraceOnNextLine": false,
+    "indentCaseFromSwitch": true,
+    "indentSize": 4,
+    "keepBlankLines": 2,
+    "keepSimpleStatementsOnOneLine": false,
+    "newlineAtEnd": true,
+    "note": "IDEA 平台默认（CodeStyleSettings.java 的字段初始化）：4 / 8 / 120 / case 缩进 / 空行≤2",
+    "rightMargin": 120,
+    "tabSize": 4,
+    "useTabs": false
+}

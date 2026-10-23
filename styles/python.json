@@ -1,0 +1,14 @@
+{
+    "continuationIndent": 8,
+    "controlBraceOnNextLine": false,
+    "declarationBraceOnNextLine": false,
+    "indentCaseFromSwitch": true,
+    "indentSize": 4,
+    "keepBlankLines": 1,
+    "keepSimpleStatementsOnOneLine": false,
+    "newlineAtEnd": true,
+    "note": "PyCodeStyleSettings：连续空行最多 1、文件末尾补一行；行宽未覆写 -> 平台默认 120（不是 black 默认的 88）",
+    "rightMargin": 120,
+    "tabSize": 4,
+    "useTabs": false
+}

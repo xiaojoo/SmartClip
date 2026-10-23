@@ -1,0 +1,14 @@
+{
+    "continuationIndent": 8,
+    "controlBraceOnNextLine": false,
+    "declarationBraceOnNextLine": false,
+    "indentCaseFromSwitch": true,
+    "indentSize": 4,
+    "keepBlankLines": 2,
+    "keepSimpleStatementsOnOneLine": false,
+    "newlineAtEnd": true,
+    "note": "gofmt 恒定 tab 缩进、没有任何风格开关，这份模版改变不了它的输出",
+    "rightMargin": 120,
+    "tabSize": 4,
+    "useTabs": false
+}
