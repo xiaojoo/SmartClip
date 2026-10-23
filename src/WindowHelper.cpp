@@ -849,6 +849,18 @@ void WindowHelper::attachWidget(QWidget *widget)
         if (qobject_cast<QQuickWidget *>(m_quickWidget))
             m_quickWidget->installEventFilter(this);
 
+        /*
+         * 预热贴画那一层盖板的壳（见 WindowHelper.h 的 m_prewarmOverlay）。
+         * 建一次、平时藏着，只在"按下放大到松手"那一小段里盖在内容控件上面。
+         */
+        if (!m_prewarmOverlay) {
+            m_prewarmOverlay = new QWidget(m_widget);
+            m_prewarmOverlay->setAttribute(Qt::WA_TransparentForMouseEvents);
+            m_prewarmOverlay->setAttribute(Qt::WA_NoSystemBackground);
+            m_prewarmOverlay->installEventFilter(this);
+            m_prewarmOverlay->hide();
+        }
+
         /* WndProc 那一层（见 MessageTrace：它同时负责把系统的最大化命令接过来） */
         if (!m_messageTrace) {
             if (QCoreApplication *app = QCoreApplication::instance()) {
@@ -1043,7 +1055,23 @@ void WindowHelper::doPrewarm()
 
     QElapsedTimer clock;
     clock.start();
-    placeContent(QRect(QPoint(0, 0), avail.size()));   // ← 那笔 165ms 就在这一行里面
+    placeContent(QRect(QPoint(0, 0), avail.size()));   // ← 那笔 4K 渲染就在这一行里面
+
+    /*
+     * 盖板和贴画必须在 placeContent **之后**落笔。
+     *
+     * 量过（build/window-trace.log，按住放大 800ms 那一发）：从"预热：按下"到"松手命中"
+     * 之间日志里一条 Paint 都没有，而屏幕上已经是 4K 那一版 —— 也就是说那一帧是在
+     * setGeometry 里面**同步**推进背衬的，不走事件过滤器（宿主那条贴画分支、
+     * 还有 setUpdatesEnabled(false) 都是因此压不住它）。摆完再盖才盖得住。
+     */
+    if (m_prewarmOverlay) {
+        m_prewarmOverlay->setGeometry(QRect(QPoint(0, 0), m_widget->size()));
+        m_prewarmOverlay->raise();
+        m_prewarmOverlay->show();
+        m_prewarmOverlay->repaint();
+    }
+
     m_prewarmed = true;
     m_widget->repaint();                               // cover 还挂着：屏幕上没变化
     m_prewarmLife.start(4000);
@@ -1071,6 +1099,8 @@ void WindowHelper::cancelPrewarm()
     EditorViewItem::syncAllGeometry();                      // 原生子窗回到卡片那一版坐标
     m_widget->repaint();                                    // cover 还在，这一拍仍是旧画面
     m_prewarmCover = QPixmap();
+    if (m_prewarmOverlay)
+        m_prewarmOverlay->hide();
 
     trace(QStringLiteral("预热退回（没点到最大化）：%1ms").arg(clock.elapsed()));
 }
@@ -1212,6 +1242,10 @@ void WindowHelper::applyState(bool maximize)
          */
         m_prewarmLife.stop();
         m_prewarmCover = QPixmap();
+        /* 盖板在这一拍交回给 ②b 铺底 + ②d 拉伸帧 —— 它盖的是卡片那一块，
+           窗口一变大再留着就成了"旧界面贴在左上角"。 */
+        if (m_prewarmOverlay)
+            m_prewarmOverlay->hide();
         if (m_prewarmed) {
             m_prewarmed = false;
             EditorViewItem::setGeometryFrozen(false);
@@ -1839,6 +1873,21 @@ bool WindowHelper::eventFilter(QObject *watched, QEvent *event)
         break;
 
     case QEvent::Paint: {
+        /*
+         * 预热盖板（压在内容控件上面的那一层）：只画贴画，别的什么都不让画。
+         *
+         * 必须先认这一层：下面几条分支里那句 QPainter(m_widget) 是**写死画到宿主**上的，
+         * 盖板自己的 Paint 事件走进那条分支，就把宿主又刷了一遍、盖板本身是空的。
+         */
+        if (watched == m_prewarmOverlay) {
+            if (!m_prewarmCover.isNull()) {
+                trace(QStringLiteral("  帧：预热盖板（%1x%2）")
+                          .arg(m_prewarmOverlay->width()).arg(m_prewarmOverlay->height()));
+                QPainter plate(m_prewarmOverlay);
+                plate.drawPixmap(QRect(QPoint(0, 0), m_prewarmOverlay->size()), m_prewarmCover);
+            }
+            return true;
+        }
         /*
          * 预热期间（鼠标停在放大按钮上那一小段）：只贴"预热之前那一张"，不合成内容
          * 控件 —— 那时内容控件已经按 4K 摆好，让它自己画就是"最大化那一版的左上角
