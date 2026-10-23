@@ -280,6 +280,8 @@ Popup {
                 font.pixelSize: 14
                 /* 整数档：超出范围的字根本打不进去（和以前那个 SpinBox 一样） */
                 validator: root.inputIsInt ? intValidator : null
+                /* 点到输入框外面就收回焦点，判法在 C++ 那层（见 WindowHelper.cpp 的 FocusBlurFilter） */
+                onActiveFocusChanged: Win.setFocusedTextField(activeFocus ? this : null)
 
                 IntValidator {
                     id: intValidator

@@ -837,6 +837,18 @@ Window {
          * signal is connected, the context menu event will be accepted and will
          * not propagate" —— 连"事件继续往上冒"这条后路一起堵掉。
          */
+        /*
+         * 拿到焦点就报到 C++ 那一层，失去就报 null —— 那边负责"点到框外面就把焦点
+         * 收回去"（见 src/WindowHelper.cpp 的 FocusBlurFilter）。
+         *
+         * 为什么在 C++ 判不在 QML 判：QML 要判就得在最上面盖一层看得见每一发按下的
+         * MouseArea，而这一栏的右列是 Flickable、每一行还有自己的 hover MouseArea，
+         * 盖一层要把滚动 / 悬停 / 拖选全部重验。
+         *
+         * 顺序是安全的：Qt 先让旧的框失焦（报 null）、再让新的框拿到（报它自己），
+         * 所以框和框之间挪焦点不会把新值冲掉。
+         */
+        onActiveFocusChanged: Win.setFocusedTextField(activeFocus ? this : null)
         ContextMenu.onRequested: (position) => { }
     }
 

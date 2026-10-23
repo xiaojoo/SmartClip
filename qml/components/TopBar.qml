@@ -296,6 +296,8 @@ Rectangle {
                             onActiveFocusChanged: {
                                 if (activeFocus && root.view)
                                     root.view.releaseEditorFocus()
+                                /* 同设置面板 PanelField 那条：焦点交给 C++ 那层统一判 */
+                                Win.setFocusedTextField(activeFocus ? this : null)
                             }
                         } }
                 }

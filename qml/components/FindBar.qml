@@ -297,6 +297,8 @@ Rectangle {
                         background: Item {}
                         verticalAlignment: TextInput.AlignVCenter
                         selectByMouse: true
+                        /* 点到这一格外面就收回焦点，判法在 C++ 那层（见 WindowHelper.cpp 的 FocusBlurFilter） */
+                        onActiveFocusChanged: Win.setFocusedTextField(activeFocus ? this : null)
 
                         onTextChanged: root.refreshHighlight()
 
@@ -345,6 +347,7 @@ Rectangle {
                         background: Item {}
                         verticalAlignment: TextInput.AlignVCenter
                         selectByMouse: true
+                        onActiveFocusChanged: Win.setFocusedTextField(activeFocus ? this : null)
 
                         Keys.onReturnPressed: (event) => { root.doReplace(); event.accepted = true }
                         Keys.onEnterPressed: (event) => { root.doReplace(); event.accepted = true }

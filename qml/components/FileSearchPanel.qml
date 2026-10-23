@@ -291,6 +291,8 @@ Window {
                         background: Item {}
                         verticalAlignment: TextInput.AlignVCenter
                         selectByMouse: true
+                        /* 同设置面板 PanelField 那条：焦点交给 C++ 那层统一判 */
+                        onActiveFocusChanged: Win.setFocusedTextField(activeFocus ? this : null)
                         onTextChanged: root.query = text
 
                         /*

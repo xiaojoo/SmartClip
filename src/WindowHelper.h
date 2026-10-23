@@ -3,6 +3,7 @@
 #include <QElapsedTimer>
 #include <QObject>
 #include <QPixmap>
+#include <QPointer>
 #include <QRect>
 #include <QRegion>
 #include <QString>
@@ -179,6 +180,19 @@ public:
      */
     Q_INVOKABLE bool prewarmRelease();
     Q_INVOKABLE void cancelPrewarm();
+
+    /*
+     * QML 那侧报告"现在哪一个输入框拿着焦点"（拿到焦点时传自己、失去时传 null）。
+     *
+     * 为什么必须由 QML 报：C++ 自己查不到。试过两条路 ——
+     *   * `QGuiApplication::focusObject()`：主窗口的界面装在 QQuickWidget 里，
+     *     Qt 把焦点镜像到那块控件自己身上，拿回来的是 QQuickWidget；
+     *   * 从 `QQuickWidget::rootObject()` 往下走找 `hasActiveFocus()`：实测主窗口
+     *     那条走不到任何项（field=none），工具窗那条走到的是根元素
+     *     （field=QQuickRootItem）—— 两种都不是文本框，等于一次都没收回过焦点。
+     * 所以"谁有焦点"由 QML 说，C++ 只负责"每一发按下落在哪儿"。
+     */
+    Q_INVOKABLE void setFocusedTextField(QQuickItem *item);
 
     /*
      * 让 QML 也能往窗口变化日志里写一行（见下面"窗口变化日志"那段）。
@@ -401,6 +415,12 @@ private:
 
     class MessageTrace;
     MessageTrace *m_messageTrace = nullptr;
+
+    /* 挂在 QApplication 上的"每一发按下"过滤器（见 .cpp 里 FocusBlurFilter 的说明） */
+    class FocusBlurFilter;
+    FocusBlurFilter *m_focusBlur = nullptr;
+    /* QML 报上来的"当前拿焦点的输入框"（见 setFocusedTextField） */
+    QPointer<QQuickItem> m_focusedField;
 
     QElapsedTimer m_traceClock;
     bool m_traceStarted = false;

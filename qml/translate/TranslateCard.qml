@@ -488,6 +488,8 @@ Item {
                         selectByMouse: true
                         background: null
                         padding: 0
+                        /* 点到输入区外面就收回焦点，判法在 C++ 那层（见 WindowHelper.cpp 的 FocusBlurFilter） */
+                        onActiveFocusChanged: Win.setFocusedTextField(activeFocus ? this : null)
                         onTextChanged: root.editInput(text)
                         Keys.onPressed: (event) => {
                             if (event.key === Qt.Key_Return && (event.modifiers & Qt.ControlModifier)) {

@@ -15,11 +15,13 @@
 #include <QEvent>
 #include <QGuiApplication>
 #include <QLayout>
+#include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
 #include <QOperatingSystemVersion>
 #include <QQuickItem>
 #include <QQuickWidget>
+#include <QQuickWindow>
 #include <QRegion>
 #include <QScreen>
 #include <QStringList>
@@ -143,12 +145,83 @@ QRect nativeFrameRect(QWidget *widget) {
  * 这样和系统自己的最大化位置完全重合，收尾不会看到窗口再挪一下。
  */
 
+/*
+ * 点输入框以外的任何地方，把手上的焦点交回去。
+ *
+ * 为什么要专门做这一件事：Qt Quick 里"点到一个不吃焦点的东西上"**不会**清掉输入框
+ * 的焦点 —— 只有另一个带 activeFocusOnPress 的控件被点到，焦点才会挪过去。所以点空白、
+ * 点行标签、点勾选框，光标就一直留在输入框里（用户报的"点别的位置，输入框焦点要消失"）。
+ * 报焦点的是全应用那七个表面：设置面板 12 个框共用同一个 PanelField（改一处全跟上）、
+ * 顶栏搜索框、"在文件中查找"、查找/替换栏两个框、AskCard 的输入框、翻译卡片的正文框。
+ *
+ * 分工：C++ 这一层只认"每一发按下落在哪儿"（挂在 QApplication 上，一次覆盖所有表面，
+ * 不用在面板上盖 MouseArea —— 那会牵动 Flickable 滚动、行悬停、拖选，全得重验）；
+ * "现在哪个框有焦点"由 QML 报（setFocusedTextField）。为什么不能在这儿自己查：
+ * 试过两条路都不通 —— `QGuiApplication::focusObject()` 给的是 QQuickWidget 本身
+ * （Qt 把焦点镜像到那块控件上），从 `rootObject()` 往下找 `hasActiveFocus()` 在主窗口
+ * 那条找不到任何项、在工具窗那条找到的根元素，都不是文本框。
+ *
+ * 三条边界：
+ *   * 只管文本框（QQuickTextInput / QQuickTextEdit —— TextField 里面就是前者）；
+ *     树、列表、原生编辑器那些拿到的焦点不被这一枪扫掉；
+ *   * 点的正好是那个框自己 → 不动（不然光标没法点到中间插进去）；
+ *   * **永远返回 false**：只看不吞，按下照常交给下面该收的人。
+ */
+class WindowHelper::FocusBlurFilter final : public QObject {
+public:
+    explicit FocusBlurFilter(WindowHelper *owner) : QObject(owner), m_owner(owner) {}
+
+protected:
+    bool eventFilter(QObject *watched, QEvent *event) override
+    {
+        if (event->type() != QEvent::MouseButtonPress)
+            return false;
+
+        WindowHelper *self = m_owner.data();
+        if (!self)
+            return false;
+        QQuickItem *field = self->m_focusedField.data();
+        if (!field)
+            return false;
+        if (!field->inherits("QQuickTextInput") && !field->inherits("QQuickTextEdit")) {
+            self->m_focusedField = nullptr;
+            return false;
+        }
+        QQuickWindow *fw = field->window();
+        if (!fw || !field->isVisible()) {
+            self->m_focusedField = nullptr;
+            return false;
+        }
+
+        auto *me = static_cast<QMouseEvent *>(event);
+        const QPointF local = field->mapFromScene(
+            QPointF(fw->mapFromGlobal(me->globalPosition().toPoint())));
+        if (!QRectF(0.0, 0.0, field->width(), field->height()).contains(local))
+            field->setFocus(false);
+        return false;
+    }
+
+private:
+    QPointer<WindowHelper> m_owner;
+};
+
 WindowHelper::WindowHelper(QObject *parent)
     : QObject(parent)
 {
     /* 按住不放超过 4 秒就自己退回卡片（见 prewarmMaximize） */
     m_prewarmLife.setSingleShot(true);
     connect(&m_prewarmLife, &QTimer::timeout, this, &WindowHelper::cancelPrewarm);
+
+    /* 点输入框以外任何地方 → 交回焦点（见 FocusBlurFilter） */
+    if (QCoreApplication *app = QCoreApplication::instance()) {
+        m_focusBlur = new FocusBlurFilter(this);
+        app->installEventFilter(m_focusBlur);
+    }
+}
+
+void WindowHelper::setFocusedTextField(QQuickItem *item)
+{
+    m_focusedField = item;
 }
 
 /*
@@ -826,6 +899,13 @@ WindowHelper::~WindowHelper()
             app->removeNativeEventFilter(m_messageTrace);
         delete m_messageTrace;
         m_messageTrace = nullptr;
+    }
+
+    if (m_focusBlur) {
+        if (QCoreApplication *app = QCoreApplication::instance())
+            app->removeEventFilter(m_focusBlur);
+        delete m_focusBlur;
+        m_focusBlur = nullptr;
     }
 }
 
