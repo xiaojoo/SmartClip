@@ -1106,6 +1106,8 @@ private:
 
     void ensureWrapped();
     void applyGeometry();
+    /* 临时诊断：SMARTCLIP_SB_LOG=1 时把两条滚条的显隐/范围和视口尺寸记一行 */
+    static void sbLogProbe(const QString &what, QsciScintilla *sci);
     /*
      * 盯住所有祖先的位置 / 尺寸变化（见 .cpp 里的说明）：原生子窗口按场景坐标
      * 摆，而 item 自己的 geometryChange 感知不到"父壳整体挪位置、尺寸不变"。

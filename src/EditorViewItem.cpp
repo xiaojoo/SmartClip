@@ -490,6 +490,48 @@ protected:
 
 }  // namespace
 
+/*
+ * 临时诊断（SMARTCLIP_SB_LOG=1，落 H:/steward/build/sb-log.txt）
+ *
+ * 要回答一个问题：最大化之后右边那条竖滚条**闪一下**（量到：窗口落定后约 110ms，
+ * x=3824..3829 那 6px 从 #1e1f22 变成滑块色 #4b4d4f，挂 63ms 又没了）是哪一拍、
+ * 谁改的显隐。把两条滚条的"可见 + 范围 + 视口尺寸 + 正文行数×行高"在同一行里
+ * 摆出来，就能算出那一刻 Scintilla 认为"装不装得下"。
+ */
+void EditorViewItem::sbLogProbe(const QString &what, QsciScintilla *sci)
+{
+    if (!qEnvironmentVariableIsSet("SMARTCLIP_SB_LOG") || !sci)
+        return;
+
+    static QElapsedTimer clock;
+    static bool started = false;
+    if (!started) {
+        clock.start();
+        started = true;
+    }
+    static QFile f(QStringLiteral("H:/steward/build/sb-log.txt"));
+    if (!f.isOpen() && !f.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text))
+        return;
+
+    auto *vb = sci->verticalScrollBar();
+    auto *hb = sci->horizontalScrollBar();
+    const QRect vp = sci->viewport()->geometry();
+    const long lineH = sci->SendScintilla(QsciScintillaBase::SCI_TEXTHEIGHT, 0);
+    const long content = long(sci->lines()) * lineH;
+
+    QTextStream s(&f);
+    s << QStringLiteral("%1ms %2 | V vis=%3 min=%4 max=%5 page=%6 | H vis=%7 max=%8 page=%9"
+                        " | viewport %10x%11 | lines=%12 lineH=%13 content=%14\n")
+               .arg(clock.elapsed()).arg(what)
+               .arg(vb && vb->isVisible() ? 1 : 0)
+               .arg(vb ? vb->minimum() : -1).arg(vb ? vb->maximum() : -1).arg(vb ? vb->pageStep() : -1)
+               .arg(hb && hb->isVisible() ? 1 : 0)
+               .arg(hb ? hb->maximum() : -1).arg(hb ? hb->pageStep() : -1)
+               .arg(vp.width()).arg(vp.height())
+               .arg(sci->lines()).arg(lineH).arg(content)
+         << Qt::endl;
+}
+
 void EditorViewItem::ensureWrapped() {
     if (m_sci)
         return;
@@ -644,6 +686,36 @@ void EditorViewItem::ensureWrapped() {
     if (auto *hb = m_sci->horizontalScrollBar()) {
         connect(hb, &QScrollBar::valueChanged, this, [this]() { updateBottomLines(); });
         connect(hb, &QScrollBar::rangeChanged, this, [this]() { updateBottomLines(); });
+    }
+
+    /*
+     * 范围一变就把可见性对齐回"有得可滚才许在"。
+     *
+     * eventFilter 里那条 Show 分支会在"范围还是 0/0"的那一拍把 Scintilla 显式 show
+     * 出来的滚条收掉（治最大化后右边那条闪一下）；这一句负责等范围算准之后把真该有的
+     * 补回来 —— 两头都得管，只藏不显会把卡片态那条真该显示的也弄没（第一版就栽在
+     * 这儿：日志 V vis=0 max=22、抓屏滑块像素 0）。
+     */
+    for (auto *bar : { m_sci->verticalScrollBar(), m_sci->horizontalScrollBar() }) {
+        if (!bar)
+            continue;
+        connect(bar, &QScrollBar::rangeChanged, bar, [bar](int mn, int mx) {
+            if (mn != mx && !bar->isVisible())
+                bar->show();
+        });
+    }
+
+    /* 诊断：滚条范围一改就记一行（SMARTCLIP_SB_LOG=1） */
+    if (qEnvironmentVariableIsSet("SMARTCLIP_SB_LOG")) {
+        for (auto *bar : { m_sci->verticalScrollBar(), m_sci->horizontalScrollBar() }) {
+            if (!bar)
+                continue;
+            const bool vert = (bar == m_sci->verticalScrollBar());
+            connect(bar, &QScrollBar::rangeChanged, m_sci,
+                    [this, vert](int, int) {
+                        sbLogProbe(QStringLiteral("%1滚条 range").arg(vert ? "竖" : "横"), m_sci);
+                    });
+        }
     }
 
     connect(m_sci, &QsciScintilla::selectionChanged, this, [this]() {
@@ -2377,6 +2449,7 @@ void EditorViewItem::applyGeometry() {
     m_sciWidget->setGeometry(x, y, w, h);
     m_sci->setGeometry(0, 0, w, h);
     m_sciWidget->raise();
+    sbLogProbe(QStringLiteral("applyGeometry %1x%2").arg(w).arg(h), m_sci);
 
     /*
      * 诊断（SMARTCLIP_TERM_LOG）：把这块**原生编辑控件**摆到哪儿了记下来。
@@ -2519,6 +2592,51 @@ bool EditorViewItem::eventFilter(QObject *watched, QEvent *event) {
      *
      * 提示框用 QToolTip：深色底是 main.cpp 里设的全局调色板给的，和界面一致。
      */
+    /*
+     * 滚条的可见性一律跟着范围走 —— "没得可滚"的那一条不许出现在屏幕上。
+     *
+     * 治的是：最大化之后右边那条竖滚条闪一下。量到的序列（SMARTCLIP_SB_LOG=1，
+     * build/sb-log.txt）：窗口落定后约 100ms「竖滚条 显示」，53ms 后「竖滚条 隐藏」，
+     * 而显示那一拍它的范围已经是 min=max=0（正文 63 行 ×19 = 1197px，视口 2015px，
+     * 本来就装得下）—— 屏幕上就是 x=3824..3829 那 6px 整根变成滑块色 #4b4d4f。
+     *
+     * 两个方向都要管，只藏不显会闯祸：Show 事件到的时候范围可能还没算好（第一版只
+     * 在 Show 里 hide，结果卡片态那条真该显示的也被按住了 —— 日志里 V vis=0 max=22、
+     * 抓屏滑块像素 0）。所以范围一变就两头对齐。
+     *
+     * 为什么这样不会来回抖：藏掉滚条只会让视口更宽/更高，下一次重算只会更不需要它；
+     * 真要超出，重算出 max>0，这一条又被显出来。最坏是"该出现的那一条晚一拍出现"。
+     */
+    if (m_sci
+        && (watched == m_sci->verticalScrollBar() || watched == m_sci->horizontalScrollBar())
+        && event->type() == QEvent::Show) {
+        auto *bar = static_cast<QScrollBar *>(watched);
+        if (bar->minimum() == bar->maximum()) {
+            sbLogProbe(QStringLiteral("没得可滚，收回%1滚条")
+                           .arg(watched == m_sci->verticalScrollBar() ? QStringLiteral("竖")
+                                                                      : QStringLiteral("横")),
+                       m_sci);
+            /*
+             * 只 hide，**不要** return true 把这个 Show 事件吃掉：吃掉之后 Qt 自己
+             * 记的可见状态和实际对不上，后面真该显示的那一条再也显示不出来
+             * （第一版就是这样把卡片态那条竖条弄没的：日志 V vis=0 max=22、滑块像素 0）。
+             */
+            bar->hide();
+        }
+    }
+
+    /* 滚条被显示 / 隐藏的那一拍记一行（SMARTCLIP_SB_LOG=1；QWidget 没有 visibilityChanged） */
+    if (m_sci
+        && (watched == m_sci->verticalScrollBar() || watched == m_sci->horizontalScrollBar())
+        && (event->type() == QEvent::Show || event->type() == QEvent::Hide)) {
+        sbLogProbe(QStringLiteral("%1滚条 %2")
+                       .arg(watched == m_sci->verticalScrollBar() ? QStringLiteral("竖")
+                                                                  : QStringLiteral("横"),
+                            event->type() == QEvent::Show ? QStringLiteral("显示")
+                                                          : QStringLiteral("隐藏")),
+                   m_sci);
+    }
+
     if (event->type() == QEvent::ToolTip && m_sci
         && (watched == m_sci || watched == m_sci->viewport())) {
         auto *he = static_cast<QHelpEvent *>(event);
