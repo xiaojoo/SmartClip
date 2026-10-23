@@ -282,6 +282,10 @@ Popup {
                 validator: root.inputIsInt ? intValidator : null
                 /* 点到输入框外面就收回焦点，判法在 C++ 那层（见 WindowHelper.cpp 的 FocusBlurFilter） */
                 onActiveFocusChanged: Win.setFocusedTextField(activeFocus ? this : null)
+                /* Qt 的样式（Fusion）给每个 TextField/TextArea 挂了一份系统默认右键菜单（Undo/Cut/Copy/…）：
+                 * menu 置 null 才不吃它，后面那个空的 onRequested 让这一发右键到此为止、不往上传 */
+                ContextMenu.menu: null
+                ContextMenu.onRequested: (position) => { }
 
                 IntValidator {
                     id: intValidator

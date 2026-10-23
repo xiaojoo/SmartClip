@@ -299,6 +299,10 @@ Rectangle {
                                 /* 同设置面板 PanelField 那条：焦点交给 C++ 那层统一判 */
                                 Win.setFocusedTextField(activeFocus ? this : null)
                             }
+                            /* Qt 的样式（Fusion）给每个 TextField/TextArea 挂了一份系统默认右键菜单（Undo/Cut/Copy/…）：
+                             * menu 置 null 才不吃它，后面那个空的 onRequested 让这一发右键到此为止、不往上传 */
+                            ContextMenu.menu: null
+                            ContextMenu.onRequested: (position) => { }
                         } }
                 }
             }
