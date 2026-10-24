@@ -116,6 +116,34 @@ Rectangle {
     /* ---- 交互中间量 ---- */
     property bool dragging: false
     property bool hinted: true
+
+    /*
+     * ---- 取色 ----
+     *
+     * pickX / pickY 是光标在这块屏上的位置（逻辑像素，和选区同一个口径），
+     * pickHex 由 C++ 从冻结图上读（越界给空串）。pickOn = 现在该不该显示放大镜。
+     *
+     * 门槛用 selAuto（= 还没按下去框过）而不是 !selReady：进截图时选区默认就是
+     * **整屏**，selReady 一上来就是 true，用后者这个放大镜永远出不来。
+     * 也不管 dragging —— 按下之后悬停归框选那块 MouseArea，这一层收不到
+     * positionChanged，放大镜会僵在按下那一点上，不如干脆不收。
+     */
+    property real pickX: -1
+    property real pickY: -1
+    property string pickHex: ""
+    readonly property bool pickOn: overlayReady && !textTool && selAuto
+                                   && pickHex !== ""
+    readonly property string pickRgbText: pickHex.length === 7
+                                          ? ("rgb(" + parseInt(pickHex.substring(1, 3), 16)
+                                             + ", " + parseInt(pickHex.substring(3, 5), 16)
+                                             + ", " + parseInt(pickHex.substring(5, 7), 16) + ")")
+                                          : ""
+
+    function setPick(x, y) {
+        root.pickX = x
+        root.pickY = y
+        root.pickHex = Shot.colorAt(x, y)
+    }
     property real pressX: 0
     property real pressY: 0
 
@@ -1051,6 +1079,12 @@ Rectangle {
         source: Shot.serial > 0 ? "image://shot/full" + Shot.serial : ""
         fillMode: Image.Stretch
         /*
+         * 同步取图（不走异步加载那一拍）：C++ 那边"幕外画一帧再挪进来"要等的
+         * 就是这张底图到位的那一帧，异步的话它可能落到挪进来之后的第二帧上，
+         * 用户看到的还是黑一下。
+         */
+        asynchronous: false
+        /*
          * 不进 QQuickPixmapCache：URL 里那个序号已经能绕开缓存了，
          * 这一条是双保险（截图这种大图留在缓存里也没意义）。
          */
@@ -1095,6 +1129,9 @@ Rectangle {
         anchors.fill: parent
         acceptedButtons: Qt.LeftButton | Qt.RightButton
         hoverEnabled: true
+        /* 这里的 cursorShape 实测落不到窗口（原因见上面 cursorLayer 那段），
+         * 真正生效的是 Shot.setOverlayCursor —— 先留着，等哪天 QQuickWidget
+         * 的转发修好了可以只留这一句。 */
         cursorShape: root.textTool ? Qt.IBeamCursor : Qt.CrossCursor
 
         /*
@@ -1109,6 +1146,8 @@ Rectangle {
                                                mouse.button === Qt.RightButton)
         onPositionChanged: (mouse) => root.pointerMove(mouse.x, mouse.y)
         onReleased: (mouse) => root.pointerUp()
+        /* 临时诊断（同上）：量完删 */
+        onContainsMouseChanged: Shot.uiTrace("rubber.containsMouse=" + (containsMouse ? 1 : 0))
         /*
          * 左键双击 = 取消这次截图（和 Esc 一个效果）。
          *
@@ -1717,6 +1756,64 @@ Rectangle {
     }
 
     /*
+     * 只管光标的一层：压在两个标注层上面、工具条下面。
+     *
+     * 为什么下面那块框选 MouseArea 写的十字架到不了屏幕：Qt 找光标是从"鼠标底下
+     * 那个 item"往上走**祖先链**，而裸 Item 是"光标透明"的、会继续往上跳。进截图
+     * 时选区默认就是整屏（resetForCapture 直接把 sel 设成整块屏幕），于是按选区
+     * 大小铺开的 shapeLayer / textLayer 盖在框选那块**上面** —— 它们是兄弟不是
+     * 祖先，框选层的光标永远轮不到（实测四个点全是 ARROW）。
+     *
+     * 为什么不用 HoverHandler：Qt 6.11 的 HoverHandler 没有 cursor，Item 也没有
+     * cursorShape，只有 MouseArea 有（qmltypes 里 QQuickHoverHandler 的全部属性
+     * 就是 hovered / blocking）。acceptedButtons 给空 = 不吃按下，事件照样落到
+     * 下面的框选层；没开 hoverEnabled，所以也不吃悬停。
+     * 声明位置必须在工具条之前：后声明的在上，工具条那些自己写了 PointingHand
+     * 的离鼠标更近，照样赢。
+     *
+     * 实测：`acceptedButtons: Qt.NoButton` 的那块虽然能收到悬停（trace 里
+     * containsMouse=1），光标却不变；换成"收下再明确退回"（AllButtons +
+     * propagateComposedEvents + accepted=false）才有 CROSS。
+     *
+     * cursorShape 挂在这一层是**必须**的，不是保险：QQuickWindow 找光标是顺着
+     * 父链往上找，整条链上都没有就退回**默认箭头**（不是退回窗口自己设的十字）。
+     * 所以鼠标一旦落到工具条那些 PointingHand 上、再回到屏幕上，那一拍父链走到
+     * 根就没有命中任何 cursor —— 箭头就把十字顶掉了（用户报的"划过工具条再回来
+     * 就不是十字架了"）。这一层铺满屏、又压在框选层上面，给它设 cursor 等于
+     * 给整块屏幕兜底。
+     *
+     * 工具条自己的底色（按钮之间那段缝）还是箭头：那是工具条，不该是十字。
+     */
+    MouseArea {
+        anchors.fill: parent
+        acceptedButtons: Qt.AllButtons
+        propagateComposedEvents: true
+        hoverEnabled: true
+        cursorShape: root.textTool ? Qt.IBeamCursor : Qt.CrossCursor
+        onPressed: (mouse) => mouse.accepted = false
+        onReleased: (mouse) => mouse.accepted = false
+        onPositionChanged: (mouse) => root.setPick(mouse.x, mouse.y)
+        onExited: root.pickHex = ""
+    }
+
+    /*
+     * 十字架由 C++ 设到窗口上（见 Screenshot::setOverlayCursor 那段说明）——
+     * 这一条管的是"鼠标还没进来之前"那一段：窗口刚露脸、第一个悬停事件之前，
+     * QML 那层的 cursor 还没被应用，靠这个把十字先立住。文字工具下换 I 型。
+     */
+    onToolChanged: if (Shot.active)
+                       Shot.setOverlayCursor(textTool ? Qt.IBeamCursor : Qt.CrossCursor)
+
+    Connections {
+        target: Shot
+
+        function onStateChanged() {
+            Shot.setOverlayCursor(Shot.active
+                                  ? (root.textTool ? Qt.IBeamCursor : Qt.CrossCursor) : -1)
+        }
+    }
+
+    /*
      * LLM 的回复按 token 认领（和 TranslateCard 同一套做法）：用户连点两次
      * "识别"时，先回来的那一口不能把后一口的结果盖掉。
      *
@@ -2132,9 +2229,198 @@ Rectangle {
         Text {
             id: hintText
             anchors.centerIn: parent
-            text: "拖动鼠标框选区域，只点一下 = 整屏"
+            text: "拖动鼠标框选区域，只点一下 = 整屏 · 按 C 复制光标处颜色"
             font.pixelSize: 12
             color: "#b4b8bf"
+        }
+    }
+
+    /*
+     * 取色放大镜：光标旁边一小块，把光标正中间那个像素放大到看得清，
+     * 下面三行报它的坐标 / HEX / RGB，按 C 复制（见下面那条 Shortcut）。
+     *
+     * 这一块的尺寸、颜色、排布是照 PixPin 的截图窗口逐像素量的（4K、dpr 1.0）：
+     * 面板 165 宽、纯黑、直角、无描边；方格 15x9 格、一格 11px；格线白 @25%；
+     * 当前像素那一行一列整条涂半透明强调蓝；中心那一格 11x11 白描边；
+     * 文字纯白、行距 21.5、整块居中；面板左上角落在光标右下 (+10, +20)。
+     *
+     * 没照搬的两处：① PixPin 底下还有三行操作提示（Shift 换格式 / C 复制 /
+     * P 换坐标），我们这三件事已经写在屏幕最下面那条提示里了，不重复一遍；
+     * ② 它颜色只给一行、按 Shift 换格式，而这里要 HEX 和 RGB 同时看得见。
+     * 字体也留在 Consolas（它是界面字体）：坐标从 (666, 315) 变成 (1234, 567)
+     * 的时候位数会变，等宽字体不会让那一行忽宽忽窄。
+     *
+     * 只在**还没按下框选**之前出现（门槛是 selAuto，见上面那段）：按下去之后
+     * 用户要的是框和标注，这块得让位；文字工具下也不出现（那时候光标是 I 型，
+     * 放大镜只会挡字）。
+     *
+     * 图来自 Shot.zoomUrl()：C++ 侧按设备像素裁一块最近邻放大，走
+     * image://shot 提供者。每次移动都换一个新 URL（序号在里面），
+     * 因为提供者是按 URL 缓存的 —— 不换号的话放大镜会一直停在第一格。
+     */
+    Rectangle {
+        id: loupe
+
+        readonly property int kHalfX: 7      /* 横：中心左右各 7 格 -> 一共 15 格 */
+        readonly property int kHalfY: 4      /* 纵：中心上下各 4 格 -> 一共 9 格 */
+        readonly property int kCell: 11      /* 一格 11px（量的格线间距，15 格正好 165） */
+        readonly property int kLineH: 22     /* 文字行距（量的 21.5，取整） */
+        readonly property int kGapX: 10      /* 面板左上角离光标：横 */
+        readonly property int kGapY: 20      /* 面板左上角离光标：纵 */
+        readonly property int kGridW: (kHalfX * 2 + 1) * kCell   /* 165 */
+        readonly property int kGridH: (kHalfY * 2 + 1) * kCell   /* 99 */
+        readonly property int kLines: 3      /* 坐标 / HEX / RGB */
+
+        width: kGridW
+        height: kGridH + kLines * kLineH
+        color: "#000000"
+        visible: root.pickOn
+        /* 贴着屏幕右边 / 下边就翻到光标的另一侧，别被裁掉 */
+        x: root.pickX + kGapX + width > root.width
+           ? root.pickX - kGapX - width : root.pickX + kGapX
+        y: root.pickY + kGapY + height > root.height
+           ? root.pickY - kGapY - height : root.pickY + kGapY
+
+        Image {
+            id: loupeImg
+
+            x: 0
+            y: 0
+            width: loupe.kGridW
+            height: loupe.kGridH
+            fillMode: Image.Stretch
+            cache: false
+            asynchronous: false
+            source: root.pickOn ? Shot.zoomUrl(root.pickX, root.pickY,
+                                               loupe.kHalfX, loupe.kHalfY,
+                                               loupe.kCell) : ""
+        }
+
+        /*
+         * 当前像素那一行 / 那一列整条涂蓝。
+         *
+         * 量的时候蓝条压在深色内容上是 (33,76,134)：拿我们的强调色 #4c96d8
+         * 压 55% 落 (47,88,124)，同档亮度同档饱和，差在色相偏青一点 —— 没有
+         * 为这一块新引一个颜色令牌。
+         */
+        Rectangle {
+            x: 0
+            y: loupe.kHalfY * loupe.kCell
+            width: loupeImg.width
+            height: loupe.kCell
+            color: root.accent
+            opacity: 0.55
+        }
+        Rectangle {
+            x: loupe.kHalfX * loupe.kCell
+            y: 0
+            width: loupe.kCell
+            height: loupeImg.height
+            color: root.accent
+            opacity: 0.55
+        }
+
+        /* 一格一条的网格线，压在蓝条**上面**（PixPin 就是这个层序：格线处读数 91,102,137） */
+        Item {
+            anchors.fill: loupeImg
+
+            Repeater {
+                model: loupe.kHalfX * 2          /* 内部竖线 14 条 */
+                delegate: Rectangle {
+                    required property int index
+
+                    x: (index + 1) * loupe.kCell
+                    width: 1
+                    height: parent.height
+                    color: "#40ffffff"
+                }
+            }
+            Repeater {
+                model: loupe.kHalfY * 2          /* 内部横线 8 条 */
+                delegate: Rectangle {
+                    required property int index
+
+                    y: (index + 1) * loupe.kCell
+                    width: parent.width
+                    height: 1
+                    color: "#40ffffff"
+                }
+            }
+        }
+
+        /* 中心那一格的框：放大镜里"读的是哪个像素"必须有指着（量的：11x11 白描边） */
+        Rectangle {
+            x: loupe.kHalfX * loupe.kCell
+            y: loupe.kHalfY * loupe.kCell
+            width: loupe.kCell
+            height: loupe.kCell
+            color: "transparent"
+            border.color: "#ffffff"
+            border.width: 1
+        }
+        /* 方图一圈白边（量的：163x97 的白框把格子围住） */
+        Rectangle {
+            anchors.fill: loupeImg
+            color: "transparent"
+            border.color: "#ffffff"
+            border.width: 1
+        }
+
+        Column {
+            x: 0
+            y: loupe.kGridH
+            width: loupe.width
+            spacing: 0
+
+            Text {
+                width: parent.width
+                height: loupe.kLineH
+                horizontalAlignment: Text.AlignHCenter
+                verticalAlignment: Text.AlignVCenter
+                font.pixelSize: 13
+                font.family: "Consolas"
+                color: "#ffffff"
+                text: "( " + Math.round(root.pickX) + " , " + Math.round(root.pickY) + " )"
+            }
+
+            /* 第二行：色块 + HEX（量的：色块 15x15 白描边，和 HEX 一起居中） */
+            Item {
+                width: parent.width
+                height: loupe.kLineH
+
+                Row {
+                    anchors.centerIn: parent
+                    spacing: 7
+
+                    Rectangle {
+                        width: 15
+                        height: 15
+                        color: root.pickHex
+                        border.color: "#ffffff"
+                        border.width: 1
+                    }
+                    Text {
+                        /* 高度对齐色块：Row 里的子项不归 anchors 管，只能同高 */
+                        height: 15
+                        verticalAlignment: Text.AlignVCenter
+                        font.pixelSize: 13
+                        font.family: "Consolas"
+                        color: "#ffffff"
+                        text: root.pickHex
+                    }
+                }
+            }
+
+            Text {
+                width: parent.width
+                height: loupe.kLineH
+                horizontalAlignment: Text.AlignHCenter
+                verticalAlignment: Text.AlignVCenter
+                font.pixelSize: 13
+                font.family: "Consolas"
+                color: "#ffffff"
+                text: root.pickRgbText
+            }
         }
     }
 
@@ -2166,6 +2452,19 @@ Rectangle {
         sequence: "Return"
         enabled: root.shortcutsOn
         onActivated: root.runAction("copy")
+    }
+
+    /*
+     * C = 复制放大镜正在显示的那一格的颜色值（HEX）。
+     *
+     * enabled 挂在 pickOn 上而不是 shortcutsOn：放大镜只在"还没按下框选"时亮，
+     * 那时候按 C 是取色；框完之后 C 不该被抢（虽然这个界面没有文本输入焦点时
+     * 也没什么可输入的，但让开比抢了干净）。
+     */
+    Shortcut {
+        sequence: "C"
+        enabled: root.pickOn
+        onActivated: Shot.copyText(root.pickHex)
     }
 
     /* 撤销：打字的时候让开（那会儿 Ctrl+Z 归 TextEdit 自己用） */

@@ -564,6 +564,25 @@ int main(int argc, char *argv[]) {
     screenshot.prewarm();
 
     /*
+     * 临时探针（SMARTCLIP_SHOT_AUTOCAP=毫秒）：到点自己触发一次抓屏，
+     * 配合 SMARTCLIP_SHOT_OFFCHK 用 —— 全局热键被前台全屏程序挡住时，
+     * 注入的 Ctrl+Alt+A 进不来，只能让程序自己按。定位完删掉这一段。
+     */
+    if (qEnvironmentVariableIsSet("SMARTCLIP_SHOT_AUTOCAP")) {
+        const int atMs = qEnvironmentVariableIntValue("SMARTCLIP_SHOT_AUTOCAP");
+        QTimer::singleShot(atMs, &app, [&screenshot]() { screenshot.beginCapture(); });
+    }
+    /*
+     * 临时探针（SMARTCLIP_SHOT_AUTOCANCEL=毫秒）：到点自己收工。
+     * 和上面那条配着用，选区窗口在屏幕上只留一百来毫秒 —— 抓首帧的录像不用人守着。
+     * 定位完删掉这一段。
+     */
+    if (qEnvironmentVariableIsSet("SMARTCLIP_SHOT_AUTOCANCEL")) {
+        const int atMs = qEnvironmentVariableIntValue("SMARTCLIP_SHOT_AUTOCANCEL");
+        QTimer::singleShot(atMs, &app, [&screenshot]() { screenshot.cancelCapture(); });
+    }
+
+    /*
      * 便签：恢复上次摆着的那几条。
      *
      * 放在这份单例注册之后 —— 便签窗口的 QML 要 `import SmartClip.Globals`

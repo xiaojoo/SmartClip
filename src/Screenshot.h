@@ -12,6 +12,7 @@
 class QQmlEngine;
 class QScreen;
 class QWidget;
+class QQuickView;
 
 /*
  * 截图（选区 -> 加文字 -> 复制 / 保存 / 固定到桌面 -> 还能接着改）。
@@ -167,6 +168,39 @@ public:
      */
     Q_INVOKABLE void copyText(const QString &text) const;
 
+    /*
+     * 取色：读冻结图上某一个**逻辑像素**处的颜色，返回 "#RRGGBB"；越界给空串。
+     *
+     * 坐标口径和选区一样是"被截那块屏的屏幕坐标、逻辑像素"，内部按 DPR 换算到
+     * m_shot 的设备像素 —— 所以这里必须走 QImage，不能拿界面截图去猜（4K 上一个
+     * 逻辑像素是 DPR 个物理像素，猜就偏一整个像素）。
+     */
+    Q_INVOKABLE QString colorAt(qreal x, qreal y) const;
+
+    /*
+     * 放大镜那一小块：以 (x,y) 为中心取横 halfX、纵 halfY 个逻辑像素（含中心
+     * 那一格），按 scale 倍**最近邻**放大（要的就是像素方块看得清），返回可以
+     * 直接喂给 Image 的 URL。
+     *
+     * 横竖分开给：照 PixPin 量的那块框是 15x9 的长方形（165x99 设备像素），
+     * 不是正方形。
+     *
+     * 序号在 URL 里：提供者按 URL 缓存，不带序号的话鼠标移动了图还不换。
+     */
+    Q_INVOKABLE QString zoomUrl(qreal x, qreal y, int halfX, int halfY, int scale) const;
+
+    /*
+     * 选区窗口的光标形状（Qt::CursorShape 的整数值；-1 = 回到箭头）。
+     *
+     * 为什么不在 QML 里写 cursorShape：这块界面是 QQuickWidget 装的，实测
+     * 根层那块铺满屏的 MouseArea 明明收到了悬停（trace 里 containsMouse=1）、
+     * 也确实在整扇窗的最上面，但它设的光标**从没落到窗口上**（挂在控件上的
+     * 事件过滤器一条 CursorChange 都没收到），而工具条里那些小按钮的 HAND
+     * 却是好的 —— 同一个窗口里两种结果，说明这条路在这块全屏层上不成立。
+     * 直接在 C++ 侧设窗口光标，走的是 QWindow 自己的状态，不靠这套转发。
+     */
+    Q_INVOKABLE void setOverlayCursor(int shape);
+
     /* 固定到桌面：在选区原来的位置上开一块**可编辑**的贴图窗口（见 PinWindow） */
     Q_INVOKABLE void pinResult(const QRectF &sel, const QVariantList &texts);
 
@@ -219,7 +253,7 @@ private:
      */
     bool cancelPendingCapture();
     /* 建选区窗口（不显示）；窗口是复用的，见 prewarm */
-    QWidget *createOverlay();
+    QQuickView *createOverlay();
     void showOverlay();
     void restoreHost();
 
@@ -246,8 +280,8 @@ private:
     QQmlEngine *m_engine = nullptr;
     QWidget *m_host = nullptr;
 
-    /* 选区窗口（已经 close 过就置空；它自己 deleteLater，别的地方不要伸手） */
-    QWidget *m_overlay = nullptr;
+    /* 选区窗口：真正的 GPU 顶层窗（QQuickView），复用；见 createOverlay 的说明 */
+    QQuickView *m_overlay = nullptr;
     /* 待抓的那块屏（beginCapture 和 grabAndShow 之间传一下） */
     QScreen *m_screen = nullptr;
 
@@ -287,6 +321,12 @@ private:
      * 自检用它钉住"第一次抓屏不带空窗帧"这件事的前提条件。
      */
     bool m_overlayWarmed = false;
+    /*
+     * 选区窗口这会儿是不是**在屏幕上**（而不只是"映射了"）。
+     * 抓屏时它先在屏幕外露面画一帧，那一段 isVisible() 为真但人看不见，
+     * 而 overlayVisible() 的调用方要的是"人看得见"（见 Screenshot::overlayVisible）。
+     */
+    bool m_overlayOnScreen = false;
 
     /* 抓屏前把主窗口藏起来了，收尾时要放回去 */
     bool m_hiddenHost = false;

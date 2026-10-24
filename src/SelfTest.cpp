@@ -6105,9 +6105,15 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
                       .arg(marked.width()).arg(marked.height()));
 
             /* 第三条出口：固定到桌面（贴图窗口） */
-            QWidget *overlayWidget = nullptr;
-            for (QWidget *w : QApplication::topLevelWidgets()) {
-                if (w->windowTitle() == QStringLiteral("SmartClip 截图"))
+            /*
+             * 选区窗口现在是 QQuickView（是 QWindow，不是 QWidget）—— 从
+             * QApplication::topLevelWidgets() 里找它**永远是 null**，下面那条
+             * "贴图钉在选区原来的位置上"就会悄悄不跑（总数从 968 掉到 967
+             * 就是这么来的：门禁自己变哑，比红更难发现）。
+             */
+            QWindow *overlayWidget = nullptr;
+            for (QWindow *w : QGuiApplication::topLevelWindows()) {
+                if (w->title() == QStringLiteral("SmartClip 截图"))
                     overlayWidget = w;
             }
             shot->pinResult(sel, texts);
@@ -6139,7 +6145,7 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
                       QStringLiteral("截图：贴图窗口是置顶 + 无边框（钉在桌面上）"));
                 /* 就钉在选区原来那块地方（截图时框的是哪儿，贴出来在哪儿） */
                 if (overlayWidget) {
-                    const QPoint want = overlayWidget->pos() + QPoint(qRound(selX), qRound(selY));
+                    const QPoint want = overlayWidget->position() + QPoint(qRound(selX), qRound(selY));
                     check((pin->pos() - want).manhattanLength() <= 2,
                           QStringLiteral("截图：贴图窗口钉在选区原来的位置上"),
                           QStringLiteral("实际 %1,%2 / 期望 %3,%4")

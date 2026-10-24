@@ -6,14 +6,17 @@
 #include <QApplication>
 #include <QBuffer>
 #include <QClipboard>
+#include <QColor>
 #include <QCoreApplication>
 #include <QCursor>
 #include <QDateTime>
 #include <QDir>
 #include <QElapsedTimer>
+#include <QEventLoop>
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <algorithm>
 #include <QFont>
 #include <QGuiApplication>
 #include <QImage>
@@ -30,6 +33,7 @@
 #include <QQmlError>
 #include <QQuickImageProvider>
 #include <QQuickItem>
+#include <QQuickView>
 #include <QQuickWidget>
 #include <QScreen>
 #include <QStandardPaths>
@@ -117,6 +121,160 @@ static void shotTrace(const QString &what) {
     shotTrace(what.toUtf8().constData());
 }
 
+/*
+ * === 临时探针（SMARTCLIP_SHOT_PROF=1）：定位"截图时鼠标移动卡顿" ===
+ *
+ * 数两件事：选区那扇窗每秒**呈现**了多少帧（frameSwapped）、每秒到了多少次
+ * MouseMove。"鼠标事件没来"和"画面跟不上鼠标"是两种病，这两个数一分就开。
+ *
+ * 定位完删掉：这个类 + createOverlay / showOverlay 里各一处调用 + 下面那个函数。
+ */
+class ShotProfiler final : public QObject {
+public:
+    explicit ShotProfiler(QWindow *target) : QObject(target) {
+        m_clock.start();
+        if (auto *win = qobject_cast<QQuickWindow *>(target)) {
+            connect(win, &QQuickWindow::frameSwapped, this, [this]() {
+                const qint64 now = m_clock.elapsed();
+                if (m_lastSwap >= 0) {
+                    m_gaps.append(now - m_lastSwap);
+                    if (now - m_lastSwap > m_worstGap)
+                        m_worstGap = now - m_lastSwap;
+                }
+                m_lastSwap = now;
+                ++m_swaps;
+            });
+        }
+        /* 每秒报一次：QWindow 上没有 QEvent::Paint，报告不能挂在 Paint 里 */
+        auto *tick = new QTimer(this);
+        tick->setInterval(1000);
+        connect(tick, &QTimer::timeout, this, [this, target]() {
+            std::sort(m_gaps.begin(), m_gaps.end());
+            shotTrace(QStringLiteral("prof t=%1 swapped=%2/s moves=%3/s 帧间隔 中位=%4ms 最差=%5ms 可见=%6")
+                          .arg(m_clock.elapsed()).arg(m_swaps).arg(m_moves)
+                          .arg(m_gaps.isEmpty() ? 0 : m_gaps[m_gaps.size() / 2])
+                          .arg(m_worstGap).arg(target->isVisible() ? 1 : 0));
+            m_swaps = 0;
+            m_moves = 0;
+            m_gaps.clear();
+            m_worstGap = 0;      /* 每秒归零：不然"最差"永远是开机到现在的空档 */
+        });
+        tick->start();
+    }
+
+protected:
+    bool eventFilter(QObject *, QEvent *event) override
+    {
+        if (event->type() == QEvent::Paint) {
+            ++m_paints;
+        } else if (event->type() == QEvent::MouseMove) {
+            ++m_moves;
+        }
+        return false;
+    }
+
+private:
+    QElapsedTimer m_clock;
+    int m_paints = 0;
+    int m_moves = 0;
+    int m_swaps = 0;
+    qint64 m_lastSwap = -1;
+    qint64 m_worstGap = 0;
+    QList<qint64> m_gaps;
+};
+
+static void shotFrameBenchmark(QQuickWindow *view) {
+    if (!view)
+        return;
+    QElapsedTimer t;
+    t.start();
+    for (int i = 0; i < 8; ++i) {
+        const QImage frame = view->grabWindow();
+        shotTrace(QStringLiteral("prof BENCH grabFramebuffer#%1 = %2ms (%3x%4)")
+                      .arg(i).arg(t.restart())
+                      .arg(frame.width()).arg(frame.height()));
+    }
+}
+
+/*
+ * 几乎整块挪到屏幕外、只在**左边缘留 1 像素**的那份几何（尺寸一模一样）。
+ *
+ * 幕外这段是给 GPU 窗"先把这一帧画完呈现掉"用的，而**完全**在屏外的窗口
+ * DWM 根本不给呈现：实测 presentOneFrame 等满 200ms 超时、frameSwapped 一次没来
+ * （留 1px 在屏内就照样呈现，同一次运行里屏内那一次是 93ms swapped=1）。
+ * 1 像素压在抓到的画面上，看不见。
+ */
+static QRect offscreenRect(const QRect &r) {
+    return QRect(r.x() - r.width() + 1, r.y(), r.width(), r.height());
+}
+
+/*
+ * 临时探针（SMARTCLIP_SHOT_OFFCHK=1）：此刻窗口表面里是不是**刚抓到的那张图**。
+ *
+ * 只回答一个问题：幕外那一帧到底画到位没有 —— 按网格采样，数"整块黑"和
+ * "和抓屏一致"各多少个点。同一次调用里会在两个时刻各量一遍：present 之前
+ * （该是黑的，这条判据能红 = 这把尺子分得开）和 present 之后（该是抓屏）。
+ *
+ * 定位完删掉：这个函数 + showOverlay 里那两处调用（和 ShotProfiler 一起清）。
+ */
+static void shotSurfaceCheck(QQuickWindow *w, const QImage &shot, const QString &when) {
+    if (!w)
+        return;
+    const QImage surface = w->grabWindow().convertToFormat(QImage::Format_RGB32);
+    const QImage ref = shot.convertToFormat(QImage::Format_RGB32);
+    int n = 0, black = 0, same = 0;
+    if (!surface.isNull() && !ref.isNull()) {
+        for (int y = 8; y + 8 < surface.height(); y += qMax(1, surface.height() / 36)) {
+            for (int x = 8; x + 8 < surface.width(); x += qMax(1, surface.width() / 64)) {
+                const QRgb a = surface.pixel(x, y);
+                ++n;
+                if (qRed(a) <= 8 && qGreen(a) <= 8 && qBlue(a) <= 8)
+                    ++black;
+                if (x < ref.width() && y < ref.height()) {
+                    const QRgb b = ref.pixel(x, y);
+                    if (qAbs(qRed(a) - qRed(b)) <= 8 && qAbs(qGreen(a) - qGreen(b)) <= 8
+                        && qAbs(qBlue(a) - qBlue(b)) <= 8)
+                        ++same;
+                }
+            }
+        }
+    }
+    shotTrace(QStringLiteral("OFFCHK %1 采样=%2 纯黑=%3 与抓屏一致=%4 表面=%5x%6 抓屏=%7x%8")
+                  .arg(when).arg(n).arg(black).arg(same)
+                  .arg(surface.width()).arg(surface.height())
+                  .arg(ref.width()).arg(ref.height()));
+}
+
+/*
+ * 让"当前这一帧"真的呈现出去。
+ *
+ * QWindow 没有 QWidget::repaint() 那种同步刷一次的办法 —— 只能 requestUpdate
+ * 之后等 frameSwapped。收工前要用它把窗口表面刷成干净画面（下次 show 时系统
+ * 先呈现的就是那张残留表面，见 endCapture 那段）。
+ */
+static void presentOneFrame(QWindow *w, int timeoutMs = 200) {
+    if (!w)
+        return;
+    /* 临时探针：这一帧到底是等到的，还是超时等不到的 */
+    QElapsedTimer probe;
+    probe.start();
+    bool swapped = false;
+    QEventLoop loop;
+    QTimer kill;
+    kill.setSingleShot(true);
+    QObject::connect(&kill, &QTimer::timeout, &loop, &QEventLoop::quit);
+    if (auto *win = qobject_cast<QQuickWindow *>(w))
+        QObject::connect(win, &QQuickWindow::frameSwapped, &loop, [&loop, &swapped]() {
+            swapped = true;
+            loop.quit();
+        });
+    kill.start(timeoutMs);
+    w->requestUpdate();
+    loop.exec();
+    shotTrace(QStringLiteral("presentOneFrame %1ms swapped=%2")
+                  .arg(probe.elapsed()).arg(swapped ? 1 : 0));
+}
+
 void Screenshot::uiTrace(const QString &what) { shotTrace(what); }
 
 void Screenshot::setHostWidget(QWidget *host) {
@@ -186,7 +344,7 @@ void Screenshot::beginCapture() {
         /* 已经开着（用户又按了一次快捷键）：把选区窗口提到前面就够了 */
         if (m_overlay) {
             m_overlay->raise();
-            m_overlay->activateWindow();
+            m_overlay->requestActivate();
         }
         return;
     }
@@ -284,39 +442,43 @@ void Screenshot::grabAndShow() {
 /*
  * 建选区窗口（不显示）。
  *
- * 内容用 QQuickWidget 装 —— 和主窗口一样，挂的是**同一个引擎**
- * （见 setEngine 的说明），所以 QML 里直接用 Shot 这个单例。
+ * 2026-10-24 从"无边框 QWidget + QQuickWidget"换成真正的 GPU 顶层窗 QQuickView。
+ * 换的理由是量出来的：QQuickWidget 每一帧要把整块 4K 场景渲到离屏表面、读回来、
+ * 再 blit 进控件 —— 一次同步渲染 17~20ms（3840x2160 连测 8 次），框选拖动时界面
+ * 只能跑到 ~45 帧/秒，还偶发 56~88ms 的顿；同一台机同一块屏，真顶层窗画同样的
+ * 4K 内容每帧 0~6ms（QSG_RENDER_TIMING 量的）。主窗口不能这么换（里面嵌着原生
+ * QScintilla 子窗），这扇窗里没有原生子窗，所以换得干净。
  *
+ * 引擎还是**共用**那一个（见 setEngine），所以 QML 里照样用 Shot 这个单例。
  * 窗口是**复用**的（见 prewarm）：建好之后一直留着，抓屏时只换图 + show。
  */
-QWidget *Screenshot::createOverlay() {
-    auto *overlay = new QWidget(nullptr, Qt::Window | Qt::FramelessWindowHint
-                                             | Qt::WindowStaysOnTopHint);
-    overlay->setWindowTitle(QStringLiteral("SmartClip 截图"));
-
-    auto *view = new QQuickWidget(m_engine, overlay);
-    view->setResizeMode(QQuickWidget::SizeRootObjectToView);
+QQuickView *Screenshot::createOverlay() {
+    auto *view = new QQuickView(m_engine, nullptr);
+    view->setFlags(Qt::Window | Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint);
+    view->setTitle(QStringLiteral("SmartClip 截图"));
+    view->setResizeMode(QQuickView::SizeRootObjectToView);
     /* 底图自己铺满，这里的清屏色只在图还没解码出来时露一下 */
-    view->setClearColor(Qt::black);
-
-    auto *layout = new QVBoxLayout(overlay);
-    layout->setContentsMargins(0, 0, 0, 0);
-    layout->setSpacing(0);
-    layout->addWidget(view);
+    view->setColor(Qt::black);
 
     view->setSource(QUrl(QStringLiteral("qrc:/qt/qml/SmartClip/qml/screenshot/CaptureOverlay.qml")));
-    if (view->status() == QQuickWidget::Error) {
+    if (view->status() == QQuickView::Error) {
         for (const QQmlError &error : view->errors())
             qWarning("%s", qPrintable(error.toString()));
-        delete overlay;
+        delete view;
         return nullptr;
+    }
+
+    /* 临时探针（SMARTCLIP_SHOT_PROF=1，见 ShotProfiler） */
+    if (qEnvironmentVariableIsSet("SMARTCLIP_SHOT_PROF")) {
+        auto *prof = new ShotProfiler(view);
+        view->installEventFilter(prof);
     }
 
     /*
      * 以 this 作为上下文接：Screenshot 先没掉时这条连接自动断，
      * 免得进程退出时窗口被拆还回头调已经析构的对象。
      */
-    connect(overlay, &QObject::destroyed, this, [this]() {
+    connect(view, &QObject::destroyed, this, [this]() {
         m_overlay = nullptr;
         if (m_active) {
             m_active = false;
@@ -325,7 +487,7 @@ QWidget *Screenshot::createOverlay() {
             emit stateChanged();
         }
     });
-    return overlay;
+    return view;
 }
 
 void Screenshot::prewarm() {
@@ -374,14 +536,17 @@ void Screenshot::prewarm() {
          * 挪到屏幕外（负数坐标，多屏环境里合法）就看不见；WA_ShowWithoutActivating
          * 保证不抢用户窗口的焦点。
          */
-        m_overlay->setAttribute(Qt::WA_ShowWithoutActivating, true);
-        m_overlay->setGeometry(QRect(-rect.width() - 10, 0, rect.width(), rect.height()));
+        m_overlay->setGeometry(offscreenRect(rect));
         m_overlay->show();
-        if (auto *view = m_overlay->findChild<QQuickWidget *>()) {
-            view->grabFramebuffer();
-            view->repaint();
+        presentOneFrame(m_overlay);       /* 渲一帧并真的呈现出去：着色器、纹理都在这儿预热 */
+        /*
+         * QWindow 没有 WA_ShowWithoutActivating —— 幕外这一下 show 会抢一次前台。
+         * 预热只在启动时做一遍，抢完立刻把焦点还给主窗口，用户看不出差别。
+         */
+        if (m_host) {
+            m_host->raise();
+            m_host->activateWindow();
         }
-        m_overlay->setAttribute(Qt::WA_ShowWithoutActivating, false);
 
         /*
          * 关键第二步：**摆回主屏之后，趁窗口还可见再画一帧，然后才藏**。
@@ -398,16 +563,11 @@ void Screenshot::prewarm() {
          * （WA_ShowWithoutActivating，不抢焦点），用户看不见。
          */
         m_overlay->setGeometry(rect);   /* 先摆回主屏，第一次抓屏直接就用它 */
-        if (auto *view = m_overlay->findChild<QQuickWidget *>()) {
-            view->grabFramebuffer();
-            view->repaint();
-        }
+        presentOneFrame(m_overlay);
         shotTrace("prewarm: 已在主屏几何上重画一帧（窗口表面不再对应屏幕外几何）");
         m_overlay->hide();
         m_overlayWarmed = true;
     }
-    if (auto *view = m_overlay->findChild<QQuickWidget *>())
-        view->grabFramebuffer();
 }
 
 void Screenshot::showOverlay() {
@@ -422,8 +582,12 @@ void Screenshot::showOverlay() {
         return;
     }
 
-    /* 复用同一个窗口：先摆到这块屏上，再把上一次的标注清干净 */
-    m_overlay->setGeometry(m_screenRect);
+    /*
+     * 复用同一个窗口：先摆到**屏幕外**，把新底图喂进去、画完一帧，再整窗挪进来
+     * （挪进来那段在下面，紧接在"排队里的按键抽干净"之后）。
+     */
+    m_overlay->setGeometry(offscreenRect(m_screenRect));
+    m_overlayOnScreen = false;
     shotTrace(QStringLiteral("  window geometry %1,%2 %3x%4")
                   .arg(m_screenRect.x()).arg(m_screenRect.y())
                   .arg(m_screenRect.width()).arg(m_screenRect.height()));
@@ -437,15 +601,19 @@ void Screenshot::showOverlay() {
                                   Q_ARG(QVariant, QVariant::fromValue(QRectF(m_screenRect))));
 
     /*
-     * show() 之前要先**强制同步渲染一帧**，这一步不能省。
+     * 幕外露面 + 呈现一帧：这一拍要在挪进来之前做完，两件事都靠它。
      *
-     * QQuickWidget 的帧是在渲染线程上异步出的：窗口重新显示时，第一帧会先呈现
-     * **上一次渲染好的那张** —— 也就是上一轮抓屏时用户框的那块选区，于是"上次的
-     * 截图框轮廓"又闪一下（实测：第二次抓屏时旧框左边线会亮 3 帧、约 14ms）。
-     * grabFramebuffer() 走一次完整渲染，把这帧换成新的；之后 show() 呈现的
-     * 就是干净的全屏选区。
+     * 一、**新底图先画好**。真 GPU 顶层窗重新显示时，DWM 交出来的还是表面里
+     * 上一帧（预热那次画的是"底图还没解码"的整屏），新抓的那一张要在 GPU 上
+     * 解码 + 上传 + 渲染才换得掉。实测第一次抓屏这段是 55.6ms（144Hz 约 8 帧），
+     * 用户看到的就是"按下快捷键、屏幕黑一下"（HEAD 的 QQuickWidget 路径没有
+     * 这一笔 —— 那时 show 之前有一次 grabFramebuffer，新画面已经刷进窗口表面）。
+     * 这里把同一件事挪到幕外做：画面摆到屏外画完再进来，进来那一刻就是真截图。
      *
-     * 但这次同步渲染有代价，而且代价正好落在"取消"这条路上（真机插桩量出来的，
+     * 二、旧框残留（上一轮用户框的那块选区）同样在这拍被新画面盖掉，
+     * 原来那次 grabFramebuffer 承担的就是这个。
+     *
+     * 但这一拍的代价正好落在"取消"这条路上（真机插桩量出来的，
      * Ctrl+Alt+A 之后 20ms 按 Esc）：
      *
      *    0  beginCapture
@@ -470,8 +638,27 @@ void Screenshot::showOverlay() {
      * 一截延迟）；队列里有东西就抽出来，抽完再多抽一小会儿（键事件可能分几条
      * 陆续到）。
      */
-    if (auto *view = m_overlay->findChild<QQuickWidget *>())
-        view->grabFramebuffer();
+    /*
+     * 幕外把这一帧画完、呈现掉。
+     *
+     * 原来这一步是 grabFramebuffer()（在 QQuickWidget 上把新画面刷进控件的离屏图）。
+     * 换成真窗口后它只剩"从 GPU 读回一张 4K 图"，实测 27~31ms，纯浪费；要的只是
+     * "这一帧确实到了窗口表面"，所以改成 requestUpdate + 等 frameSwapped。
+     */
+    shotTrace("show()幕外 BEFORE");
+    m_overlay->show();
+    shotTrace("show()幕外 AFTER: 屏外可见");
+    /* 临时探针（SMARTCLIP_SHOT_OFFCHK=1）：刚映射完、还没画这一帧时表面是什么 */
+    if (qEnvironmentVariableIsSet("SMARTCLIP_SHOT_OFFCHK"))
+        shotSurfaceCheck(m_overlay, m_shot, QStringLiteral("幕外 show 之后 / present 之前"));
+    presentOneFrame(m_overlay);
+    shotTrace("presentOneFrame 回来：新底图已呈现（还在屏外）");
+    /* 临时探针（SMARTCLIP_SHOT_OFFCHK=1）：这一帧到位没有 */
+    if (qEnvironmentVariableIsSet("SMARTCLIP_SHOT_OFFCHK")) {
+        shotSurfaceCheck(m_overlay, m_shot, QStringLiteral("presentOneFrame 之后"));
+        cancelCapture();
+        return;
+    }
 
     {
         constexpr int kGraceMs = 20;   /* 见好就收：抽到键之后再等这么久就够 */
@@ -504,18 +691,32 @@ void Screenshot::showOverlay() {
         }
     }
 
-    /* 上面那一下要是把它取消了（用户按 Esc 取消），窗口就别露了 */
+    /*
+     * 抽到 Esc 那一发的话上面已经收工了（endCapture 把窗口藏回去），这里连幕外
+     * 那扇都不该再露着 —— 直接返回。
+     */
     if (!m_active) {
         return;
     }
 
-    shotTrace("show() BEFORE");
-    m_overlay->show();
-    shotTrace("show() AFTER: window visible");
+    /* 内容已经在幕外画好了，现在只是把整窗挪到目标屏上 */
+    shotTrace("挪进来 BEFORE");
+    m_overlay->setGeometry(m_screenRect);
+    m_overlayOnScreen = true;
+    shotTrace("挪进来 AFTER: 用户可见");
     m_overlay->raise();
-    m_overlay->activateWindow();
-    if (auto *view = m_overlay->findChild<QQuickWidget *>())
-        view->setFocus();
+    m_overlay->requestActivate();
+    if (QQuickItem *ci = m_overlay->contentItem())
+        ci->forceActiveFocus();
+
+    /* 临时探针（SMARTCLIP_SHOT_PROF=1，见 ShotProfiler）：整窗 repaint 一次的代价 */
+    if (qEnvironmentVariableIsSet("SMARTCLIP_SHOT_PROF")) {
+        QTimer::singleShot(300, this, [this]() {
+            if (!m_active || !m_overlay)
+                return;
+            shotFrameBenchmark(m_overlay);
+        });
+    }
 
     /*
      * 窗口真的稳住了再让界面把选区边框画出来（见 CaptureOverlay.qml 的 overlayReady）。
@@ -623,12 +824,10 @@ void Screenshot::endCapture() {
          *   repaint()         —— 把刚渲染好的这帧真正推到窗口上。
          * 只做其中任何一个都还剩 1~3 帧残留（都实测过）。
          */
-        if (auto *view = m_overlay->findChild<QQuickWidget *>()) {
-            view->grabFramebuffer();
-            view->repaint();
-        }
+        presentOneFrame(m_overlay);
         shotTrace("endCapture: hide() now");
         m_overlay->hide();      /* 只是藏起来，留着下次复用（见 prewarm） */
+        m_overlayOnScreen = false;
         shotTrace("endCapture: hidden");
     }
 
@@ -733,6 +932,49 @@ void Screenshot::copyText(const QString &text) const {
         QGuiApplication::clipboard()->setText(text);
 }
 
+/*
+ * 取色 / 放大镜的坐标口径和选区完全一样：QML 那侧的 (x,y) 是"被截那块屏的屏幕
+ * 坐标、逻辑像素"（见 CaptureOverlay.qml 文件头），乘 DPR 才是 m_shot 的设备像素。
+ * 4K 加 150% 缩放下一个逻辑像素是 1.5 个物理像素，**不乘 DPR 就会偏半个像素**，
+ * 读出来的颜色是隔壁那列的。
+ */
+QString Screenshot::colorAt(qreal x, qreal y) const {
+    if (m_shot.isNull())
+        return QString();
+    const int dx = qRound(x * m_dpr);
+    const int dy = qRound(y * m_dpr);
+    if (dx < 0 || dy < 0 || dx >= m_shot.width() || dy >= m_shot.height())
+        return QString();
+    return m_shot.pixelColor(dx, dy).name(QColor::HexRgb).toUpper();
+}
+
+void Screenshot::setOverlayCursor(int shape) {
+    if (!m_overlay)
+        return;
+    if (shape < 0)
+        m_overlay->unsetCursor();
+    else
+        m_overlay->setCursor(QCursor(static_cast<Qt::CursorShape>(shape)));
+}
+
+QString Screenshot::zoomUrl(qreal x, qreal y, int halfX, int halfY, int scale) const {
+    if (m_shot.isNull() || halfX < 1 || halfY < 1 || scale < 1)
+        return QString();
+    const int dx = qRound(x * m_dpr);
+    const int dy = qRound(y * m_dpr);
+    const int hx = qRound(halfX * m_dpr);
+    const int hy = qRound(halfY * m_dpr);
+    /*
+     * 贴着屏幕边就整个不给：宁可放大镜闪一下，也不要拿一块错位半格的图当
+     * "光标正中间那个像素的颜色"。
+     */
+    if (dx - hx < 0 || dy - hy < 0
+        || dx + hx > m_shot.width() || dy + hy > m_shot.height())
+        return QString();
+    return QStringLiteral("image://shot/zoom%1-%2-%3-%4-%5-%6")
+        .arg(m_serial).arg(dx).arg(dy).arg(hx).arg(hy).arg(scale);
+}
+
 QImage Screenshot::compose(const QRectF &sel, const QVariantList &texts) const {
     QImage out = cropSelection(sel);
     if (out.isNull())
@@ -801,7 +1043,7 @@ bool Screenshot::saveResultAs(const QRectF &sel, const QVariantList &texts) {
     /* 同样是嵌套事件循环，期间不许关选区窗口 —— 见 endCapture 的说明 */
     m_modalOpen = true;
     const QString path = QFileDialog::getSaveFileName(
-        m_overlay ? m_overlay : m_host, QStringLiteral("保存截图"),
+        m_host, QStringLiteral("保存截图"),
         dir + QDir::separator() + defaultFileName(),
         QStringLiteral("PNG 图片 (*.png);;JPEG 图片 (*.jpg);;所有文件 (*.*)"));
     m_modalOpen = false;
@@ -809,7 +1051,7 @@ bool Screenshot::saveResultAs(const QRectF &sel, const QVariantList &texts) {
         return false;
 
     if (!image.save(path)) {
-        QMessageBox::warning(m_overlay ? m_overlay : m_host, QStringLiteral("截图"),
+        QMessageBox::warning(m_host, QStringLiteral("截图"),
                              QStringLiteral("写文件失败：\n") + path);
         return false;
     }
@@ -877,17 +1119,47 @@ QWidget *Screenshot::lastPinned() const {
 QObject *Screenshot::overlayRoot() const {
     if (!m_overlay)
         return nullptr;
-    auto *view = m_overlay->findChild<QQuickWidget *>();
-    return view ? view->rootObject() : nullptr;
+    return m_overlay->rootObject();
 }
 
 bool Screenshot::overlayVisible() const {
-    return m_overlay && m_overlay->isVisible();
+    /*
+     * "用户看得见"而不是"窗口映射了"：抓屏时窗口先在**幕外**露面画一帧
+     * （见 showOverlay），那一段窗口是可见的但人在屏幕上看不到 —— 而调用方
+     * （eventFilter 里那条"窗口还没露脸，这一下 Esc 算取消"）要的就是这个意思。
+     */
+    return m_overlay && m_overlay->isVisible() && m_overlayOnScreen;
 }
 
 QImage Screenshot::imageForId(const QString &id) const {
     /* "full<serial>"：序号只是用来绕开 QQuickPixmapCache 的，取图时忽略 */
     if (id.startsWith(QLatin1String("full")))
         return m_shot;
+
+    /*
+     * "zoom<serial>-<设备x>-<设备y>-<半宽>-<半高>-<放大倍数>"：取色放大镜那一小块。
+     * 最近邻（FastTransformation）是重点 —— 要的就是像素方块看得清，
+     * 平滑插值会把边界糊成一片，反而看不出这格到底是什么色。
+     */
+    if (id.startsWith(QLatin1String("zoom"))) {
+        const QStringList f = id.mid(4).split(QLatin1Char('-'));
+        if (f.size() != 6 || m_shot.isNull())
+            return QImage();
+        bool okX = false, okY = false, okHX = false, okHY = false, okS = false;
+        const int dx = f.at(1).toInt(&okX);
+        const int dy = f.at(2).toInt(&okY);
+        const int hx = f.at(3).toInt(&okHX);
+        const int hy = f.at(4).toInt(&okHY);
+        const int scale = f.at(5).toInt(&okS);
+        if (!okX || !okY || !okHX || !okHY || !okS || hx < 1 || hy < 1 || scale < 1)
+            return QImage();
+        /* 含中心那一格：横 2*hx+1、纵 2*hy+1 个源像素 */
+        const QRect src(dx - hx, dy - hy, hx * 2 + 1, hy * 2 + 1);
+        if (!m_shot.rect().contains(src))
+            return QImage();
+        return m_shot.copy(src)
+            .scaled(src.width() * scale, src.height() * scale,
+                    Qt::KeepAspectRatioByExpanding, Qt::FastTransformation);
+    }
     return QImage();
 }
