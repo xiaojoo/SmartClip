@@ -13,7 +13,6 @@
 #include <QDir>
 #include <QElapsedTimer>
 #include <QEventLoop>
-#include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <algorithm>
@@ -49,6 +48,8 @@
 
 #if defined(Q_OS_WIN)
 #  include <windows.h>
+#  include <dwmapi.h>
+#  include <uiautomation.h>
 #endif
 
 namespace {
@@ -85,115 +86,18 @@ private:
 Screenshot::Screenshot(QObject *parent) : QObject(parent) {}
 
 Screenshot::~Screenshot() {
+    /*
+     * 探测线程先收掉再拆别的：那条线程上排着的活儿回来时要往 this 投一次队列
+     * 调用，人没了再投就是踩空。等它把排着的活儿跑完（真碰上提供者卡死等不到，
+     * 3 秒之后也不再等 —— 这是进程退出路径）。
+     */
+    if (m_elementThread) {
+        m_elementThread->quit();
+        m_elementThread->wait(3000);
+    }
     /* 选区窗口是复用的一直留着（见 prewarm），退场时自己收 */
     delete m_overlay;
     m_overlay = nullptr;
-}
-
-/*
- * === 临时诊断（定位"取消截图时全屏闪一下边框"）===
- *
- * 把截图状态机 + 每一次 Esc 的到达 + 选区窗口的几何变化都带毫秒时间戳记到
- * **当前工作目录**下的 shot-trace.log。复现一次，这个文件就能说明：
- * 那一下 Esc 落在哪一段、当时窗口可见没有、边框画出来没有、窗口被摆到哪儿。
- * 定位完删掉：这个函数 + 所有 shotTrace(...) 调用 + <QFile> 这个 include。
- */
-static void shotTrace(const char *what) {
-    static QElapsedTimer clock;
-    static bool started = false;
-    if (!started) {
-        clock.start();
-        started = true;
-        QFile::remove(QStringLiteral("shot-trace.log"));
-    }
-    QFile f(QStringLiteral("shot-trace.log"));
-    if (f.open(QIODevice::Append | QIODevice::Text)) {
-        f.write(QStringLiteral("%1  %2\n")
-                    .arg(clock.elapsed(), 6)
-                    .arg(QLatin1String(what))
-                    .toUtf8());
-        f.flush();
-        f.close();
-    }
-}
-
-static void shotTrace(const QString &what) {
-    shotTrace(what.toUtf8().constData());
-}
-
-/*
- * === 临时探针（SMARTCLIP_SHOT_PROF=1）：定位"截图时鼠标移动卡顿" ===
- *
- * 数两件事：选区那扇窗每秒**呈现**了多少帧（frameSwapped）、每秒到了多少次
- * MouseMove。"鼠标事件没来"和"画面跟不上鼠标"是两种病，这两个数一分就开。
- *
- * 定位完删掉：这个类 + createOverlay / showOverlay 里各一处调用 + 下面那个函数。
- */
-class ShotProfiler final : public QObject {
-public:
-    explicit ShotProfiler(QWindow *target) : QObject(target) {
-        m_clock.start();
-        if (auto *win = qobject_cast<QQuickWindow *>(target)) {
-            connect(win, &QQuickWindow::frameSwapped, this, [this]() {
-                const qint64 now = m_clock.elapsed();
-                if (m_lastSwap >= 0) {
-                    m_gaps.append(now - m_lastSwap);
-                    if (now - m_lastSwap > m_worstGap)
-                        m_worstGap = now - m_lastSwap;
-                }
-                m_lastSwap = now;
-                ++m_swaps;
-            });
-        }
-        /* 每秒报一次：QWindow 上没有 QEvent::Paint，报告不能挂在 Paint 里 */
-        auto *tick = new QTimer(this);
-        tick->setInterval(1000);
-        connect(tick, &QTimer::timeout, this, [this, target]() {
-            std::sort(m_gaps.begin(), m_gaps.end());
-            shotTrace(QStringLiteral("prof t=%1 swapped=%2/s moves=%3/s 帧间隔 中位=%4ms 最差=%5ms 可见=%6")
-                          .arg(m_clock.elapsed()).arg(m_swaps).arg(m_moves)
-                          .arg(m_gaps.isEmpty() ? 0 : m_gaps[m_gaps.size() / 2])
-                          .arg(m_worstGap).arg(target->isVisible() ? 1 : 0));
-            m_swaps = 0;
-            m_moves = 0;
-            m_gaps.clear();
-            m_worstGap = 0;      /* 每秒归零：不然"最差"永远是开机到现在的空档 */
-        });
-        tick->start();
-    }
-
-protected:
-    bool eventFilter(QObject *, QEvent *event) override
-    {
-        if (event->type() == QEvent::Paint) {
-            ++m_paints;
-        } else if (event->type() == QEvent::MouseMove) {
-            ++m_moves;
-        }
-        return false;
-    }
-
-private:
-    QElapsedTimer m_clock;
-    int m_paints = 0;
-    int m_moves = 0;
-    int m_swaps = 0;
-    qint64 m_lastSwap = -1;
-    qint64 m_worstGap = 0;
-    QList<qint64> m_gaps;
-};
-
-static void shotFrameBenchmark(QQuickWindow *view) {
-    if (!view)
-        return;
-    QElapsedTimer t;
-    t.start();
-    for (int i = 0; i < 8; ++i) {
-        const QImage frame = view->grabWindow();
-        shotTrace(QStringLiteral("prof BENCH grabFramebuffer#%1 = %2ms (%3x%4)")
-                      .arg(i).arg(t.restart())
-                      .arg(frame.width()).arg(frame.height()));
-    }
 }
 
 /*
@@ -209,43 +113,6 @@ static QRect offscreenRect(const QRect &r) {
 }
 
 /*
- * 临时探针（SMARTCLIP_SHOT_OFFCHK=1）：此刻窗口表面里是不是**刚抓到的那张图**。
- *
- * 只回答一个问题：幕外那一帧到底画到位没有 —— 按网格采样，数"整块黑"和
- * "和抓屏一致"各多少个点。同一次调用里会在两个时刻各量一遍：present 之前
- * （该是黑的，这条判据能红 = 这把尺子分得开）和 present 之后（该是抓屏）。
- *
- * 定位完删掉：这个函数 + showOverlay 里那两处调用（和 ShotProfiler 一起清）。
- */
-static void shotSurfaceCheck(QQuickWindow *w, const QImage &shot, const QString &when) {
-    if (!w)
-        return;
-    const QImage surface = w->grabWindow().convertToFormat(QImage::Format_RGB32);
-    const QImage ref = shot.convertToFormat(QImage::Format_RGB32);
-    int n = 0, black = 0, same = 0;
-    if (!surface.isNull() && !ref.isNull()) {
-        for (int y = 8; y + 8 < surface.height(); y += qMax(1, surface.height() / 36)) {
-            for (int x = 8; x + 8 < surface.width(); x += qMax(1, surface.width() / 64)) {
-                const QRgb a = surface.pixel(x, y);
-                ++n;
-                if (qRed(a) <= 8 && qGreen(a) <= 8 && qBlue(a) <= 8)
-                    ++black;
-                if (x < ref.width() && y < ref.height()) {
-                    const QRgb b = ref.pixel(x, y);
-                    if (qAbs(qRed(a) - qRed(b)) <= 8 && qAbs(qGreen(a) - qGreen(b)) <= 8
-                        && qAbs(qBlue(a) - qBlue(b)) <= 8)
-                        ++same;
-                }
-            }
-        }
-    }
-    shotTrace(QStringLiteral("OFFCHK %1 采样=%2 纯黑=%3 与抓屏一致=%4 表面=%5x%6 抓屏=%7x%8")
-                  .arg(when).arg(n).arg(black).arg(same)
-                  .arg(surface.width()).arg(surface.height())
-                  .arg(ref.width()).arg(ref.height()));
-}
-
-/*
  * 让"当前这一帧"真的呈现出去。
  *
  * QWindow 没有 QWidget::repaint() 那种同步刷一次的办法 —— 只能 requestUpdate
@@ -255,27 +122,17 @@ static void shotSurfaceCheck(QQuickWindow *w, const QImage &shot, const QString 
 static void presentOneFrame(QWindow *w, int timeoutMs = 200) {
     if (!w)
         return;
-    /* 临时探针：这一帧到底是等到的，还是超时等不到的 */
-    QElapsedTimer probe;
-    probe.start();
-    bool swapped = false;
     QEventLoop loop;
     QTimer kill;
     kill.setSingleShot(true);
     QObject::connect(&kill, &QTimer::timeout, &loop, &QEventLoop::quit);
     if (auto *win = qobject_cast<QQuickWindow *>(w))
-        QObject::connect(win, &QQuickWindow::frameSwapped, &loop, [&loop, &swapped]() {
-            swapped = true;
-            loop.quit();
-        });
+        QObject::connect(win, &QQuickWindow::frameSwapped, &loop, &QEventLoop::quit);
     kill.start(timeoutMs);
     w->requestUpdate();
     loop.exec();
-    shotTrace(QStringLiteral("presentOneFrame %1ms swapped=%2")
-                  .arg(probe.elapsed()).arg(swapped ? 1 : 0));
 }
 
-void Screenshot::uiTrace(const QString &what) { shotTrace(what); }
 
 void Screenshot::setHostWidget(QWidget *host) {
     m_host = host;
@@ -311,15 +168,10 @@ bool Screenshot::eventFilter(QObject *watched, QEvent *event) {
     if (event->type() == QEvent::KeyPress) {
         auto *key = static_cast<QKeyEvent *>(event);
         if (key->key() == Qt::Key_Escape) {
-            shotTrace(QStringLiteral("Esc ARRIVED: pending=%1 active=%2 visible=%3")
-                          .arg(m_pending ? 1 : 0).arg(m_active ? 1 : 0)
-                          .arg(overlayVisible() ? 1 : 0));
             if (m_pending || (m_active && !overlayVisible())) {
-                shotTrace("  -> caught app-level (window not visible) -> cancel");
                 cancelCapture();
                 return true;   /* 吃掉，别让它再下去触发系统提示音 */
             }
-            shotTrace("  -> passed to overlay window (QML Shortcut handles it)");
         }
     }
     return QObject::eventFilter(watched, event);
@@ -339,7 +191,6 @@ void Screenshot::setEngine(QQmlEngine *engine) {
 }
 
 void Screenshot::beginCapture() {
-    shotTrace("beginCapture");
     if (m_active || m_pending) {
         /* 已经开着（用户又按了一次快捷键）：把选区窗口提到前面就够了 */
         if (m_overlay) {
@@ -401,7 +252,6 @@ void Screenshot::beginCapture() {
 }
 
 void Screenshot::grabAndShow() {
-    shotTrace(m_pending ? "grabAndShow(pending)" : "grabAndShow(CANCELLED)");
     /*
      * 延时这段窗口期里用户取消了（见 cancelCapture）：主窗口已经放回来了，
      * 这里就什么都别做 —— 尤其**不能** show() 选区窗口，否则就是"取消截图时
@@ -432,11 +282,307 @@ void Screenshot::grabAndShow() {
     m_shot = shot.toImage();
     m_dpr = shot.devicePixelRatio() > 0 ? shot.devicePixelRatio() : 1.0;
     m_screenRect = screen->geometry();
+    collectWindows();
     ++m_serial;
     m_active = true;
     emit stateChanged();
 
     showOverlay();
+}
+
+#if defined(Q_OS_WIN)
+/* EnumWindows 的回调：把看得见、有分量的窗口矩形按 z 序抄进清单 */
+struct ShotWindowScan {
+    QList<ShotWindow> *out = nullptr;
+    /* 我们自己的选区窗口（复用的，别把自己框进去） */
+    HWND skip = nullptr;
+    /*
+     * 主窗口：走"抓屏排除"那条路时它**没被藏**、只是不出现在图里 —— 清单里
+     * 留着它，用户就会框到一块图上根本没有的空边（藏起来那条路它本来就枚举不到）。
+     */
+    HWND skipHost = nullptr;
+};
+
+BOOL CALLBACK collectShotWindows(HWND hwnd, LPARAM lparam) {
+    auto *scan = reinterpret_cast<ShotWindowScan *>(lparam);
+    if (hwnd == scan->skip || hwnd == scan->skipHost || !IsWindowVisible(hwnd))
+        return TRUE;
+    /* 工具窗（提示气泡、悬浮小条）不算"一块内容" */
+    if (GetWindowLongW(hwnd, GWL_EXSTYLE) & WS_EX_TOOLWINDOW)
+        return TRUE;
+    /*
+     * 桌面那两层（壁纸 / 图标）铺满整屏，留着会把每个点都命中成"桌面"；
+     * Windows.UI.Core.CoreWindow 是输入法的候选层 —— 它也是一块铺满屏的顶层，
+     * 而且**偶尔会排在别的窗上面**（这台机上实测排在 Qoder 之下），排上来之后就
+     * 是"光标点到哪儿都框出整屏"。三者都不是"一块内容"。
+     */
+    wchar_t cls[40] = {};
+    GetClassNameW(hwnd, cls, 39);
+    if (wcscmp(cls, L"Progman") == 0 || wcscmp(cls, L"WorkerW") == 0
+        || wcscmp(cls, L"Windows.UI.Core.CoreWindow") == 0)
+        return TRUE;
+
+    RECT r{};
+    /*
+     * 优先要 DWM 那份矩形：GetWindowRect 在 Win10/11 上把窗口四周那圈**看不见**的
+     * 阴影边也算进去（左右下各多 ~7px），照它框出来四周就是一圈空边。
+     */
+    if (FAILED(DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &r, sizeof(r)))
+        && !GetWindowRect(hwnd, &r))
+        return TRUE;
+    const QRect rect(r.left, r.top, r.right - r.left, r.bottom - r.top);
+    if (rect.width() < 8 || rect.height() < 8)
+        return TRUE;
+    scan->out->append(ShotWindow{ reinterpret_cast<quintptr>(hwnd), rect });
+    return TRUE;
+}
+#endif
+
+void Screenshot::collectWindows() {
+    m_windows.clear();
+#if defined(Q_OS_WIN)
+    QList<ShotWindow> raw;
+    ShotWindowScan scan;
+    scan.out = &raw;
+    scan.skip = m_overlay ? reinterpret_cast<HWND>(m_overlay->winId()) : nullptr;
+    scan.skipHost = (m_excludedHost && m_host)
+                        ? reinterpret_cast<HWND>(m_host->winId()) : nullptr;
+    EnumWindows(collectShotWindows, reinterpret_cast<LPARAM>(&scan));
+
+    for (const ShotWindow &w : raw) {
+        const QRect &dv = w.rect;
+        /*
+         * 设备像素 -> 那块屏的逻辑像素（和 QML 里 sel 同一套坐标：原点在那块屏
+         * 的左上角）。多屏 + 各自缩放时这套换算只对"和主屏同缩放"的那块屏严格
+         * 成立，这里按抓的这块屏自己的 dpr 折算，已经比拿物理像素硬套准一档。
+         */
+        QRect lg(QPoint(qRound(dv.x() / m_dpr) - m_screenRect.x(),
+                        qRound(dv.y() / m_dpr) - m_screenRect.y()),
+                 QSize(qRound(dv.width() / m_dpr), qRound(dv.height() / m_dpr)));
+        lg = lg.intersected(m_screenRect);
+        if (lg.width() > 1 && lg.height() > 1)
+            m_windows.append(ShotWindow{ w.hwnd, lg });
+    }
+#endif
+}
+
+/* 清单里 z 序最靠上、含住这个点的那一条；没有返回 -1（逻辑坐标同 windowAt） */
+int Screenshot::windowIndexAt(qreal x, qreal y) const {
+    const QPoint p(qRound(x), qRound(y));
+    for (int i = 0; i < m_windows.size(); ++i) {
+        if (m_windows.at(i).rect.contains(p))
+            return i;
+    }
+    return -1;
+}
+
+QRect Screenshot::windowAt(qreal x, qreal y) const {
+    const int i = windowIndexAt(x, y);
+    return i >= 0 ? m_windows.at(i).rect : QRect();
+}
+
+#if defined(Q_OS_WIN)
+/*
+ * 住在探测线程上的收件人。
+ *
+ * **没有 Q_OBJECT**：它不发消息也不接槽，只是"一个待在另一条线程上的 QObject"，
+ * 好让 QMetaObject::invokeMethod 把活儿排到那条线程上去（AUTOMOC 也就管不着它，
+ * 见 CMakeLists 里那条"Q_OBJECT 的类要单独成文件"）。
+ * 两个成员只有那条线程碰，所以不用锁。
+ */
+class ShotElementWorker : public QObject {
+public:
+    IUIAutomation *uia = nullptr;
+    bool comReady = false;
+};
+
+/*
+ * 从这扇窗往下钻，找含住 pt 的那块元素（物理屏幕坐标）。
+ *
+ * 为什么不用 ElementFromPoint：我们的选区窗口铺满整屏又置顶，那一问先命中的
+ * 永远是我们自己的场景图，拿到的"元素"是截图界面自己。
+ *
+ * 下钻走 Control 视图（客户区里能看见的那层，剪掉的中间层不挡路）：每层挑**第一个
+ * 含住这个点**的子项。不挑"最小的"，因为大列表里一层能上千个兄弟，为找最小把整层
+ * 扫完，一次查询的 COM 调用数就从几十变成上千。
+ *
+ * 最后从最深往回退：一个图标、一段文字那种太小的一档不要（阈值 kMin 逻辑像素），
+ * 退到够大的一档；一路都不够大就当没查出来（退回窗口档）。
+ */
+static QRect probeElementRect(IUIAutomation *uia, HWND hwnd, const QPoint &pt, qreal dpr) {
+    constexpr int kMinLogical = 24;      /* 比这还小的一档不当"一块内容" */
+    constexpr int kMaxDepth = 12;
+    if (!uia)
+        return QRect();
+
+    IUIAutomationElement *root = nullptr;
+    if (FAILED(uia->ElementFromHandle(hwnd, &root)) || !root)
+        return QRect();
+    IUIAutomationTreeWalker *walker = nullptr;
+    if (FAILED(uia->get_ControlViewWalker(&walker)) || !walker) {
+        root->Release();
+        return QRect();
+    }
+
+    QList<QRect> chain;
+    IUIAutomationElement *cur = root;
+    for (int depth = 0; depth < kMaxDepth && cur; ++depth) {
+        tagRECT b{};
+        if (FAILED(cur->get_CurrentBoundingRectangle(&b)))
+            break;
+        const QRect r(b.left, b.top, b.right - b.left, b.bottom - b.top);
+        if (!r.contains(pt) || r.width() < 2 || r.height() < 2)
+            break;
+        chain.append(r);
+
+        /*
+         * 这一层挑**含住这个点的最小的那个子项**，不是第一个。
+         *
+         * 第一个含点的子项常常是一层铺满父项的壳（XAML/Qt 里很常见），顺着它往下
+         * 走就一路都是整窗大小；真正的按钮、文字块是它后面那些兄弟里的某一个。
+         * 兄弟最多扫 kMaxSiblings 个就收 —— 大列表一层能上千个，扫到底是几十毫秒
+         * 起步，不值。
+         */
+        constexpr int kMaxSiblings = 60;
+        IUIAutomationElement *pick = nullptr;
+        qlonglong pickArea = 0;
+        IUIAutomationElement *sib = nullptr;
+        walker->GetFirstChildElement(cur, &sib);
+        for (int n = 0; sib && n < kMaxSiblings; ++n) {
+            IUIAutomationElement *next = nullptr;
+            if (FAILED(walker->GetNextSiblingElement(sib, &next)))
+                next = nullptr;
+            tagRECT cb{};
+            const bool got = SUCCEEDED(sib->get_CurrentBoundingRectangle(&cb));
+            const QRect cr(cb.left, cb.top, cb.right - cb.left, cb.bottom - cb.top);
+            const qlonglong area = qlonglong(cr.width()) * cr.height();
+            const bool usable = got && cr.contains(pt) && cr.width() >= 2 && cr.height() >= 2;
+            if (usable && (!pick || area < pickArea)) {
+                if (pick)
+                    pick->Release();
+                pick = sib;           /* 这个引用归 pick，下面不能再放它 */
+                sib = nullptr;
+                pickArea = area;
+            }
+            if (sib)
+                sib->Release();
+            sib = next;
+        }
+        if (sib)
+            sib->Release();           /* 撞上兄弟上限时没处理完的那一个 */
+        cur->Release();
+        cur = pick;                   // 空 -> 循环自己结束
+    }
+    if (cur)
+        cur->Release();
+    walker->Release();
+
+    const int min = qRound(kMinLogical * dpr);
+    for (int i = chain.size() - 1; i >= 0; --i) {
+        if (chain.at(i).width() >= min && chain.at(i).height() >= min)
+            return chain.at(i);
+    }
+    return QRect();
+}
+#endif
+
+void Screenshot::ensureElementThread() {
+#if defined(Q_OS_WIN)
+    if (m_elementThread)
+        return;
+    m_elementThread = new QThread(this);
+    auto *worker = new ShotElementWorker();
+    worker->moveToThread(m_elementThread);
+    m_elementWorker = worker;
+
+    /* COM 和 IUIAutomation 都建在**那条**线程上：UIA 的套间是线程的，不是进程的 */
+    connect(m_elementThread, &QThread::started, worker, [worker]() {
+        worker->comReady = SUCCEEDED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED));
+        if (!worker->comReady)
+            return;
+        if (FAILED(CoCreateInstance(__uuidof(CUIAutomation), nullptr, CLSCTX_INPROC_SERVER,
+                                    __uuidof(IUIAutomation),
+                                    reinterpret_cast<void **>(&worker->uia))))
+            worker->uia = nullptr;
+    });
+    connect(m_elementThread, &QThread::finished, worker, [worker]() {
+        if (worker->uia) {
+            worker->uia->Release();
+            worker->uia = nullptr;
+        }
+        if (worker->comReady)
+            CoUninitialize();
+    });
+    connect(m_elementThread, &QThread::finished, worker, &QObject::deleteLater);
+    m_elementThread->start();
+#endif
+}
+
+void Screenshot::requestElement(qreal x, qreal y) {
+    const QPoint p(qRound(x), qRound(y));
+    const int i = windowIndexAt(x, y);
+    if (i < 0) {
+        /*
+         * 这一点上连窗口都没有（桌面）：元素档没戏，报"没有"。
+         * 号也要翻一号，把可能还在飞的那一问作废 —— 不然它会带着上一扇窗的元素
+         * 回来，落到桌面上就是一块没有主人的高亮。
+         */
+        if (m_elementAskedAt != p) {
+            m_elementAskedAt = p;
+            m_elementPending = false;
+            ++m_elementSerial;
+            emit elementReady(QRect());
+        }
+        return;
+    }
+    if (m_elementPending || m_elementAskedAt == p)
+        return;
+    if (QLineF(m_elementAskedAt, p).length() < 3.0)
+        return;                 /* 手抖，别为两三个像素再问一次 */
+
+    ensureElementThread();
+    if (!m_elementWorker)
+        return;
+#if defined(Q_OS_WIN)
+    m_elementAskedAt = p;
+    m_elementPending = true;
+    ++m_elementSerial;
+    const int serial = m_elementSerial;
+    const quintptr hwnd = m_windows.at(i).hwnd;
+    /* 逻辑 -> 物理屏幕坐标：UIA 的包围盒是物理的、且以整个虚拟桌面为原点 */
+    const QPoint phys(qRound((m_screenRect.x() + p.x()) * m_dpr),
+                      qRound((m_screenRect.y() + p.y()) * m_dpr));
+    const qreal dpr = m_dpr;
+    QObject *worker = m_elementWorker;
+    QMetaObject::invokeMethod(worker, [this, worker, serial, hwnd, phys, dpr]() {
+        auto *w = static_cast<ShotElementWorker *>(worker);
+        const QRect rect = probeElementRect(w->uia, reinterpret_cast<HWND>(hwnd), phys, dpr);
+        /* 回 GUI 线程再发信号：UIA 那个对象只有那条线程能碰 */
+        QMetaObject::invokeMethod(this, [this, serial, rect]() {
+            onElementAnswered(serial, rect);
+        }, Qt::QueuedConnection);
+    }, Qt::QueuedConnection);
+#endif
+}
+
+void Screenshot::onElementAnswered(int serial, const QRect &physRect) {
+    m_elementPending = false;
+    if (serial != m_elementSerial)
+        return;                 /* 光标已经走远 / 这一轮已经收工 */
+    if (physRect.isEmpty()) {
+        emit elementReady(QRect());
+        return;
+    }
+    /* 物理 -> 那块屏的逻辑像素，再夹回那扇窗：绝不框到图外去 */
+    QRect lg(QPoint(qRound(physRect.x() / m_dpr) - m_screenRect.x(),
+                    qRound(physRect.y() / m_dpr) - m_screenRect.y()),
+             QSize(qRound(physRect.width() / m_dpr), qRound(physRect.height() / m_dpr)));
+    const int i = windowIndexAt(m_elementAskedAt.x(), m_elementAskedAt.y());
+    if (i >= 0)
+        lg = lg.intersected(m_windows.at(i).rect);
+    else
+        lg = lg.intersected(m_screenRect);
+    emit elementReady(lg.width() > 1 && lg.height() > 1 ? lg : QRect());
 }
 
 /*
@@ -466,12 +612,6 @@ QQuickView *Screenshot::createOverlay() {
             qWarning("%s", qPrintable(error.toString()));
         delete view;
         return nullptr;
-    }
-
-    /* 临时探针（SMARTCLIP_SHOT_PROF=1，见 ShotProfiler） */
-    if (qEnvironmentVariableIsSet("SMARTCLIP_SHOT_PROF")) {
-        auto *prof = new ShotProfiler(view);
-        view->installEventFilter(prof);
     }
 
     /*
@@ -564,14 +704,12 @@ void Screenshot::prewarm() {
          */
         m_overlay->setGeometry(rect);   /* 先摆回主屏，第一次抓屏直接就用它 */
         presentOneFrame(m_overlay);
-        shotTrace("prewarm: 已在主屏几何上重画一帧（窗口表面不再对应屏幕外几何）");
         m_overlay->hide();
         m_overlayWarmed = true;
     }
 }
 
 void Screenshot::showOverlay() {
-    shotTrace("showOverlay enter");
     if (!m_overlay)
         m_overlay = createOverlay();
     if (!m_overlay) {
@@ -588,9 +726,6 @@ void Screenshot::showOverlay() {
      */
     m_overlay->setGeometry(offscreenRect(m_screenRect));
     m_overlayOnScreen = false;
-    shotTrace(QStringLiteral("  window geometry %1,%2 %3x%4")
-                  .arg(m_screenRect.x()).arg(m_screenRect.y())
-                  .arg(m_screenRect.width()).arg(m_screenRect.height()));
     /*
      * 把屏幕矩形**直接告诉 QML**，别让它按控件尺寸猜 —— setGeometry 之后
      * QQuickWidget 的布局是延迟生效的，复位那一刻它还是预热时的旧尺寸，
@@ -645,20 +780,8 @@ void Screenshot::showOverlay() {
      * 换成真窗口后它只剩"从 GPU 读回一张 4K 图"，实测 27~31ms，纯浪费；要的只是
      * "这一帧确实到了窗口表面"，所以改成 requestUpdate + 等 frameSwapped。
      */
-    shotTrace("show()幕外 BEFORE");
     m_overlay->show();
-    shotTrace("show()幕外 AFTER: 屏外可见");
-    /* 临时探针（SMARTCLIP_SHOT_OFFCHK=1）：刚映射完、还没画这一帧时表面是什么 */
-    if (qEnvironmentVariableIsSet("SMARTCLIP_SHOT_OFFCHK"))
-        shotSurfaceCheck(m_overlay, m_shot, QStringLiteral("幕外 show 之后 / present 之前"));
     presentOneFrame(m_overlay);
-    shotTrace("presentOneFrame 回来：新底图已呈现（还在屏外）");
-    /* 临时探针（SMARTCLIP_SHOT_OFFCHK=1）：这一帧到位没有 */
-    if (qEnvironmentVariableIsSet("SMARTCLIP_SHOT_OFFCHK")) {
-        shotSurfaceCheck(m_overlay, m_shot, QStringLiteral("presentOneFrame 之后"));
-        cancelCapture();
-        return;
-    }
 
     {
         constexpr int kGraceMs = 20;   /* 见好就收：抽到键之后再等这么久就够 */
@@ -700,23 +823,12 @@ void Screenshot::showOverlay() {
     }
 
     /* 内容已经在幕外画好了，现在只是把整窗挪到目标屏上 */
-    shotTrace("挪进来 BEFORE");
     m_overlay->setGeometry(m_screenRect);
     m_overlayOnScreen = true;
-    shotTrace("挪进来 AFTER: 用户可见");
     m_overlay->raise();
     m_overlay->requestActivate();
     if (QQuickItem *ci = m_overlay->contentItem())
         ci->forceActiveFocus();
-
-    /* 临时探针（SMARTCLIP_SHOT_PROF=1，见 ShotProfiler）：整窗 repaint 一次的代价 */
-    if (qEnvironmentVariableIsSet("SMARTCLIP_SHOT_PROF")) {
-        QTimer::singleShot(300, this, [this]() {
-            if (!m_active || !m_overlay)
-                return;
-            shotFrameBenchmark(m_overlay);
-        });
-    }
 
     /*
      * 窗口真的稳住了再让界面把选区边框画出来（见 CaptureOverlay.qml 的 overlayReady）。
@@ -729,23 +841,7 @@ void Screenshot::showOverlay() {
      * 从头到尾没画过，一帧都不闪；正常截图只是晚一两帧出现边框，用户在框选时
      * 看不出差别。
      */
-    /* 临时诊断：settle 之后再等一会儿，看这会儿边框到底可见没有 */
-    QTimer::singleShot(250, this, [this]() {
-        if (QObject *root = overlayRoot()) {
-            QVariant v;
-            QMetaObject::invokeMethod(root, "barState", Q_RETURN_ARG(QVariant, v));
-            const QVariantMap m = v.toMap();
-            shotTrace(QStringLiteral("+250ms: active=%1 visible=%2 ready=%3 borderVisible=%4")
-                          .arg(m_active ? 1 : 0)
-                          .arg(overlayVisible() ? 1 : 0)
-                          .arg(m.value(QStringLiteral("ready")).toInt())
-                          .arg(m.value(QStringLiteral("borderVisible")).toInt()));
-        }
-    });
-
     QTimer::singleShot(60, this, [this]() {
-        shotTrace(QStringLiteral("settle timer: active=%1 visible=%2")
-                      .arg(m_active ? 1 : 0).arg(overlayVisible() ? 1 : 0));
         if (m_active && overlayVisible()) {
             if (QObject *root = overlayRoot())
                 QMetaObject::invokeMethod(root, "settleOverlay");
@@ -825,19 +921,21 @@ void Screenshot::endCapture() {
          * 只做其中任何一个都还剩 1~3 帧残留（都实测过）。
          */
         presentOneFrame(m_overlay);
-        shotTrace("endCapture: hide() now");
         m_overlay->hide();      /* 只是藏起来，留着下次复用（见 prewarm） */
         m_overlayOnScreen = false;
-        shotTrace("endCapture: hidden");
     }
 
     m_active = false;
     m_shot = QImage();
+    m_windows.clear();
+    /* 元素档的状态一起作废：还在飞的那一问回来也不认（号翻掉） */
+    ++m_elementSerial;
+    m_elementPending = false;
+    m_elementAskedAt = QPoint();
     emit stateChanged();
 }
 
 void Screenshot::cancelCapture() {
-    shotTrace("cancelCapture");
     /*
      * 取消 = 收工。两条路（抓屏还在延时里 / 选区窗口已经开着）都由
      * endCapture 里的 pending 判断分开处理，所以这里直接转过去 ——

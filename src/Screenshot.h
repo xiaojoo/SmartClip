@@ -13,6 +13,21 @@ class QQmlEngine;
 class QScreen;
 class QWidget;
 class QQuickView;
+class QThread;
+
+/*
+ * 抓屏那一刻冻下来的**一扇**窗口。
+ *
+ * rect 是"被截那块屏的屏幕坐标、逻辑像素"（和选区同一套口径，见
+ * CaptureOverlay.qml 文件头）；hwnd 是元素级探测的入口 —— 那一档必须从这扇窗
+ * 往下钻，不能拿全局 ElementFromPoint 问，它会先命中我们铺满屏的选区窗口。
+ *
+ * hwnd 存 quintptr 而不是 HWND：这个头文件不拖 windows.h。
+ */
+struct ShotWindow {
+    quintptr hwnd = 0;
+    QRect rect;
+};
 
 /*
  * 截图（选区 -> 加文字 -> 复制 / 保存 / 固定到桌面 -> 还能接着改）。
@@ -124,9 +139,6 @@ public:
      */
     Q_INVOKABLE void cancelCapture();
 
-    /* 临时诊断：给选区界面的 QML 用的日志口（和 Screenshot::eventFilter 那份同一个文件） */
-    Q_INVOKABLE void uiTrace(const QString &what);
-
     /*
      * 三条出口。sel 是选区（屏幕坐标，逻辑像素），texts 是标注：
      *   [ { x, y, text, size, color } ]，x/y 也是屏幕坐标。
@@ -190,13 +202,38 @@ public:
     Q_INVOKABLE QString zoomUrl(qreal x, qreal y, int halfX, int halfY, int scale) const;
 
     /*
+     * 自动框选：光标落在 (x,y) 时，返回**抓屏那一刻**冻下来的那一块窗口矩形；
+     * 没命中给空矩形。坐标口径和选区一样（那块屏的屏幕坐标、逻辑像素）。
+     *
+     * 清单见 collectWindows() —— 必须在抓屏那一刻抄，不能悬停时现问系统。
+     */
+    Q_INVOKABLE QRect windowAt(qreal x, qreal y) const;
+
+    /*
+     * 元素级（自动框选的第二档）：异步问"这一点在那扇窗里压着哪块 UI 元素"。
+     *
+     * 不返回值 —— 结果从 elementReady 发回来。原因是这一问要跨进程找别的程序
+     * 要（UIA），一次十几到几十毫秒，而且**碰上有程序卡住的提供者会几秒不回**；
+     * 写在 GUI 线程上就会把刚量到的 13ms 帧预算顶穿。所以丢给一条自己的线程，
+     * 高亮先按窗口档亮着，元素回来之后再细化。
+     *
+     * 也不能拿全局 ElementFromPoint 问：我们的选区窗口铺满整屏又置顶，那一问
+     * 先命中的永远是我们自己 —— 所以必须从 windowAt 那扇窗的 HWND 往下钻。
+     */
+    Q_INVOKABLE void requestElement(qreal x, qreal y);
+
+    /*
      * 选区窗口的光标形状（Qt::CursorShape 的整数值；-1 = 回到箭头）。
      *
-     * 为什么不在 QML 里写 cursorShape：这块界面是 QQuickWidget 装的，实测
-     * 根层那块铺满屏的 MouseArea 明明收到了悬停（trace 里 containsMouse=1）、
-     * 也确实在整扇窗的最上面，但它设的光标**从没落到窗口上**（挂在控件上的
-     * 事件过滤器一条 CursorChange 都没收到），而工具条里那些小按钮的 HAND
-     * 却是好的 —— 同一个窗口里两种结果，说明这条路在这块全屏层上不成立。
+     * 为什么还要这一条：QML 那层的 cursorShape 要等**第一个悬停事件**进来才生效
+     * （QQuickWindow 是顺着被悬停的项往上找 cursor 的），窗口刚露脸、鼠标还没动
+     * 的那一段没有悬停事件，靠这个把十字先立住。
+     *
+     * 换到真 GPU 顶层窗之前这条是主力：那时界面是 QQuickWidget 装的，实测铺满屏
+     * 的根层 MouseArea 明明收到了悬停、也确实设在最上面，但它的光标**从没落到窗口
+     * 上**（挂在控件上的事件过滤器一条 CursorChange 都没收到），而同一扇窗里工具条
+     * 那些小按钮的 HAND 却是好的。现在换成 QQuickView 之后 QML 的 cursorShape
+     * 落得下去了（CaptureOverlay 里那块取色层就靠它兜住整屏的光标）。
      * 直接在 C++ 侧设窗口光标，走的是 QWindow 自己的状态，不靠这套转发。
      */
     Q_INVOKABLE void setOverlayCursor(int shape);
@@ -243,10 +280,26 @@ public:
 
 signals:
     void stateChanged();
+    /*
+     * 元素级探测的结果：rect 是"被截那块屏的屏幕坐标、逻辑像素"（和选区同一套
+     * 口径），空矩形 = 这一档没查出来，调用方退回窗口档。
+     */
+    void elementReady(const QRect &rect);
 
 private:
     /* 真正去 grabWindow() 那一步（beginCapture 里延时到桌面重画之后调） */
     void grabAndShow();
+    /*
+     * 抓屏那一刻把所有可见窗口的矩形按 z 序抄一份（见 m_windows / windowAt）。
+     * 必须在抓屏这一刻做：底图是冻的，窗口是活的。
+     */
+    void collectWindows();
+    /* 清单里 z 序最靠上、含住这个点的那一条的下标；没有给 -1 */
+    int windowIndexAt(qreal x, qreal y) const;
+    /* 元素级那条线程：懒建（不用元素档的程序不必起线程） */
+    void ensureElementThread();
+    /* 探测线程回来的答案（物理屏幕坐标）：换算、夹回那扇窗、发 elementReady */
+    void onElementAnswered(int serial, const QRect &physRect);
     /*
      * 掐掉"已经排上队、还没抓"的那次抓屏（见 cancelCapture）。
      * 没有待抓的（没在 pending）返回 false，调用方接着按正常收工走。
@@ -290,6 +343,26 @@ private:
     QImage m_shot;
     QRect m_screenRect;
     qreal m_dpr = 1.0;
+
+    /*
+     * 抓屏那一刻冻下来的窗口清单（那块屏的逻辑像素坐标，z 序从上到下），
+     * 自动框选用。和 m_shot 是同一时刻的东西 —— 图冻了清单没冻就会框歪。
+     */
+    QList<ShotWindow> m_windows;
+
+    /*
+     * 元素级探测那条线程（见 requestElement）。只在 Windows 上建，别处留空，
+     * 那条路整个退化成"只有窗口档"。
+     */
+    QThread *m_elementThread = nullptr;
+    /* 住在那条线程上的收件人（Screenshot.cpp 里的 ShotElementWorker） */
+    QObject *m_elementWorker = nullptr;
+    /* 一轮抓屏一个号：回来的答案号对不上就是上一轮的，丢掉 */
+    int m_elementSerial = 0;
+    /* 一次只让一条查询在飞：没回来就再问，等于给自己加堵车的队列 */
+    bool m_elementPending = false;
+    /* 发出去的那一问对应的点（逻辑坐标），同一个点不重复问 */
+    QPoint m_elementAskedAt;
 
     /*
      * 贴图窗口（置顶无边框小窗，见 src/PinWindow.h）；关掉自己变空。

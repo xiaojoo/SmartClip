@@ -7,12 +7,13 @@ import "../utils"
 import SmartClip.Globals 1.0
 
 /*
- * 截图选区窗口（由 src/Screenshot.cpp 用 QQuickWidget 装进一个铺满整块屏的
- * 置顶无边框窗口里）。
+ * 截图选区窗口（由 src/Screenshot.cpp 装进一扇铺满整块屏的置顶无边框 GPU 顶层窗
+ * —— QQuickView，2026-10-24 从 QQuickWidget 换过来的，理由见 Screenshot::createOverlay）。
  *
  * 一屏之内把这四件事做完，不再单开一个"标注编辑器"窗口：
  *
- *   1) 拖动框选区域（点一下不放 = 整屏）；
+ *   1) 拖动框选区域；没拖、直接点一下 = 选中光标压着的那扇窗口（清单见
+ *      Screenshot::windowAt），那块点上没有窗口才是整屏；
  *   2) 在框里点一下落一条文字，就地打字（见下面的文字工具）；
  *   3) 工具条上选字号 / 颜色、拖动文字摆位置；
  *   4) 复制到剪贴板 / 存成图片 / 固定到桌面（贴图窗口，见 PinWindow）。
@@ -44,6 +45,45 @@ Rectangle {
     property bool selAuto: true
     property rect sel: Qt.rect(0, 0, width, height)
     readonly property bool selReady: sel.width >= 8 && sel.height >= 8
+
+    /*
+     * 自动框选的两档，都来自抓屏那一刻冻下来的清单（见 Screenshot::windowAt）：
+     *
+     *   windowSel  光标压着的那扇**窗口** —— 本地一次查表，不跨进程，鼠标一动就有
+     *   elementSel 那扇窗里的某块 **UI 元素** —— 要跨进程问 UIA，十几到几十毫秒才回，
+     *              所以是"先亮窗口档，回来再细化成元素档"
+     *
+     * 为什么元素档不能直接问"这个点是什么元素"：我们的选区窗口铺满整屏又置顶，
+     * 全局那一问先命中的永远是我们自己的界面 —— 必须从 windowSel 那扇窗的 HWND
+     * 往下钻（见 Screenshot::requestElement）。
+     *
+     * 空矩形 = 这一档没有。autoSel 就是"有元素用元素，没元素用窗口"。
+     */
+    property rect windowSel: Qt.rect(0, 0, 0, 0)
+    property rect elementSel: Qt.rect(0, 0, 0, 0)
+    readonly property rect autoSel: elementSel.width > 0 ? elementSel : windowSel
+
+    /* 鼠标每动一下：先按窗口档立住，再排一次元素档的查询 */
+    function hoverDetect(x, y) {
+        const w = Shot.windowAt(x, y)
+        const movedWindow = w.x !== windowSel.x || w.y !== windowSel.y
+                            || w.width !== windowSel.width || w.height !== windowSel.height
+        if (movedWindow) {
+            windowSel = w
+            /* 上一扇窗的元素框不能留着，不然细化框会画在另一扇窗上 */
+            elementSel = Qt.rect(0, 0, 0, 0)
+        }
+        Shot.requestElement(x, y)
+    }
+
+    function clearAutoSel() {
+        windowSel = Qt.rect(0, 0, 0, 0)
+        elementSel = Qt.rect(0, 0, 0, 0)
+    }
+
+    /* 那块高亮框什么时候该亮：只在"还没框过、鼠标在找窗口"这一段 */
+    readonly property bool autoOn: overlayReady && selAuto && !dragging
+                                   && !textTool && !shapeTool && autoSel.width > 0
 
     function syncAutoSel() {
         if (root.selAuto)
@@ -825,6 +865,8 @@ Rectangle {
         root.editing = -1
         root.tool = ""
         root.hinted = true
+        /* 上一轮光标停在哪一块窗口，这一轮不该带过来（第一帧就亮一个空框） */
+        root.clearAutoSel()
         root.dragging = false
         root.boxDrag = false
         root.boxIndex = -1
@@ -858,8 +900,6 @@ Rectangle {
      */
     function settleOverlay() {
         root.overlayReady = true
-        /* 临时诊断（和 C++ 那份同一个日志文件）：边框什么时候被放行 */
-        Shot.uiTrace("settleOverlay(): border allowed")
     }
 
     /*
@@ -1146,8 +1186,6 @@ Rectangle {
                                                mouse.button === Qt.RightButton)
         onPositionChanged: (mouse) => root.pointerMove(mouse.x, mouse.y)
         onReleased: (mouse) => root.pointerUp()
-        /* 临时诊断（同上）：量完删 */
-        onContainsMouseChanged: Shot.uiTrace("rubber.containsMouse=" + (containsMouse ? 1 : 0))
         /*
          * 左键双击 = 取消这次截图（和 Esc 一个效果）。
          *
@@ -1252,25 +1290,35 @@ Rectangle {
             root.shapeDrag = false
             root.commitShape()
             return
-            }
+        }
 
-            /* 松开左键 = 文本框落定，这会儿才把光标放进框里等打字 */
-            if (root.boxDrag) {
-                root.boxDrag = false
-                if (root.boxIndex >= 0)
-                    root.editing = root.boxIndex
-                root.boxIndex = -1
-                return
-            }
+        /* 松开左键 = 文本框落定，这会儿才把光标放进框里等打字 */
+        if (root.boxDrag) {
+            root.boxDrag = false
+            if (root.boxIndex >= 0)
+                root.editing = root.boxIndex
+            root.boxIndex = -1
+            return
+        }
 
-            if (!root.dragging)
-                return
-            root.dragging = false
-            /* 点一下（几乎没拖）= 整屏，主流截图工具都是这个手感 */
-            if (!root.selReady) {
+        if (!root.dragging)
+            return
+        root.dragging = false
+        /*
+         * 点一下（几乎没拖）= 采纳光标压着的那扇窗口；那块点上没有窗口才是整屏。
+         *
+         * 原来"点一下 = 整屏"这条语义让给自动框选了（PixPin 也是这个手感）。
+         * 整屏还剩两条路：光标停在桌面上（任务栏、壁纸那层）点一下，或者回车。
+         */
+        if (!root.selReady) {
+            if (root.autoSel.width > 0) {
+                root.sel = root.autoSel
+                root.selAuto = false
+            } else {
                 root.sel = Qt.rect(0, 0, root.width, root.height)
                 root.selAuto = true
             }
+        }
     }
 
     /* 选区边框（不吃鼠标：没有 MouseArea，事件照样穿到下面去） */
@@ -1285,8 +1333,25 @@ Rectangle {
         border.color: root.accent
         border.width: 1
         visible: root.selReady && root.overlayReady
-        /* 临时诊断：边框真的被画出来没有 */
-        onVisibleChanged: Shot.uiTrace("selBorder.visible=" + (visible ? 1 : 0))
+    }
+
+    /*
+     * 自动框选的高亮框：光标压着的那扇窗此刻"会被选中"，得先给人看见。
+     *
+     * 没有自己的 MouseArea —— 和选区边框一样，事件照样穿到下面的框选层，
+     * 不然点一下就点不动了。
+     */
+    Rectangle {
+        id: autoSelBox
+
+        x: root.autoSel.x
+        y: root.autoSel.y
+        width: root.autoSel.width
+        height: root.autoSel.height
+        color: "#264c96d8"      /* 强调蓝压 15%：认得出是"这一块"，又不挡内容 */
+        border.color: root.accent
+        border.width: 2
+        visible: root.autoOn
     }
 
     /*
@@ -1792,8 +1857,16 @@ Rectangle {
         cursorShape: root.textTool ? Qt.IBeamCursor : Qt.CrossCursor
         onPressed: (mouse) => mouse.accepted = false
         onReleased: (mouse) => mouse.accepted = false
-        onPositionChanged: (mouse) => root.setPick(mouse.x, mouse.y)
-        onExited: root.pickHex = ""
+        onPositionChanged: (mouse) => {
+            root.setPick(mouse.x, mouse.y)
+            /* 还没框过才查：框过之后这块只是跟着鼠标读颜色 */
+            if (root.selAuto)
+                root.hoverDetect(mouse.x, mouse.y)
+        }
+        onExited: {
+            root.pickHex = ""
+            root.clearAutoSel()
+        }
     }
 
     /*
@@ -1810,6 +1883,15 @@ Rectangle {
         function onStateChanged() {
             Shot.setOverlayCursor(Shot.active
                                   ? (root.textTool ? Qt.IBeamCursor : Qt.CrossCursor) : -1)
+        }
+
+        /*
+         * 元素档回来了（空矩形 = 这一档没查出来，autoSel 自动退回窗口档）。
+         *
+         * C++ 那边已经用"一轮一个号"把走远了的答案丢掉了，所以这里直接采纳。
+         */
+        function onElementReady(rect) {
+            root.elementSel = rect
         }
     }
 
@@ -2229,7 +2311,7 @@ Rectangle {
         Text {
             id: hintText
             anchors.centerIn: parent
-            text: "拖动鼠标框选区域，只点一下 = 整屏 · 按 C 复制光标处颜色"
+            text: "拖动自己框选 · 点一下 = 选中光标那块窗口 · 按 C 复制光标处颜色"
             font.pixelSize: 12
             color: "#b4b8bf"
         }
