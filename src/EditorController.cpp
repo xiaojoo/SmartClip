@@ -1,4 +1,5 @@
 #include "EditorController.h"
+#include "EditorViewItem.h"     // 预览的代码块涂色要用它那套 lexer / 色板（见 highlightCode）
 #include "Theme.h"
 
 
@@ -118,8 +119,21 @@ h3 { font-size: 1.25em; margin-top: 0.714em; }
 h4 { font-size: 1.12em; margin-top: 0.797em; }
 h5, h6 { font-size: 1em; margin-top: 0.893em; }
 a { color: #4c96d8; }
-code { font-family: Consolas, "Courier New", monospace; color: #d7ba7d; }
-pre { font-family: Consolas, "Courier New", monospace; color: #d6d7da;
+/*
+ * 代码的字体：Courier New 打头 —— 这是 Typora 的实际效果，不是猜的。
+ *
+ * 它那份 github.css 里**没有**给代码写 font-family（全文只有 Open Sans 和
+ * Segoe UI 两处），所以走的是浏览器默认的 monospace，Windows 上就是 Courier New。
+ * 拿两张同一份文档的渲染逐行量过：`"metadata": {` 13 个字符，我们 100 px
+ * （Consolas 14px = 0.55em = 7.7 px/字），Typora 110 px（Courier New 14px
+ * = 0.6em = 8.4 px/字）。
+ *
+ * 只换字面，不换字号：字号还是由 MarkdownView 的 font.pixelSize 定（绑编辑区
+ * 生效字号），所以不会退回以前那个"预览里代码比编辑区小一号"的状态。
+ * 中文会落到宋体那一档 —— Typora 一样（Courier New 没有汉字）。
+ */
+code { font-family: "Courier New", monospace; color: #d7ba7d; }
+pre { font-family: "Courier New", monospace; color: #d6d7da;
       background-color: transparent; line-height: 1.3;
       margin-top: 0px; margin-bottom: 0px; }
 blockquote { color: #9aa0a6; margin-left: 1.2em;
@@ -858,6 +872,57 @@ QString EditorController::markdownToPreviewHtml(const QString &markdown,
         static const QRegularExpression kPreBlock(
             QStringLiteral("(<pre[^>]*>)(.*?)</pre>"),
             QRegularExpression::DotMatchesEverythingOption);
+        /*
+         * 代码块的语言：toHtml() 把围栏上那个信息串（```bash 里的 bash）丢掉了，
+         * 只能从**送进去的那份原文**里按顺序把围栏捞回来，和 <pre> 一块对一块。
+         *
+         * 对不上就一块都不涂：缩进式代码块、正文里手写的 <pre> 都会让两边数量错位，
+         * 而"把 C 的色涂到 bash 上"比不涂难看得多。
+         */
+        struct Fence { QString id; QString text; };
+        QList<Fence> fences;
+        {
+            static const QRegularExpression kFence(
+                QStringLiteral("^\\s{0,3}(`{3,}|~{3,})(.*)$"));
+            const QStringList lines = source.split(QLatin1Char('\n'));
+            bool inFence = false;
+            QChar marker;
+            int markerLen = 0;
+            QString info, body;
+            int bodyLines = 0;
+            for (const QString &line : lines) {
+                const QRegularExpressionMatch m = kFence.match(line);
+                if (!inFence) {
+                    if (!m.hasMatch())
+                        continue;
+                    inFence = true;
+                    marker = m.captured(1).at(0);
+                    markerLen = m.captured(1).size();
+                    info = m.captured(2).trimmed();
+                    body.clear();
+                    bodyLines = 0;
+                    continue;
+                }
+                const bool closes = m.hasMatch() && m.captured(2).trimmed().isEmpty()
+                        && m.captured(1).at(0) == marker
+                        && m.captured(1).size() >= markerLen;
+                if (closes) {
+                    fences.append(Fence{ EditorViewItem::fenceLangToId(info), body });
+                    inFence = false;
+                    continue;
+                }
+                if (bodyLines > 0)
+                    body += QLatin1Char('\n');
+                body += line;
+                ++bodyLines;
+            }
+        }
+        /* 数 </pre> 而不是再跑一遍 kPreBlock：同一份 html 上多跑一次
+           带 DotMatchesEverything 的 ".*?" 全局匹配，实测会把这次刷新拖死。 */
+        const int preCount = html.count(QLatin1String("</pre>"));
+        const bool canPaint = fences.size() == preCount;
+        int preIndex = -1;
+
         static const QRegularExpression kZeroSideMargin(
             QStringLiteral("margin-(left|right):0px;[ ]*"));
         /*
@@ -907,7 +972,16 @@ QString EditorController::markdownToPreviewHtml(const QString &markdown,
                                 .arg(kCodeLineHeight));
             /* 上下内衬 = 块内各一行空行（底色连着，代价是一整个行高） */
             static const QString kPadLine = QStringLiteral("<br />");
-            built += cellWrap + openTag + kPadLine + m.captured(2) + kPadLine
+            ++preIndex;
+            QString inner = m.captured(2);
+            if (canPaint) {
+                const Fence &f = fences.at(preIndex);
+                const QString painted = f.id.isEmpty()
+                        ? QString() : EditorViewItem::highlightCode(f.id, f.text);
+                if (!painted.isEmpty())
+                    inner = painted;
+            }
+            built += cellWrap + openTag + kPadLine + inner + kPadLine
                    + QStringLiteral("</pre>") + cellEnd;
             last = int(m.capturedEnd());
         }
@@ -1075,8 +1149,8 @@ QString wrapLongCodeLines(const QString &markdown, int wrapPx, int fontPx)
     if (wrapPx <= 80)
         return markdown;
 
-    QFont codeFont(QStringLiteral("Consolas"));
-    codeFont.setPixelSize(qBound(6, fontPx, 72));   // 和 kMarkdownCss 里 pre 那套字体一致
+    QFont codeFont(QStringLiteral("Courier New"));
+    codeFont.setPixelSize(qBound(6, fontPx, 72));   // 必须和 kMarkdownCss 里 pre 那套字体一致
     const QFontMetricsF fm(codeFont);
     const int kContIndentPx = qRound(fm.horizontalAdvance(QLatin1String("    ")));
     /* wrapPx 是预览区的字宽（正文那一栏）。代码块只在**左边**吃掉 kCodePadPx 的内衬

@@ -2030,44 +2030,55 @@ void EditorViewItem::applyLanguageLexer() {
     m_appliedLanguage = lang;
 }
 
+/*
+ * 按 id 造一个 lexer，不涂色也不进任何缓存 —— 谁要谁自己 themeLexer()。
+ *
+ * 单独拆出来是因为 Markdown 预览也要一份同语言的 lexer 来分词（见
+ * EditorViewItem::highlightCode）：预览那边没有编辑视图，parent 只能给空。
+ */
+QsciLexer *buildLexerFor(const QString &id, QObject *parent) {
+    QsciLexer *lexer = nullptr;
+    if (id == QLatin1String("cpp"))            lexer = new QsciLexerCPP(parent);
+    else if (id == QLatin1String("csharp"))    lexer = new QsciLexerCSharp(parent);
+    else if (id == QLatin1String("java"))      lexer = new QsciLexerJava(parent);
+    else if (id == QLatin1String("python"))    lexer = new QsciLexerPython(parent);
+    else if (id == QLatin1String("javascript"))lexer = new QsciLexerJavaScript(parent);
+    else if (id == QLatin1String("json"))      lexer = new QsciLexerJSON(parent);
+    else if (id == QLatin1String("html"))      lexer = new QsciLexerHTML(parent);
+    else if (id == QLatin1String("css"))       lexer = new QsciLexerCSS(parent);
+    else if (id == QLatin1String("markdown"))  lexer = new QsciLexerMarkdown(parent);
+    else if (id == QLatin1String("sql"))       lexer = new QsciLexerSQL(parent);
+    else if (id == QLatin1String("bash"))      lexer = new QsciLexerBash(parent);
+    else if (id == QLatin1String("batch"))     lexer = new QsciLexerBatch(parent);
+    else if (id == QLatin1String("yaml"))      lexer = new QsciLexerYAML(parent);
+    else if (id == QLatin1String("cmake"))     lexer = new QsciLexerCMake(parent);
+    else if (id == QLatin1String("makefile"))  lexer = new QsciLexerMakefile(parent);
+    else if (id == QLatin1String("properties"))lexer = new QsciLexerProperties(parent);
+    else if (id == QLatin1String("diff"))      lexer = new QsciLexerDiff(parent);
+    else if (id == QLatin1String("tex"))       lexer = new QsciLexerTeX(parent);
+    else if (id == QLatin1String("perl"))      lexer = new QsciLexerPerl(parent);
+    else if (id == QLatin1String("ruby"))      lexer = new QsciLexerRuby(parent);
+    else if (id == QLatin1String("lua"))       lexer = new QsciLexerLua(parent);
+    else if (id == QLatin1String("verilog"))   lexer = new QsciLexerVerilog(parent);
+    else if (id == QLatin1String("vhdl"))      lexer = new QsciLexerVHDL(parent);
+    /*
+     * 汇编：QsciLexerAsm 本身是抽象基类（语言名由子类给），
+     * 能实例化的是 NASM / MASM 两个子类，这里用 NASM（Intel 语法最常见）。
+     */
+    else if (id == QLatin1String("asm"))       lexer = new QsciLexerNASM(parent);
+    else if (id == QLatin1String("fortran"))   lexer = new QsciLexerFortran(parent);
+    else if (id == QLatin1String("pascal"))    lexer = new QsciLexerPascal(parent);
+
+    return lexer;
+}
+
 QsciLexer *EditorViewItem::lexerFor(const QString &id) {
     if (m_lexers.contains(id))
         return m_lexers.value(id);
     if (!m_sci)
         return nullptr;
 
-    QsciLexer *lexer = nullptr;
-    if (id == QLatin1String("cpp"))            lexer = new QsciLexerCPP(m_sci);
-    else if (id == QLatin1String("csharp"))    lexer = new QsciLexerCSharp(m_sci);
-    else if (id == QLatin1String("java"))      lexer = new QsciLexerJava(m_sci);
-    else if (id == QLatin1String("python"))    lexer = new QsciLexerPython(m_sci);
-    else if (id == QLatin1String("javascript"))lexer = new QsciLexerJavaScript(m_sci);
-    else if (id == QLatin1String("json"))      lexer = new QsciLexerJSON(m_sci);
-    else if (id == QLatin1String("html"))      lexer = new QsciLexerHTML(m_sci);
-    else if (id == QLatin1String("css"))       lexer = new QsciLexerCSS(m_sci);
-    else if (id == QLatin1String("markdown"))  lexer = new QsciLexerMarkdown(m_sci);
-    else if (id == QLatin1String("sql"))       lexer = new QsciLexerSQL(m_sci);
-    else if (id == QLatin1String("bash"))      lexer = new QsciLexerBash(m_sci);
-    else if (id == QLatin1String("batch"))     lexer = new QsciLexerBatch(m_sci);
-    else if (id == QLatin1String("yaml"))      lexer = new QsciLexerYAML(m_sci);
-    else if (id == QLatin1String("cmake"))     lexer = new QsciLexerCMake(m_sci);
-    else if (id == QLatin1String("makefile"))  lexer = new QsciLexerMakefile(m_sci);
-    else if (id == QLatin1String("properties"))lexer = new QsciLexerProperties(m_sci);
-    else if (id == QLatin1String("diff"))      lexer = new QsciLexerDiff(m_sci);
-    else if (id == QLatin1String("tex"))       lexer = new QsciLexerTeX(m_sci);
-    else if (id == QLatin1String("perl"))      lexer = new QsciLexerPerl(m_sci);
-    else if (id == QLatin1String("ruby"))      lexer = new QsciLexerRuby(m_sci);
-    else if (id == QLatin1String("lua"))       lexer = new QsciLexerLua(m_sci);
-    else if (id == QLatin1String("verilog"))   lexer = new QsciLexerVerilog(m_sci);
-    else if (id == QLatin1String("vhdl"))      lexer = new QsciLexerVHDL(m_sci);
-    /*
-     * 汇编：QsciLexerAsm 本身是抽象基类（语言名由子类给），
-     * 能实例化的是 NASM / MASM 两个子类，这里用 NASM（Intel 语法最常见）。
-     */
-    else if (id == QLatin1String("asm"))       lexer = new QsciLexerNASM(m_sci);
-    else if (id == QLatin1String("fortran"))   lexer = new QsciLexerFortran(m_sci);
-    else if (id == QLatin1String("pascal"))    lexer = new QsciLexerPascal(m_sci);
-
+    QsciLexer *lexer = buildLexerFor(id, m_sci);
     if (!lexer)
         return nullptr;
 
@@ -3417,6 +3428,173 @@ QString EditorViewItem::languageForPath(const QString &path) {
     };
 
     return map.value(suffix, QStringLiteral("plain"));
+}
+
+/*
+ * 围栏上写的语言名 -> lexerFor() 认的那个 id。
+ *
+ * 只认这一份表里有的：认不出来给空串，调用方就不涂（别猜、也别拿 markdown
+ * 兜底 —— 那会把一段 C 涂成标题色）。
+ */
+QString EditorViewItem::fenceLangToId(const QString &info) {
+    /* ```c++ tags=hl_lines=["2"] —— 取第一个词，后面那些是别的工具的参数 */
+    QString t = info.section(QLatin1Char(' '), 0, 0).trimmed().toLower();
+    if (t.isEmpty())
+        return QString();
+
+    static const QHash<QString, QString> alias = {
+        {QStringLiteral("bash"), QStringLiteral("bash")},
+        {QStringLiteral("sh"), QStringLiteral("bash")},
+        {QStringLiteral("shell"), QStringLiteral("bash")},
+        {QStringLiteral("zsh"), QStringLiteral("bash")},
+        {QStringLiteral("bat"), QStringLiteral("batch")},
+        {QStringLiteral("cmd"), QStringLiteral("batch")},
+        {QStringLiteral("batch"), QStringLiteral("batch")},
+        {QStringLiteral("js"), QStringLiteral("javascript")},
+        {QStringLiteral("jsx"), QStringLiteral("javascript")},
+        {QStringLiteral("node"), QStringLiteral("javascript")},
+        {QStringLiteral("javascript"), QStringLiteral("javascript")},
+        {QStringLiteral("py"), QStringLiteral("python")},
+        {QStringLiteral("python"), QStringLiteral("python")},
+        {QStringLiteral("c"), QStringLiteral("cpp")},
+        {QStringLiteral("h"), QStringLiteral("cpp")},
+        {QStringLiteral("cpp"), QStringLiteral("cpp")},
+        {QStringLiteral("c++"), QStringLiteral("cpp")},
+        {QStringLiteral("hpp"), QStringLiteral("cpp")},
+        {QStringLiteral("cs"), QStringLiteral("csharp")},
+        {QStringLiteral("c#"), QStringLiteral("csharp")},
+        {QStringLiteral("csharp"), QStringLiteral("csharp")},
+        {QStringLiteral("java"), QStringLiteral("java")},
+        {QStringLiteral("md"), QStringLiteral("markdown")},
+        {QStringLiteral("markdown"), QStringLiteral("markdown")},
+        {QStringLiteral("yml"), QStringLiteral("yaml")},
+        {QStringLiteral("yaml"), QStringLiteral("yaml")},
+        {QStringLiteral("json"), QStringLiteral("json")},
+        {QStringLiteral("jsonc"), QStringLiteral("json")},
+        {QStringLiteral("html"), QStringLiteral("html")},
+        {QStringLiteral("htm"), QStringLiteral("html")},
+        {QStringLiteral("xml"), QStringLiteral("html")},
+        {QStringLiteral("svg"), QStringLiteral("html")},
+        {QStringLiteral("css"), QStringLiteral("css")},
+        {QStringLiteral("scss"), QStringLiteral("css")},
+        {QStringLiteral("less"), QStringLiteral("css")},
+        {QStringLiteral("sql"), QStringLiteral("sql")},
+        {QStringLiteral("cmake"), QStringLiteral("cmake")},
+        {QStringLiteral("make"), QStringLiteral("makefile")},
+        {QStringLiteral("makefile"), QStringLiteral("makefile")},
+        {QStringLiteral("mk"), QStringLiteral("makefile")},
+        {QStringLiteral("ini"), QStringLiteral("properties")},
+        {QStringLiteral("conf"), QStringLiteral("properties")},
+        {QStringLiteral("properties"), QStringLiteral("properties")},
+        {QStringLiteral("diff"), QStringLiteral("diff")},
+        {QStringLiteral("patch"), QStringLiteral("diff")},
+        {QStringLiteral("tex"), QStringLiteral("tex")},
+        {QStringLiteral("latex"), QStringLiteral("tex")},
+        {QStringLiteral("pl"), QStringLiteral("perl")},
+        {QStringLiteral("perl"), QStringLiteral("perl")},
+        {QStringLiteral("rb"), QStringLiteral("ruby")},
+        {QStringLiteral("ruby"), QStringLiteral("ruby")},
+        {QStringLiteral("lua"), QStringLiteral("lua")},
+        {QStringLiteral("v"), QStringLiteral("verilog")},
+        {QStringLiteral("sv"), QStringLiteral("verilog")},
+        {QStringLiteral("vhd"), QStringLiteral("vhdl")},
+        {QStringLiteral("vhdl"), QStringLiteral("vhdl")},
+        {QStringLiteral("asm"), QStringLiteral("asm")},
+        {QStringLiteral("nasm"), QStringLiteral("asm")},
+        {QStringLiteral("f90"), QStringLiteral("fortran")},
+        {QStringLiteral("for"), QStringLiteral("fortran")},
+        {QStringLiteral("fortran"), QStringLiteral("fortran")},
+        {QStringLiteral("pas"), QStringLiteral("pascal")},
+        {QStringLiteral("pascal"), QStringLiteral("pascal")},
+        {QStringLiteral("delphi"), QStringLiteral("pascal")},
+    };
+    return alias.value(t);
+}
+
+/*
+ * 预览里代码块的分词涂色。
+ *
+ * 为什么要单独开一块**从不显示**的 Scintilla：分词只有 Scintilla 自己会做
+ * （QsciLexer 不对外暴露 styleText），而预览是 QTextDocument 渲的、手上没有现成
+ * 的 Scintilla。
+ *
+ * 复用 buildLexerFor() 的同一套 lexer 和 themeColorFor() 的同一套色板，为的是
+ * "编辑区里什么色、预览里就什么色"，换配色方案两边一起翻 —— 不另抄一份色表，
+ * 也不抄 Typora 的（它那套 token 色在加密包里，静态抽不到）。
+ */
+QString EditorViewItem::highlightCode(const QString &langId, const QString &code) {
+    /* 一块几十 KB 的代码逐字节问样式号会拖住预览刷新，这一档直接不涂 */
+    static constexpr int kMaxBytes = 60000;
+
+    const QByteArray utf8 = code.toUtf8();
+    if (langId.isEmpty() || utf8.isEmpty() || utf8.size() > kMaxBytes)
+        return QString();
+
+    static QHash<QString, QsciLexer *> lexers;       // 进程内复用，parent 给空
+    static QPointer<QsciScintilla> probe;
+
+    QsciLexer *lexer = lexers.value(langId, nullptr);
+    if (!lexer) {
+        lexer = buildLexerFor(langId, nullptr);
+        if (!lexer)
+            return QString();
+        lexers.insert(langId, lexer);
+    }
+
+    if (probe.isNull()) {
+        auto *sci = new QsciScintilla();
+        sci->setAttribute(Qt::WA_DontShowOnScreen, true);
+        probe = sci;
+    }
+    QsciScintilla *sci = probe.data();
+
+    /* 装 lexer 会重排样式表，所以每次都得先摘干净再装（切语言那条老坑，见 applyLanguage） */
+    sci->setLexer(nullptr);
+    sci->SendScintilla(QsciScintillaBase::SCI_SETCODEPAGE, 65001L);   // SC_CP_UTF8
+    sci->setLexer(lexer);
+    sci->SendScintilla(QsciScintillaBase::SCI_SETTEXT, utf8.constData());
+    sci->SendScintilla(QsciScintillaBase::SCI_COLOURISE, 0L, -1L);
+    /* 只涂分词真正吃过的地方：Scintilla 对长文档分段着色，没吃完的那截别硬涂 */
+    const qint64 limit = qMin<qint64>(sci->SendScintilla(QsciScintillaBase::SCI_GETENDSTYLED),
+                                      utf8.size());
+    if (limit <= 0)
+        return QString();
+
+    auto esc = [](const QString &t) { return t.toHtmlEscaped(); };
+    const QColor body = paletteDefault();
+    QString out;
+    QByteArray run;
+    int runStyle = -1;
+    auto flush = [&]() {
+        if (run.isEmpty())
+            return;
+        const QString text = QString::fromUtf8(run);
+        run.clear();
+        const QColor c = themeColorFor(lexer->description(runStyle));
+        if (c == body)
+            out += esc(text);            // 正文色不包 span：整块本来就默认这个色
+        else
+            out += QStringLiteral("<span style=\" color:%1;\">%2</span>")
+                       .arg(c.name(QColor::HexRgb), esc(text));
+    };
+
+    for (qint64 i = 0; i < limit; ++i) {
+        const char ch = utf8.at(int(i));
+        if (ch == '\n') {
+            flush();
+            out += QStringLiteral("<br />");
+            continue;
+        }
+        /* 样式号是按 UTF-8 字节给的，一个字符的每个字节同色，所以按字节攒不会切坏字 */
+        const int style = int(sci->SendScintilla(QsciScintillaBase::SCI_GETSTYLEAT,
+                                                 static_cast<long>(i)));
+        if (style != runStyle && !run.isEmpty())
+            flush();
+        runStyle = style;
+        run += ch;
+    }
+    flush();
+    return out;
 }
 
 QString EditorViewItem::languageLabel(const QString &id) const {

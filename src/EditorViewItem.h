@@ -402,6 +402,18 @@ public:
     QColor textColor() const { return m_textColor; }
     void setTextColor(const QColor &c);
 
+    /*
+     * 给 Markdown 预览分词涂色：按**编辑区同一套 lexer、同一套色板**把一段代码
+     * 渲成带 inline 颜色的 HTML 片段（行之间用 <br />）。
+     *
+     * 静态、不碰任何一栏编辑器：预览是 QTextDocument 渲的，手上没有 Scintilla，
+     * 所以内部自己养一块从不显示的（见 .cpp 里那段的说明）。
+     * 返回空串 = 这一档不涂（语言没有 lexer、或者分词没吃完整段），调用方原样贴。
+     */
+    static QString highlightCode(const QString &langId, const QString &code);
+    /* 围栏上写的语言名（bash / js / c++…）-> buildLexerFor() 认的那个 id；不认识给空 */
+    static QString fenceLangToId(const QString &info);
+
     QColor paperColor() const { return m_paperColor; }
     void setPaperColor(const QColor &c);
 

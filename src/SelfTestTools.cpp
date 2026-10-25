@@ -1056,6 +1056,31 @@ int SelfTest::runTools(Formatter *fmt, DiffEngine *differ, Checker *check, LlmCl
               QStringLiteral("配色是深色主题那一套（默认是白纸黑字，会把正文藏起来）"));
 
         /*
+         * 围栏代码块的分词涂色（效果照 Typora，色板用编辑区那一套，不是抄它）。
+         *
+         * 两条一起看才说明真的分了词：注释色和字符串色**同时**出现。
+         * 这条能红：把 highlightCode 里那次 SCI_COLOURISE 去掉、或者把
+         * themeColorFor() 换成固定正文色，立刻红。
+         */
+        {
+            const QString codeHtml = controller.markdownHtml(
+                QStringLiteral("```bash\n# 注释一行\necho \"一段字符串\"\n```\n"),
+                QString());
+            tcheck(codeHtml.contains(QStringLiteral("7a7e85"))
+                       && codeHtml.contains(QStringLiteral("6aab73")),
+                   QStringLiteral("围栏代码块里注释和字符串各自涂上了自己的色"),
+                   QStringLiteral("注释色在=%1 字符串色在=%2")
+                       .arg(codeHtml.contains(QStringLiteral("7a7e85")) ? 1 : 0)
+                       .arg(codeHtml.contains(QStringLiteral("6aab73")) ? 1 : 0));
+
+            /* 反证：这个语言没有 lexer，就不该冒出语法色（宁可不涂也别涂错） */
+            const QString unknownHtml = controller.markdownHtml(
+                QStringLiteral("```wqxyz\nfoo = 'bar'\n```\n"), QString());
+            tcheck(!unknownHtml.contains(QStringLiteral("6aab73")),
+                   QStringLiteral("认不出的语言不涂色"));
+        }
+
+        /*
          * 间距那三条：量的全是"toHtml() 写死的行内 margin 有没有被剥掉"。
          *
          * toHtml() 给每个块都写 style="margin-top:0px; margin-bottom:0px"，行内样式
