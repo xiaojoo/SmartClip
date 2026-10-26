@@ -178,6 +178,11 @@ QString reindentJson(const QString &text, int to) {
  * vswhere 的路径是微软文档保证的固定位置，用它问 VS 装在哪，不猜盘符；
  * Qt 那份从 `QCoreApplication::libraryPaths()` 往上推（跑起来必然带着 Qt 目录），
  * 也不猜装在哪块盘。整份清单进程内算一次（vswhere 要起个子进程）。
+ *
+ * 【-products * 不能省】vswhere 默认只报"Visual Studio 这个产品家族"里可启动的
+ * 安装，单独装的 Build Tools / 装在非默认目录的那些都不吐（这台机实测：
+ * `-all -property installationPath` 输出 0 行，加上 `-products *` 才吐出行
+ * `D:\Program\VisualStudio`）。少这一个开关，装好的那份 clang-format 就查不到。
  */
 QStringList clangFormatCandidates() {
     static const QStringList cached = [] {
@@ -188,7 +193,8 @@ QStringList clangFormatCandidates() {
         if (QFileInfo::exists(vswhere)) {
             QProcess probe;
             probe.setProgram(vswhere);
-            probe.setArguments({QStringLiteral("-all"), QStringLiteral("-property"),
+            probe.setArguments({QStringLiteral("-all"), QStringLiteral("-products"),
+                                QStringLiteral("*"), QStringLiteral("-property"),
                                 QStringLiteral("installationPath")});
             probe.start();
             if (probe.waitForFinished(4000)) {
