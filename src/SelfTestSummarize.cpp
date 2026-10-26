@@ -1021,11 +1021,15 @@ int SelfTest::runSummarize(ClipboardStore *store, Summarizer *sum, QObject *qmlR
             sumcheck(archived && archived->property("visible").toBool(),
                      "「归档」那一栏是可见的");
             /*
-             * 空列表那一栏本来就只有"标题 + 两句说明 + 一个空框"，60 是
-             * "画出来了"的下限，不是"好看"的门槛 —— 这条钉的是绑定写错时
-             * 整栏塌成 0 那种事故。
+             * 空列表那一栏现在只有"标题 + 一个空框"：17 + 9(间距) + 32(框) ≈ 58，
+             * 实测就是这个数。门槛从 60 降到 40 —— 这条钉的是"绑定写错整栏塌成 0"
+             * 那种事故，不是"好看"的门槛。
+             *
+             * 为什么以前是 60：那一栏原来在标题下面还有两句说明，2026-10-25 按
+             * "设置里标题到第一个控件之间的描述全删"改掉之后高度就掉到 58，
+             * 60 这个数跟着过期了（打包那条闸第一次把它撞出来）。
              */
-            sumcheck(archived && archived->property("implicitHeight").toReal() > 60,
+            sumcheck(archived && archived->property("implicitHeight").toReal() > 40,
                      "「归档」那一栏画出了内容",
                      archived ? QString::number(archived->property("implicitHeight").toReal())
                               : QStringLiteral("没找到那一栏"));
