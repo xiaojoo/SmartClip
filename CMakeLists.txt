@@ -146,6 +146,63 @@ qt_add_executable(SmartClip ${SMARTCLIP_SOURCES})
 # 所以 --self-test / --summarize-test 那些重定向到日志的用法不受影响。
 set_target_properties(SmartClip PROPERTIES WIN32_EXECUTABLE TRUE)
 
+# 内嵌 manifest 里补上 DPI 感知声明。
+#
+# CMake 默认那份 manifest **不带** dpiAware / dpiAwareness（在装出去的 exe 里数这两个
+# 词都是 0 次），于是进程以"DPI 不感知"起来，Qt 6 再在 QGuiApplication 初始化时运行时
+# 改档位 —— 改这个值 Windows 要重画整个桌面，用户看到的就是他报的那句"双击桌面快捷
+# 方式启动的那一瞬，整个桌面闪一下"。
+# 录屏量到的：不设 → 整屏全黑 1 帧（45ms 一帧的采样里，暗像素占比 1.000、与基线不同
+# 91.4%）；用 __COMPAT_LAYER 在进程创建前把档位钉上（等价于 manifest 声明）→ 0 帧。
+# 细节和数值写在 packaging/smartclip.manifest 的注释里。
+if(MSVC)
+    # 链接器那条路走不通：CMake 为了自己生成那份默认 manifest，会在链接行**最后**放一个
+    # /MANIFEST:NO，把我们写在它前面的 /MANIFEST:EMBED /MANIFESTINPUT: 顶掉
+    # （试过 target_link_options 和 LINK_FLAGS 两种摆法，量出来 exe 里 dpiAwareness 都是 0）。
+    # 所以改成链接完成之后，拿 Windows SDK 的 mt.exe 把我们那份并进入口 id 1 的资源里。
+    # mt.exe 的位置有三条来路，逐个试：注册表的 KitsRoot10、环境变量 WindowsSdkDir、
+    # 以及默认安装目录。SDK 版本号那一档**不能指望** CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION
+    # —— 它是 VS 生成器才填的，本工程用的是 NMake Makefiles JOM，那个变量是空的
+    # （第一版就栽在这儿：拼出 `bin//x64/mt.exe` 一个都没匹配上）。
+    # 所以直接扫 bin/*/x64/ 下面所有版本，取最新的那个。
+    get_filename_component(SMARTCLIP_SDK_ROOT
+        "[HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows Kits\\Installed Roots;KitsRoot10]"
+        ABSOLUTE)
+    if(NOT SMARTCLIP_SDK_ROOT OR NOT EXISTS "${SMARTCLIP_SDK_ROOT}")
+        file(TO_CMAKE_PATH "$ENV{WindowsSdkDir}" SMARTCLIP_SDK_ROOT)
+    endif()
+    if(NOT SMARTCLIP_SDK_ROOT OR NOT EXISTS "${SMARTCLIP_SDK_ROOT}")
+        set(SMARTCLIP_SDK_ROOT "C:/Program Files (x86)/Windows Kits/10")
+    endif()
+    file(GLOB SMARTCLIP_MT_CANDIDATES
+        "${SMARTCLIP_SDK_ROOT}/bin/*/x64/mt.exe"
+        "${SMARTCLIP_SDK_ROOT}/bin/x64/mt.exe")
+    list(SORT SMARTCLIP_MT_CANDIDATES COMPARE NATURAL ORDER DESCENDING)
+    if(SMARTCLIP_MT_CANDIDATES)
+        list(GET SMARTCLIP_MT_CANDIDATES 0 SMARTCLIP_MT)
+    else()
+        set(SMARTCLIP_MT "")
+    endif()
+    if(NOT SMARTCLIP_MT)
+        # 找不到就当场停：悄悄少一份 manifest，等于这个闪又"修好了"而没人发现
+        message(FATAL_ERROR
+            "找不到 Windows SDK 的 mt.exe，没法把 DPI 感知声明写进 SmartClip.exe 的 manifest —— "
+            "缺它的话启动会整屏黑一帧（见 packaging/smartclip.manifest 顶上那段）。"
+            "找过的根目录=${SMARTCLIP_SDK_ROOT}")
+    endif()
+    message(STATUS "manifest 合并用 mt.exe: ${SMARTCLIP_MT}")
+    # 合并这一步交给 packaging/embed-manifest.bat：`-outputresource:"路径;#1"` 这一串要
+    # 同时穿过 CMake 的分号列表、NMake 的注释符 '#'、和 cmd 的引号规则，三种写法都试过
+    # 并且每种都量到 mt.exe 自己的报错（c101008d / c1010008 / c1010011，细节写在那个 .bat
+    # 顶上）。交给批处理之后只有 cmd 看得见那串。
+    add_custom_command(TARGET SmartClip POST_BUILD
+        COMMAND cmd /c "${CMAKE_CURRENT_SOURCE_DIR}/packaging/embed-manifest.bat"
+                "${SMARTCLIP_MT}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/packaging/smartclip.manifest"
+                "$<TARGET_FILE:SmartClip>"
+        COMMENT "把 DPI 感知声明并进 SmartClip.exe 的 manifest")
+endif()
+
 # ---------------------------------------------------------------------------
 # 【必须留着】每个 .cpp 都依赖**全部**工程头文件
 #
