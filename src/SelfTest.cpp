@@ -3577,12 +3577,78 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
             QStringList folderActs;
             for (const QVariant &a : treeRowMenuActs(QStringLiteral("folder")))
                 folderActs << a.toString();
-            check(folderActs.size() == 3
+            check(folderActs.size() == 4
                       && folderActs.value(0) == QLatin1String("treeNew")
-                      && folderActs.value(1) == QLatin1String("refresh")
-                      && folderActs.value(2).startsWith(QStringLiteral("folderReveal:")),
-                  QStringLiteral("文件夹右键菜单三条（新建 / 刷新 / 在文件夹中显示）"),
+                      && folderActs.value(1).startsWith(QStringLiteral("folderNewDir:"))
+                      && folderActs.value(2) == QLatin1String("refresh")
+                      && folderActs.value(3).startsWith(QStringLiteral("folderReveal:")),
+                  QStringLiteral("文件夹右键菜单四条（新建文件 / 新建文件夹 / 刷新 / 在文件夹中显示）"),
                   folderActs.join(QLatin1Char('/')));
+
+            /*
+             * ================= 新建文件夹 =================
+             *
+             * 三条各钉一件事：
+             *   1) 菜单上那一条的灰/活**跟着 C++ 那个判据走**（不是把判据在 QML
+             *      这边重算一遍，那种断言自己证明自己）；
+             *   2) 判据本身要能分辨：「文档」那棵能（递归扫），「剪贴板」那层不能
+             *      （rescan 在那层只认 yyyy-MM-dd，建了磁盘上有、树上没有）；
+             *   3) 真建一个出来，必须**在 tree() 的结果里出现** —— 只验 QDir 建得出
+             *      目录不算数，那验的是操作系统，不是这条功能。
+             */
+            {
+                QVariant st;
+                QMetaObject::invokeMethod(qmlRoot, "folderNewDirMenuState",
+                                          Q_RETURN_ARG(QVariant, st));
+                /* Q_RETURN_ARG 的第二个参数必须是 QVariant 本身（模板按它推 T） */
+                QVariant menuStateVar;
+                QMetaObject::invokeMethod(qmlRoot, "folderNewDirMenuState",
+                                          Q_RETURN_ARG(QVariant, menuStateVar));
+                const QVariantMap menuState = menuStateVar.toMap();
+                const QString state = menuState.value(QStringLiteral("state")).toString();
+                const QString rowPath = menuState.value(QStringLiteral("path")).toString();
+                const bool want = store->canCreateFolderIn(rowPath);
+                check(!state.isEmpty()
+                          && state == (want ? QStringLiteral("enabled")
+                                            : QStringLiteral("disabled")),
+                      QStringLiteral("那一条的灰/活 = Store.canCreateFolderIn(那一行的目录)"),
+                      QStringLiteral("%1 对 %2（%3）").arg(state,
+                                                           want ? QStringLiteral("活")
+                                                                : QStringLiteral("灰"),
+                                                           rowPath));
+
+                check(store->canCreateFolderIn(store->docsRoot())
+                          && !store->canCreateFolderIn(store->contentRoot())
+                          && !store->canCreateFolderIn(
+                                 store->contentRoot() + QStringLiteral("/2026-01-01")),
+                      QStringLiteral("判据能分辨：「文档」那棵可以，「剪贴板」和日期目录不行"));
+
+                /* 树里有没有这一条目录节点（递归找，节点是嵌套的） */
+                auto hasFolder = [](auto &&self, const QVariantList &nodes,
+                                    const QString &path) -> bool {
+                    for (const QVariant &v : nodes) {
+                        const QVariantMap n = v.toMap();
+                        if (n.value(QStringLiteral("path")).toString() == path)
+                            return true;
+                        if (self(self, n.value(QStringLiteral("children")).toList(), path))
+                            return true;
+                    }
+                    return false;
+                };
+
+                const QString made = store->createFolder(store->docsRoot(),
+                                                         QStringLiteral("自检新夹"));
+                check(!made.isEmpty() && QDir(made).exists(),
+                      QStringLiteral("新建文件夹：真的建出来了"), made);
+                check(hasFolder(hasFolder, store->tree(QString(), true), made),
+                      QStringLiteral("新建的文件夹**出现在左树上**（空目录也要重扫才有节点）"));
+                check(store->createFolder(store->docsRoot(), QStringLiteral("自检新夹")).isEmpty(),
+                      QStringLiteral("同名已存在 → 不建第二个"));
+                check(store->createFolder(store->docsRoot(), QStringLiteral("a/b")).isEmpty()
+                          && store->createFolder(store->docsRoot(), QStringLiteral("..")).isEmpty()
+                          && store->createFolder(store->docsRoot(), QStringLiteral("  ")).isEmpty(),
+                      QStringLiteral("名字带分隔符 / .. / 全空白 → 一律不建（不套娃、不越层）"));
+            }
 
             /*
              * "便签"那一格（左侧那排工具格里的便签图标）的右键菜单。
@@ -4990,6 +5056,13 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
                   && names.contains(QStringLiteral("treeImportFolder")),
               QStringLiteral("\"文件\"菜单里既能打开文件、也能打开文件夹"),
               names.join(QLatin1Char('/')));
+        /* 用户点名"这里也加个新建文件夹"：要挨着"新建"排，不是塞在菜单尾巴上 */
+        check(names.indexOf(QStringLiteral("treeNewFolder"))
+                          == names.indexOf(QStringLiteral("new")) + 1,
+              QStringLiteral("\"文件\"菜单里「新建文件夹」紧跟在「新建」下面"),
+              QStringLiteral("new 在第 %1 位，新建文件夹在第 %2 位")
+                  .arg(names.indexOf(QStringLiteral("new")),
+                       names.indexOf(QStringLiteral("treeNewFolder"))));
     }
 
     dispatch(QStringLiteral("menu:视图"));

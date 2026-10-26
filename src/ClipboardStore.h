@@ -186,6 +186,25 @@ public:
     Q_INVOKABLE QString createFile(const QString &text = QString());
 
     /*
+     * 能不能在这个目录里"新建文件夹"（左树文件夹行右键菜单那条的置灰判据）。
+     *
+     * 判的不是有没有写权限，而是**建出来的那一行会不会出现在树上**：rescan 只往
+     * 下钻"导入目录"和「文档」这两棵（scanFolder 的 imported=true），「剪贴板」
+     * 那一层只认 yyyy-MM-dd 的目录名、日期目录里也只收本层的 md。所以在别的层
+     * 建文件夹，磁盘上有了、树上永远没有 —— 那种按钮不该按得动。
+     */
+    Q_INVOKABLE bool canCreateFolderIn(const QString &path) const;
+
+    /*
+     * 在 parentPath 下面建一个文件夹，返回它的绝对路径。
+     *
+     * 名字带路径分隔符、叫 "." / ".."、或同名已经存在 —— 一律返回空串（不静默
+     * 改名，也不一层套一层）。建完立刻 rescan：空目录是靠扫盘那趟记进
+     * m_importedDirs 才有树节点的，不重扫这一行不会出来。
+     */
+    Q_INVOKABLE QString createFolder(const QString &parentPath, const QString &name);
+
+    /*
      * 新建一份**带完整正文**的笔记（文档识别那条路用的，见 src/DocImport.h）。
      *
      * 和 createFile 的区别：那个是"空白笔记 + 追加一段"，标题固定成日期和时间，

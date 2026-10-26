@@ -1489,6 +1489,41 @@ QString ClipboardStore::createFile(const QString &text) {
     return path;
 }
 
+bool ClipboardStore::canCreateFolderIn(const QString &path) const {
+    const QString clean = QDir::cleanPath(path.trimmed());
+    if (clean.isEmpty())
+        return false;
+
+    /* 「文档」那一棵 + 用户导入的每一棵：只有这两支是递归扫的（见 rescan） */
+    QStringList roots = m_imported;
+    roots << QDir::cleanPath(docsRoot());
+    for (const QString &r : std::as_const(roots)) {
+        const QString root = QDir::cleanPath(r);
+        if (!root.isEmpty() && (clean == root || clean.startsWith(root + QLatin1Char('/'))))
+            return true;
+    }
+    return false;
+}
+
+QString ClipboardStore::createFolder(const QString &parentPath, const QString &name) {
+    const QString parent = QDir::cleanPath(parentPath.trimmed());
+    const QString leaf = name.trimmed();
+    if (parent.isEmpty() || leaf.isEmpty() || leaf == QLatin1String(".")
+        || leaf == QLatin1String("..") || leaf.contains(QLatin1Char('/'))
+        || leaf.contains(QLatin1Char('\\')))
+        return QString();
+
+    const QString path = QDir::cleanPath(parent + QLatin1Char('/') + leaf);
+    if (QFileInfo::exists(path))
+        return QString();
+    if (!QDir(parent).mkpath(leaf))
+        return QString();
+
+    /* 空目录没有文件可挂，节点全靠扫盘那一趟记下的目录清单 —— 不重扫就不会出场 */
+    rescan();
+    return path;
+}
+
 QString ClipboardStore::createNote(const QString &title, const QString &markdown,
                                    const QMap<QString, QByteArray> &assets) {
     const QDateTime now = QDateTime::currentDateTime();

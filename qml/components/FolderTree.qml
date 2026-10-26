@@ -118,7 +118,8 @@ Rectangle {
     function scrollToPath(path) {
         for (var i = 0; i < rows.length; ++i) {
             var r = rows[i]
-            if (r.kind === "file" && r.path === path) {
+            /* 文件行和文件夹行都认：新建文件夹之后也要滚得到它 */
+            if (r.path === path) {
                 view.positionViewAtIndex(i, ListView.Contain)
                 return true
             }

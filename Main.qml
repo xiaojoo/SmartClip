@@ -706,6 +706,42 @@ Rectangle {
     }
 
     /*
+     * 左树文件夹行右键菜单里那条"新建文件夹…"。
+     *
+     * parentPath 是弹菜单那一刻那一行带出来的目录（act 里带的，见 js/EditorMenus.js）；
+     * 一个目录都没带出来时（没有选中任何文件夹）弹一次"选位置"，在他挑的那个下面建。
+     *
+     * 建完展开它的上一级、滚到那一行 —— 新建的东西不露出来，从界面上看就跟没建一样。
+     * 落盘之后 Store.createFolder 自己重扫过一遍（空目录只有扫盘才有树节点），
+     * 所以这里不再调 refresh()。
+     */
+    function newFolder(parentPath) {
+        var dir = parentPath
+        if (dir === "") {
+            dir = withSettingsPanelAway(function () {
+                return Cmd.chooseFolderDialog("新建文件夹的位置", Store.rootPath)
+            })
+        }
+        if (dir === "")
+            return
+
+        askInput("新建文件夹", "文件夹名", "新建文件夹", {}, function (name) {
+            if (name === "")
+                return
+
+            var path = Store.createFolder(dir, name)
+            if (path === "") {
+                Cmd.alert("新建失败",
+                          "建不出这个文件夹：名字里有 / \\ 这类字符，"
+                          + "或者同名的已经存在了\n\n" + dir)
+                return
+            }
+            activateFolder(folderKeyOf(path))
+            Qt.callLater(function () { folderTree.scrollToPath(path) })
+        })
+    }
+
+    /*
      * 当前标签对应的左树文件路径；当前标签不是左树管着的文件（未命名空白文档、
      * 从菜单"打开"进来的别的文件）时返回空串。
      *
@@ -2297,7 +2333,8 @@ Rectangle {
             return
         folderTree.contextPath = row.path !== undefined ? row.path : ""
         var items = (row.kind === "file") ? Menus.fileContextMenu(row)
-                                          : Menus.folderContextMenu(row)
+                                          : Menus.folderContextMenu(row,
+                                              Store.canCreateFolderIn(row.path || ""))
         ddMenu.openAtPoint(null, x, y, items)
     }
 
@@ -2342,7 +2379,8 @@ Rectangle {
             if (row.kind !== kind)
                 continue
             var items = (kind === "file") ? Menus.fileContextMenu(row)
-                                          : Menus.folderContextMenu(row)
+                                          : Menus.folderContextMenu(row,
+                                              Store.canCreateFolderIn(row.path || ""))
             var out = []
             for (var j = 0; j < items.length; ++j) {
                 if (items[j] && items[j].act !== undefined)
@@ -2351,6 +2389,33 @@ Rectangle {
             return out
         }
         return []
+    }
+
+    /*
+     * 自检用：树上第一个文件夹行的"新建文件夹…"这一条现在是灰的还是活的。
+     * 返回 { state: "disabled" / "enabled" / "none", path: 那一行的目录 }。
+     *
+     * 连那一行的目录一起交出去，是因为自检要核对"灰/活跟的是 C++ 那个判据"——
+     * 树里第一行是哪个文件夹由磁盘上有什么决定，写死答案就成了一条会随机红的门。
+     *
+     * 量的是菜单构造里那一个条目的 disabled —— 不是把判据在 QML 这边再算一遍
+     * （那种断言自己证明自己，判据改了它跟着改，钉不住"界面上点不动"这件事）。
+     */
+    function folderNewDirMenuState() {
+        for (var i = 0; i < treeRows.length; ++i) {
+            var row = treeRows[i]
+            if (row.kind !== "folder")
+                continue
+            var dir = row.path || ""
+            var items = Menus.folderContextMenu(row, Store.canCreateFolderIn(dir))
+            for (var j = 0; j < items.length; ++j) {
+                if (items[j] && items[j].act === "folderNewDir:" + dir)
+                    return { state: items[j].disabled === true ? "disabled" : "enabled",
+                             path: dir }
+            }
+            return { state: "none", path: dir }
+        }
+        return { state: "none", path: "" }
     }
 
     function dispatch(act) {
@@ -2464,12 +2529,15 @@ Rectangle {
         if (act.indexOf("fileDelete:") === 0) { deleteTreeFile(act.substring(11)); return }
         if (act.indexOf("fileReveal:") === 0) { revealPath(act.substring(11)); return }
         if (act.indexOf("folderReveal:") === 0) { revealPath(act.substring(13)); return }
+        if (act.indexOf("folderNewDir:") === 0) { newFolder(act.substring(13)); return }
         if (act.indexOf("removeImport:") === 0) {
             removeImportedFolder(act.substring(13))
             return
         }
         /* ---- 左侧项目树（标题栏那排按钮 / 标题上的"更多"菜单） ---- */
         if (act === "treeNew") { newEntry(); return }
+        /* "文件"菜单里那条：没有行上下文，newFolder 自己会弹一次"选位置" */
+        if (act === "treeNewFolder") { newFolder(""); return }
         /* "看哪一份"：标题「项目 ∨」那个菜单（见 js/EditorMenus.js 的 treeScopeMenu） */
         if (act.indexOf("treeScope:") === 0) { switchTreeScope(act.substring(10)); return }
         if (act === "treeLocate") { locateCurrentItem(); return }

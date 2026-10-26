@@ -94,6 +94,12 @@ function eolItems(view) {
 function fileMenu(ov) {
     return applyOverrides([
         { label: "新建", act: "new", shortcut: "Ctrl+N", icon: "new" },
+        /*
+         * 新建文件夹：这一条没有"右键的是哪一行"，所以先弹一次"选位置"，
+         * 在他挑的那个目录下建。左树文件夹行右键那一条走的是同一个函数
+         * （见 Main.qml 的 newFolder），那边带得出路径就直接建在那一行下面。
+         */
+        { label: "新建文件夹…", act: "treeNewFolder", icon: "folder" },
         { label: "打开…", act: "open", shortcut: "Ctrl+O", icon: "open" },
         /*
          * 打开文件夹 = 把某个目录挂到左边那棵树上（这就是本程序里"打开一个
@@ -651,11 +657,17 @@ function fileContextMenu(row) {
  *
  * 导入的目录（folderKind === "imported"）多一条"移除"：它只是挂上来看的，
  * 移开不动磁盘上的文件。
+ *
+ * canNewFolder 由调用方问 C++ 拿（Store.canCreateFolderIn）：只有递归扫的那两棵
+ * （导入目录、「文档」）里新建的文件夹才会出现在树上，日期目录那一层建出来
+ * 磁盘上有、树上没有 —— 那条就置灰，不是藏掉（换一行右键就少一条菜单更难找）。
  */
-function folderContextMenu(row) {
+function folderContextMenu(row, canNewFolder) {
     var path = (row && row.path) ? row.path : ""
     var items = [
         { label: "新建文件", act: "treeNew", icon: "plus" },
+        { label: "新建文件夹…", act: "folderNewDir:" + path, icon: "folder",
+          disabled: canNewFolder === false },
         { label: "刷新列表（重扫磁盘）", act: "refresh", icon: "refresh" },
         { separator: true },
         { label: "在文件夹中显示", act: "folderReveal:" + path, icon: "folder" }
