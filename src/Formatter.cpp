@@ -555,6 +555,15 @@ QString Formatter::builtinKindFor(const QString &language) const {
     return builtinKindForLanguage(language);
 }
 
+QString Formatter::docUrl(const QString &language) const {
+    const ToolEntry *e = entryForLanguage(language);
+    if (!e || !e->tool || !e->tool[0])
+        return QString();
+    /* 锚点 = 工具名：kTools 里那八个本来就全是小写加连字符，和文档的标题对得上 */
+    return QStringLiteral("https://github.com/xiaojoo/SmartClip/blob/master/docs/安装依赖.md#")
+           + QString::fromLatin1(e->tool);
+}
+
 QString Formatter::toolFor(const QString &language) const {
     return QSettings().value(QStringLiteral("format/tool/") + language).toString().trimmed();
 }

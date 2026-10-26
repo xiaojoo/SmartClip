@@ -18,6 +18,10 @@ cmake --build build --target SmartClip
 packaging\build-release.bat        rem 出全部安装包 + zip + 尺寸表，见 packaging/README.md
 ```
 
+**装好之后**：格式化、文档识别、图上选字换 PP-OCR、翻译这四件事用的是**本机上的外部工具**，
+安装包不捆绑它们（缺了程序照常跑，界面上会明说缺哪个）。每一样怎么装、装完怎么确认，
+见 [docs/安装依赖.md](docs/安装依赖.md) —— 设置面板里那句「怎么装」的链接也指到这篇。
+
 ## 声明
 
 - 本仓库里**我们自己写的代码**按 CC0 1.0 Universal 释出（见 `LICENSE`），可以拿走、改、卖，不用署名。

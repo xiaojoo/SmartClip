@@ -94,6 +94,18 @@ public:
     Q_INVOKABLE QString lastEngine() const { return m_lastEngine; }
 
     /*
+     * 这个语言的工具"怎么装"跳哪儿（设置面板那条链接用）。
+     *
+     * 指回仓库里那篇 docs/安装依赖.md，锚点就是工具名（clang-format / prettier /
+     * black …）。为什么不给每个工具在代码里写一条外链：那八条外链各自会腐烂，
+     * 而且"怎么装"这件事除了下载地址还有"装完要不要重启 / 填哪一格"，一句链接说
+     * 不清 —— 一篇文档 + 一个锚点，用户看到的是完整过程，我们只维护一处。
+     *
+     * 空串 = 这一档没有外部工具（内置那三样 json / html / text）。
+     */
+    Q_INVOKABLE QString docUrl(const QString &language) const;
+
+    /*
      * 某个语言的自定义工具命令（设置里填的）。
      *
      * 留空 = 用内置那份默认（见 kTools）；填了就整条覆盖 —— 命令里可以用

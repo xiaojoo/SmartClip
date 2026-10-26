@@ -132,6 +132,20 @@ int main(int argc, char *argv[]) {
     app.setOrganizationName("SmartClip");
     app.setApplicationName("SmartClip");
     /*
+     * 配置隔离（试"一台什么都没装的机器"用的）：设了 SMARTCLIP_CONFIG_NS 就把
+     * 整份配置挪到 HKCU\Software\SmartClip\<NS> 那一档，不碰用户真实那份 ——
+     * 保存位置、导入清单、模型密钥、格式化器、热键全部回到出厂空白。
+     *
+     * 为什么要这个钩子：这三块设置的"空态"没法用别的方式量 —— 要么改用户的注册表
+     * （拿他的真实配置冒险），要么在代码里假设空态长什么样（自己证明自己）。
+     * 不设这个环境变量时行为一个字节都没变。
+     */
+    if (qEnvironmentVariableIsSet("SMARTCLIP_CONFIG_NS")) {
+        const QByteArray ns = qEnvironmentVariable("SMARTCLIP_CONFIG_NS").toUtf8();
+        if (!ns.trimmed().isEmpty())
+            app.setApplicationName(QString::fromUtf8(ns).trimmed());
+    }
+    /*
      * 窗口 / 任务栏图标用 app.ico 而不是 SVG：ico 里 16..256 七个条目都是按该尺寸
      * 真实光栅化烘进去的，走 QIcon 就不依赖 svg 图标引擎插件。QIcon 会按当前 DPR
      * 自己挑最接近的条目（形的来历见 CMakeLists.txt 里「应用图标」那段）。

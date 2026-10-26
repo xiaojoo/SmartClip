@@ -2,6 +2,7 @@
 
 #include "ClipboardStore.h"
 #include "EditorViewItem.h"
+#include "Formatter.h"
 #include "PinOcr.h"
 #include "PinWindow.h"
 #include "Screenshot.h"
@@ -9000,9 +9001,137 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
                           .arg(m.value(QStringLiteral("nav")).toBool() ? 1 : 0)
                           .arg(rows).arg(styled).arg(rowW).arg(availW)
                           + QStringLiteral("｜%1").arg(first));
+                /*
+                 * 链接**摆出来了没有**（不是"C++ 算不算得出地址"，上面那条管那个）。
+                 * -1 = 这台机每档工具都装上了，界面上没有一条"本机没装"可看 —— 跳过。
+                 */
+                const double linkH = m.value(QStringLiteral("linkHeight")).toDouble();
+                if (linkH < 0.0) {
+                    out() << "        （这台机每档格式化器都装上了，「怎么装」那条链接没有出场机会，"
+                             "这一条跳过）" << Qt::endl;
+                } else {
+                    check(linkH >= 10.0,
+                          QStringLiteral("设置→格式化：没装那一行下面真的摆着一条「怎么装」链接"),
+                          QStringLiteral("那一行高 %1px（0 = 没显示出来）").arg(linkH));
+                }
             } else {
                 check(false, QStringLiteral("设置→格式化：每行下面列出了这一语言的格式模版"),
                       QStringLiteral("找不到 settingsPanel，整栏无从谈起"));
+            }
+
+            /*
+             * ================= 干净机器上的那三块（模型状态行 + 怎么装的链接） =================
+             *
+             * 用户报的原话是"一台新电脑什么都没装，这些都没有啊，怎么配置使用呢"。
+             * 这里钉两件"引导"上的事：
+             *   1) 模型那一栏的状态行：三档（用不了 / 还差一步 / 当前）各说各的话，
+             *      而且**判据和句子不许打架**（level 说 none 而文案却写"当前："就是骗人）；
+             *   2) 格式化那一栏每行"本机没装"旁边那条「怎么装」：每档外部工具都得有地址，
+             *      锚点必须对得上仓库那篇文档里的标题 —— 以后加工具忘了写文档，这条红。
+             */
+            if (llm) {
+                /* 三档判据本身（纯静态那份：不能拿用户真实密钥去改空再改回来） */
+                const QString none = LlmClient::configLevelFor(
+                                         QStringLiteral("api"), QString(),
+                                         QStringLiteral("k"), QStringLiteral("m"),
+                                         QString(), QString());
+                const QString partial = LlmClient::configLevelFor(
+                                         QStringLiteral("api"), QStringLiteral("u"), QString(),
+                                         QStringLiteral("m"), QString(), QString());
+                const QString ok = LlmClient::configLevelFor(
+                                         QStringLiteral("api"), QStringLiteral("u"),
+                                         QStringLiteral("k"), QStringLiteral("m"),
+                                         QString(), QString());
+                const QString localNone = LlmClient::configLevelFor(
+                                         QStringLiteral("local"), QStringLiteral("u"),
+                                         QStringLiteral("k"), QStringLiteral("m"),
+                                         QString(), QString());
+                const QString localOk = LlmClient::configLevelFor(
+                                         QStringLiteral("local"), QString(), QString(),
+                                         QString(), QStringLiteral("llama-server.exe"),
+                                         QStringLiteral("gemma3.gguf"));
+                check(none == QLatin1String("none") && partial == QLatin1String("partial")
+                          && ok == QLatin1String("ok") && localNone == QLatin1String("none")
+                          && localOk == QLatin1String("ok"),
+                      QStringLiteral("模型三档判据能分辨：地址/模型名空=none、只缺密钥=partial、"
+                                     "填全=ok；本地模式看程序+模型文件"),
+                      QStringLiteral("%1 / %2 / %3 / 本地 %4 / 本地 %5")
+                          .arg(none, partial, ok, localNone, localOk));
+
+                /* 界面上那一行：文案的开头必须跟着档位走 */
+                const QString level = llm->configLevel();
+                const QString summary = llm->configSummary();
+                const QString head = level == QLatin1String("none") ? QStringLiteral("用不了：")
+                                       : level == QLatin1String("partial") ? QStringLiteral("还差一步：")
+                                                                           : QStringLiteral("当前：");
+                check(llm->ready() == (level != QLatin1String("none"))
+                          && summary.startsWith(head),
+                      QStringLiteral("模型那一栏的状态行：说的话跟着档位走（%1）").arg(level),
+                      QStringLiteral("ready=%1 句子=%2").arg(llm->ready()).arg(summary.left(24)));
+            } else {
+                check(false, QStringLiteral("模型那一栏的状态行"), QStringLiteral("拿不到 Llm"));
+            }
+
+            {
+                Formatter fmt;
+                const QVariantList tools = fmt.toolList();
+                int external = 0, linked = 0;
+                QStringList missing, toolsSeen;
+                for (const QVariant &v : tools) {
+                    const QVariantMap e = v.toMap();
+                    const QString id = e.value(QStringLiteral("id")).toString();
+                    const QString tool = e.value(QStringLiteral("tool")).toString();
+                    if (tool.isEmpty())
+                        continue;          /* 内置那三样（json / html / text）没有外部工具 */
+                    ++external;
+                    toolsSeen << tool;
+                    const QString url = fmt.docUrl(id);
+                    if (url.startsWith(QLatin1String("https://"))
+                            && url.endsWith(QLatin1Char('#') + tool))
+                        ++linked;
+                    else
+                        missing << QStringLiteral("%1→%2").arg(id, url);
+                }
+                check(external > 0 && linked == external,
+                      QStringLiteral("每个外部工具都有一句「怎么装」，锚点 = 工具名"),
+                      QStringLiteral("%1 档里 %2 档有链接 %3")
+                          .arg(external).arg(linked).arg(missing.join(QStringLiteral(" "))));
+
+                /*
+                 * 文档本身：链接指过去，那边得真有一节讲这个工具。
+                 * 从可执行文件往上找仓库里的 docs/安装依赖.md —— 装出去的那份里没有
+                 * 这个文件（它不在包里），那种情况打印一句跳过，不算红。
+                 */
+                QString docPath;
+                QDir d = QFileInfo(QCoreApplication::applicationFilePath()).absoluteDir();
+                for (int up = 0; up < 6 && docPath.isEmpty(); ++up) {
+                    const QString cand = d.absoluteFilePath(
+                        QStringLiteral("docs/安装依赖.md"));
+                    if (QFileInfo::exists(cand))
+                        docPath = cand;
+                    else if (!d.cdUp())
+                        break;
+                }
+                if (docPath.isEmpty()) {
+                    out() << "        （仓库那篇「安装依赖」不在可执行文件上面几层，"
+                             "这一条跳过——包里没有它）" << Qt::endl;
+                } else {
+                    QFile f(docPath);
+                    QString text;
+                    if (f.open(QIODevice::ReadOnly))
+                        text = QString::fromUtf8(f.readAll());
+                    QStringList gone;
+                    const QSet<QString> seen(toolsSeen.begin(), toolsSeen.end());
+                    for (const QString &t : seen)
+                        if (!text.contains(QStringLiteral("\n### %1").arg(t)))
+                            gone << t;
+                    check(!text.isEmpty() && gone.isEmpty(),
+                          QStringLiteral("docs/安装依赖.md 里每个工具都有一节（标题就是工具名）"),
+                          QStringLiteral("%1｜缺：%2").arg(docPath,
+                                                           gone.isEmpty()
+                                                               ? QStringLiteral("无")
+                                                               : gone.join(QStringLiteral(" "))));
+                }
             }
 
             /*

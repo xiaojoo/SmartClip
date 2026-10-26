@@ -114,6 +114,27 @@ class LlmClient final : public QObject {
     Q_PROPERTY(QString status READ status NOTIFY statusChanged)
 
     /*
+     * 模型这一项**配好了没有**，以及给人读的那一句"现在用的是哪个 / 还差什么"。
+     *
+     * 判据只有这一份：Checker::llmReady() 现在就是转手问它（以前校验那边自己判
+     * 一遍，两边各写各的迟早打架）。"配好"说的是地址/模型名/程序这些**填没填**，
+     * 不是服务起没起来 —— 本地那个在真正要用的时候会自动拉起来。
+     *
+     * configLevel 给三档，界面上颜色跟着它走：
+     *   "ok"      能用
+     *   "partial" 只差密钥（接口模式下地址和模型名都是出厂默认，没 key 发不出去；
+     *             但本机自己跑的 Ollama / LM Studio 不需要 key，所以不算"没配好"）
+     *   "none"    必填的那几项还空着
+     *
+     * 为什么句子在 C++ 拼而不是 QML：话和判据得分开写就会漂移 —— 校验那一栏的
+     * 状态行以前在 QML 里拼过一次，用户切到本地模型之后它照样报出厂默认的
+     * "deepseek-chat"（见 src/Checker.cpp 里 modelSummary 那段）。
+     */
+    Q_PROPERTY(bool ready READ ready NOTIFY settingsChanged)
+    Q_PROPERTY(QString configLevel READ configLevel NOTIFY settingsChanged)
+    Q_PROPERTY(QString configSummary READ configSummary NOTIFY settingsChanged)
+
+    /*
      * 语言清单（中文名，直接进提示词）。
      * languages 第一项是"自动检测"（只当源语言用），targetLanguages 去掉它。
      */
@@ -135,6 +156,19 @@ public:
 
     QString model() const;
     void setModel(const QString &value);
+
+    /* 见上面 ready / configLevel / configSummary 那三个 Q_PROPERTY 的说明 */
+    bool ready() const;
+    QString configLevel() const;
+    QString configSummary() const;
+    /*
+     * 三档判据的**纯函数版**（同样的六个入参，不读成员、不落盘）。
+     * 自检靠它把 none / partial / ok 三个分支各测一遍 —— 不能拿用户真实的
+     * 密钥去改空再改回来（中间进程一挂他的 key 就没了）。
+     */
+    static QString configLevelFor(const QString &mode, const QString &apiBase,
+                                  const QString &apiKey, const QString &model,
+                                  const QString &localExe, const QString &localModel);
 
     QString ocrModel() const;
     void setOcrModel(const QString &value);

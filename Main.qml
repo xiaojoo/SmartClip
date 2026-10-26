@@ -3157,6 +3157,15 @@ Rectangle {
      * 还是"虚拟行重算"造成的，所以这里把每一步单独计时。
      */
     Component.onCompleted: {
+        /* 临时探针（量"什么都没装的机器"上那三块设置面板的空态）：
+           --autosec=document|format|translate 让面板启动就开到那一栏，好截图 */
+        for (var __ai = 0; __ai < Qt.application.arguments.length; ++__ai) {
+            var __a = String(Qt.application.arguments[__ai])
+            if (__a.indexOf("--autosec=") === 0) {
+                Qt.callLater(function () { settingsPanel.openSection(__a.substring(10)) })
+                break
+            }
+        }
         /*
          * 窗口已经由 C++ 侧交给 WindowHelper（main.cpp 里 attachWidget），
          * 这里只需要把数据刷出来，并把上次的编辑器视图设置恢复回来。

@@ -557,22 +557,12 @@ bool Checker::llmReady() const {
     if (!m_llm)
         return false;
     /*
-     * 两种模式要的东西不一样，**别混着看**：
-     *
-     *   本地模式：要的是"程序 + 模型文件"（接口地址是 127.0.0.1:端口，永远非空，
-     *             拿它当判据等于永远"就绪" —— 原来就是这样，用户切到本地模型
-     *             之后界面上照样报接口那个模型名）；
-     *   接口模式：要的是"接口地址 + 模型名"（和 LlmClient::ask 的判据一致）。
-     *
-     * 注意这里判的是**配好了没有**，不是"服务起没起来"：本地那个没起来时
-     * LlmClient::ask 会自己把它拉起来（见那里"配好一次，以后不用手点启动"），
-     * 所以起没起来只影响界面上那句提示，不影响能不能走模型。
+     * 判据搬去了 LlmClient::ready()（两种模式各要什么，那边的注释为准）。
+     * 留一份的原因只有一个：校验这边"配好了没有"和模型那一栏显示的状态行必须
+     * 是同一件事 —— 两处各判各的，早晚会有一处骗人（本地模式那个坑就是这么来的：
+     * 接口地址永远非空，拿它当判据等于永远"就绪"）。
      */
-    if (m_llm->mode() == QLatin1String("local"))
-        return !m_llm->localExe().trimmed().isEmpty()
-               && !m_llm->localModel().trimmed().isEmpty();
-    return !m_llm->apiBase().trimmed().isEmpty()
-           && !m_llm->model().trimmed().isEmpty();
+    return m_llm->ready();
 }
 
 /*

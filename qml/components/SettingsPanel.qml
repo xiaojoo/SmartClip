@@ -544,6 +544,22 @@ Window {
          * 一个空 map，自检那边读到 "0 行 / 0px"（第一次就红在这儿）。
          */
         var first = fmtToolRepeater.itemAt(0)
+        /*
+         * 「怎么装」那条链接到底有没有**摆出来**：数第一个 available=false 且
+         * Fmt.docUrl 非空的那一行，量它那一行的 Row 的 height。
+         * 链接不显示时那个 Row 是 0 高（visible=false）—— 所以这一个数就分得开
+         * "C++ 算得出地址"和"界面上真有一条能点的链接"（前者自检另一条已经钉了）。
+         * 全绿的那台机器上没有这样一行，返回 -1，自检那边按跳过处理。
+         */
+        var linkH = -1
+        for (var li = 0; li < fmtToolRepeater.count; ++li) {
+            var row = fmtToolRepeater.itemAt(li)
+            var entry = fmtToolModel.get(li)
+            if (row && entry && !entry.available && Fmt.docUrl(entry.id).length > 0) {
+                linkH = row.docLinkRow.height
+                break
+            }
+        }
         return {
             nav: navItems.some(function (n) { return n.key === "format" }),
             rows: fmtToolRepeater.count,
@@ -551,7 +567,8 @@ Window {
             firstStyle: fmtToolModel.count > 0 ? fmtToolModel.get(0).style : "",
             toolCol: root.fmtToolColWidth,
             rowWidth: first ? first.width : 0,
-            availWidth: content.width - 28
+            availWidth: content.width - 28,
+            linkHeight: linkH
         }
     }
 
@@ -2017,7 +2034,17 @@ Window {
 
                             Repeater {
                                 model: [ { k: "apiBase", label: "接口地址",
-                                           hint: "https://api.deepseek.com/v1" },
+                                           /*
+                                            * 这句不许和出厂默认值撞字。默认值本来就是
+                                            * https://api.deepseek.com/v1（见 src/Translate.cpp
+                                            * 的构造函数），placeholder 再写同一条，界面上就
+                                            * 分不出"这是已经填好的"还是"这是提示我该怎么填" ——
+                                            * 干净机器上量过一次：那一栏的墨迹亮度
+                                            * （峰值 203 / 均值 138）和真值那栏（208 / 149）
+                                            * 一样、比空着的密钥栏（151 / 120）亮，
+                                            * 也就是说它是真值，可看不出来。
+                                            */
+                                           hint: "OpenAI 兼容地址，末尾带 /v1（出厂给的是 DeepSeek）" },
                                          { k: "apiKey",  label: "密钥",
                                            hint: "sk-…（Ollama 这类本地服务可以留空）" },
                                          { k: "model",   label: "模型名",
@@ -2431,6 +2458,25 @@ Window {
                         }
 
                         /* ---- 两种模式共用：测试一下 ---- */
+                        /*
+                         * 这一栏自己的状态行：现在到底用的是哪个模型 / 还差哪一步。
+                         *
+                         * 话和判据都在 C++（Llm.configSummary / ready），这里只挑颜色 ——
+                         * 校验那一栏的状态行以前在 QML 里拼过一次，用户切到本地模型之后
+                         * 它照样报出厂默认的 "deepseek-chat"（见 src/Checker.cpp 的
+                         * modelSummary 那段），所以这一条也不再在 QML 里拼句子。
+                         * 三档颜色对应 configLevel 的 ok / partial / none。
+                         */
+                        Text {
+                            width: parent.width
+                            wrapMode: Text.WordWrap
+                            font.pixelSize: 11
+                            text: Llm.configSummary
+                            color: Llm.configLevel === "none" ? Theme.c("#e06c60", Theme.rev)
+                                   : Llm.configLevel === "partial" ? Theme.c("#d7a85b", Theme.rev)
+                                                                   : root.mutedColor
+                        }
+
                         Row {
                             spacing: 10
 
@@ -2646,9 +2692,10 @@ Window {
                             wrapMode: Text.WordWrap
                             color: root.mutedColor
                             font.pixelSize: 11
-                            text: "RapidDoc：随包、CPU 就够（默认）。\n"
+                            text: "RapidDoc：CPU 就够（默认），要装 rapid-doc —— 它不是随包的。\n"
                                   + "PaddleOCR-VL 1.6：最准，要装 paddlepaddle + paddleocr[doc-parser]。\n"
-                                  + "Granite-Docling 258M：最省资源，但中文材料别选。"
+                                  + "Granite-Docling 258M：最省资源，但中文材料别选。\n"
+                                  + "三条都要先有 Python；完整过程见仓库那篇「安装依赖」。"
                         }
 
                         /* ---- 档位 ---- */
@@ -3046,6 +3093,48 @@ Window {
                                     text: fmtRow.style
                                     color: root.mutedColor
                                     font.pixelSize: 10
+                                }
+
+                                /*
+                                 * 没装 → 给一条跳到仓库那篇「安装依赖」的链接。
+                                 *
+                                 * 原来这里只说"本机没装"，然后就没了 —— 用户问的正是
+                                 * 下一句："那我装什么、去哪装"。地址由 C++ 拼
+                                 * （Fmt.docUrl，锚点 = 工具名），这样以后加一档工具忘了
+                                 * 写文档，自检那条会直接红（见 src/SelfTest.cpp）。
+                                 * 只在没装的时候出场：装好了这条没地方放，而且右栏宽度
+                                 * 是钉过的（栏顶那句解释里说了）。
+                                 */
+                                Row {
+                                    id: docLinkRow
+                                    spacing: 6
+                                    visible: !fmtRow.available
+                                             && Fmt.docUrl(fmtRow.id).length > 0
+
+                                    Text {
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        text: "怎么装："
+                                        color: root.mutedColor
+                                        font.pixelSize: 10
+                                    }
+
+                                    Text {
+                                        id: docLink
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        text: "安装依赖（仓库文档）↗"
+                                        color: docHit.containsMouse ? root.textBright
+                                                                    : root.accentColor
+                                        font.pixelSize: 10
+                                        font.underline: true
+
+                                        MouseArea {
+                                            id: docHit
+                                            anchors.fill: parent
+                                            hoverEnabled: true
+                                            cursorShape: Qt.PointingHandCursor
+                                            onClicked: Qt.openUrlExternally(Fmt.docUrl(fmtRow.id))
+                                        }
+                                    }
                                 }
 
                                 /*

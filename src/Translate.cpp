@@ -191,6 +191,70 @@ void LlmClient::setModel(const QString &value) {
     emit settingsChanged();
 }
 
+/*
+ * 三档判据（"none" / "partial" / "ok"）就这一份，接口和本地两种模式各看各的：
+ *
+ *   本地模式：要的是"程序 + 模型文件"（接口地址是 127.0.0.1:端口，永远非空，
+ *             拿它当判据等于永远"就绪" —— 原来校验那边就是这样，用户切到本地
+ *             模型之后界面上照样报接口那个模型名）；
+ *   接口模式：地址 + 模型名填全了才算配好；**没填密钥算"差一步"**（出厂默认就是
+ *             DeepSeek 那一套，干净机器上唯一缺的正是 key）。
+ *
+ * 注意它判的是**配好了没有**，不是"服务起没起来"：本地那个没起来时 ask() 会自己
+ * 把它拉起来，所以起没起来只影响界面上那句话，不影响能不能走模型。
+ *
+ * 为什么做成静态的：自检要能把三个分支各测一遍，而拿用户真实配置去改空再改回来
+ * 是不行的 —— 中间进程一挂，他的密钥就没了。
+ */
+QString LlmClient::configLevelFor(const QString &mode, const QString &apiBase,
+                                  const QString &apiKey, const QString &model,
+                                  const QString &localExe, const QString &localModel) {
+    if (mode == QLatin1String("local"))
+        return (localExe.trimmed().isEmpty() || localModel.trimmed().isEmpty())
+                   ? QStringLiteral("none") : QStringLiteral("ok");
+    if (apiBase.trimmed().isEmpty() || model.trimmed().isEmpty())
+        return QStringLiteral("none");
+    return apiKey.trimmed().isEmpty() ? QStringLiteral("partial") : QStringLiteral("ok");
+}
+
+bool LlmClient::ready() const {
+    return configLevel() != QLatin1String("none");
+}
+
+QString LlmClient::configLevel() const {
+    return configLevelFor(m_mode, m_apiBase, m_apiKey, m_model, m_localExe, m_localModel);
+}
+
+QString LlmClient::configSummary() const {
+    const QString level = configLevel();
+
+    if (m_mode == QLatin1String("local")) {
+        if (level == QLatin1String("none"))
+            return QStringLiteral("用不了：本地模型还没配好 —— 要一个能跑 OpenAI 兼容接口的"
+                                  "程序（llama-server / Ollama / LM Studio）和一份 gguf 模型文件。"
+                                  "现在翻译 / 校验 / 识别都会直接报错。");
+        /* 模型只显示文件名：整条路径太长，这一行只是"用的是哪个" */
+        const QString path = m_localModel.trimmed();
+        const int cut = qMax(path.lastIndexOf(QLatin1Char('/')),
+                             path.lastIndexOf(QLatin1Char('\\')));
+        return QStringLiteral("当前：本地 · %1%2")
+            .arg(cut >= 0 ? path.mid(cut + 1) : path,
+                 localRunning() ? QStringLiteral("（已启动）")
+                                : QStringLiteral("（没启动 —— 要用的时候自动起来，加载要几秒到几十秒）"));
+    }
+
+    if (level == QLatin1String("none"))
+        return QStringLiteral("用不了：接口地址和模型名不能空 —— 填一个 OpenAI 兼容服务"
+                              "（DeepSeek / 通义 / Kimi / Ollama / LM Studio 都是这一种格式）。");
+    if (level == QLatin1String("partial"))
+        return QStringLiteral("还差一步：没填密钥，发不出去请求。"
+                              "在线服务（DeepSeek / OpenAI 这类）必须填；"
+                              "本机自己跑的 Ollama / LM Studio 不用 key，"
+                              "把接口地址指到它就行（例如 http://127.0.0.1:11434/v1）。");
+    return QStringLiteral("当前：接口 · %1（%2）")
+        .arg(m_model.trimmed(), m_apiBase.trimmed());
+}
+
 QString LlmClient::ocrModel() const { return m_ocrModel; }
 
 void LlmClient::setOcrModel(const QString &value) {
