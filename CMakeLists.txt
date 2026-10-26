@@ -137,6 +137,15 @@ set(SMARTCLIP_SOURCES
 
 qt_add_executable(SmartClip ${SMARTCLIP_SOURCES})
 
+# 链接成**图形程序**，不是控制台程序。
+#
+# 少了这一行的话 CMake 在 Windows 上默认给 /subsystem:console（实测 PE 头
+# Subsystem = 3），双击 SmartClip.exe 就会先弹出一个黑控制台窗口，里面还印着
+# "[Speech] 引擎就绪…" 这类启动日志 —— 用户装的包就是这样（他问"怎么这个会弹框"）。
+# 改成 TRUE 之后 Subsystem = 2；从命令行 / 打包脚本里跑仍然带着 stdout 句柄，
+# 所以 --self-test / --summarize-test 那些重定向到日志的用法不受影响。
+set_target_properties(SmartClip PROPERTIES WIN32_EXECUTABLE TRUE)
+
 # ---------------------------------------------------------------------------
 # 【必须留着】每个 .cpp 都依赖**全部**工程头文件
 #
