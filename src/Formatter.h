@@ -94,16 +94,17 @@ public:
     Q_INVOKABLE QString lastEngine() const { return m_lastEngine; }
 
     /*
-     * 这个语言的工具"怎么装"跳哪儿（设置面板那条链接用）。
+     * "怎么装"跳哪儿（设置面板栏标题右边那条「参考文档」用）。
      *
-     * 指回仓库里那篇 docs/安装依赖.md，锚点就是工具名（clang-format / prettier /
-     * black …）。为什么不给每个工具在代码里写一条外链：那八条外链各自会腐烂，
-     * 而且"怎么装"这件事除了下载地址还有"装完要不要重启 / 填哪一格"，一句链接说
-     * 不清 —— 一篇文档 + 一个锚点，用户看到的是完整过程，我们只维护一处。
+     * 指回仓库里那篇 docs/安装依赖.md。**不带参数 = 文档开头**（界面上那条就是它）；
+     * 传语言 = 末尾再挂上那一档工具的锚点（#clang-format / #prettier …），
+     * 自检靠这条钉"文档里每个工具都得有一节"（见 src/SelfTest.cpp）。
      *
-     * 空串 = 这一档没有外部工具（内置那三样 json / html / text）。
+     * 为什么不给每个工具在代码里写一条外链：那八条外链各自会腐烂，而且"怎么装"
+     * 这件事除了下载地址还有"装完要不要重启 / 填哪一格"，一句链接说不清 ——
+     * 一篇文档 + 一节一个工具，用户看到的是完整过程，我们只维护一处。
      */
-    Q_INVOKABLE QString docUrl(const QString &language) const;
+    Q_INVOKABLE QString docUrl(const QString &language = QString()) const;
 
     /*
      * 某个语言的自定义工具命令（设置里填的）。

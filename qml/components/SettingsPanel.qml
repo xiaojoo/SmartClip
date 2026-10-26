@@ -545,21 +545,10 @@ Window {
          */
         var first = fmtToolRepeater.itemAt(0)
         /*
-         * 「怎么装」那条链接到底有没有**摆出来**：数第一个 available=false 且
-         * Fmt.docUrl 非空的那一行，量它那一行的 Row 的 height。
-         * 链接不显示时那个 Row 是 0 高（visible=false）—— 所以这一个数就分得开
-         * "C++ 算得出地址"和"界面上真有一条能点的链接"（前者自检另一条已经钉了）。
-         * 全绿的那台机器上没有这样一行，返回 -1，自检那边按跳过处理。
+         * 栏标题右边那条「参考文档」到底有没有**摆出来**：量那颗 Text 的高。
+         * 分得开"C++ 算得出地址"和"界面上真有一条能点的链接"（前者自检另一条钉）。
+         * 委托的 id 只在委托作用域里存在，所以这一条挂在面板顶层的链接才量得到。
          */
-        var linkH = -1
-        for (var li = 0; li < fmtToolRepeater.count; ++li) {
-            var row = fmtToolRepeater.itemAt(li)
-            var entry = fmtToolModel.get(li)
-            if (row && entry && !entry.available && Fmt.docUrl(entry.id).length > 0) {
-                linkH = row.docLinkRow.height
-                break
-            }
-        }
         return {
             nav: navItems.some(function (n) { return n.key === "format" }),
             rows: fmtToolRepeater.count,
@@ -568,7 +557,23 @@ Window {
             toolCol: root.fmtToolColWidth,
             rowWidth: first ? first.width : 0,
             availWidth: content.width - 28,
-            linkHeight: linkH
+            docLinkHeight: fmtDocLink ? fmtDocLink.height : 0
+        }
+    }
+
+    /*
+     * 自检用：模型那一栏里「测试连接」旁边那句提示**有多宽**。
+     *
+     * 钉的是"只有真超出视口才打省略号"这件事：那句原来写的是 `parent.width - 100`，
+     * 而 parent 是个自己由孩子撑宽的 Row —— 绕回来只剩 Math.max 那个 60 的地板，
+     * 于是"还没填模型名"显示成"还没填模…"（用户截图报的就是这处）。
+     * 量这一栏的 Column 宽和那句的宽，两者差得远就说明又挂回 Row 上了。
+     */
+    function modelSectionProbe() {
+        return {
+            statusWidth: testStatusText ? testStatusText.width : 0,
+            portStatusWidth: portStatusText ? portStatusText.width : 0,
+            columnWidth: translateColumn ? translateColumn.width : 0
         }
     }
 
@@ -2404,8 +2409,15 @@ Window {
                                  * 文案跟着 Llm.status 走（"模型加载中…" / "已就绪" / 失败原因）。
                                  */
                                 Text {
+                                    id: portStatusText
                                     anchors.verticalCenter: portField.verticalCenter
-                                    width: Math.max(60, parent.width - 62 - 90 - 118 - 32)
+                                    /*
+                                     * 问**这一栏的 Column** 要宽，不要问所在的 Row：
+                                     * Row 的默认宽是"孩子加起来多宽我就多宽"，孩子又反过来
+                                     * 问它要宽 —— 绕回来只能落到 Math.max 那个 60 的地板上，
+                                     * 于是"还没填模型名"被截成"还没填模…"（用户截的就是这处）。
+                                     */
+                                    width: Math.max(60, translateColumn.width - 62 - 90 - 118 - 32)
                                     text: Llm.status
                                     color: root.mutedColor
                                     font.pixelSize: 11
@@ -2470,6 +2482,9 @@ Window {
                         Text {
                             width: parent.width
                             wrapMode: Text.WordWrap
+                            /* 必填项没填时这一行是**空的**（那件事由下面那颗红按钮说），
+                             * 空串也得把自己藏掉 —— Column 的间距不看条目高不高。 */
+                            visible: text.length > 0
                             font.pixelSize: 11
                             text: Llm.configSummary
                             color: Llm.configLevel === "none" ? Theme.c("#e06c60", Theme.rev)
@@ -2481,14 +2496,25 @@ Window {
                             spacing: 10
 
                             Rectangle {
+                                /*
+                                 * 必填项还空着 → 这颗按钮整个变红，"现在按了也不会有结果"
+                                 * 这件事用颜色说，不靠后面那行长句。
+                                 * 只换颜色，尺寸 / 位置一个像素都不动（动了整行会重排）。
+                                 * 还是能按：按下去 Llm.probe() 会当场说缺哪一格，
+                                 * 比一颗点不动的哑按钮好查。
+                                 */
+                                id: testButton
+                                readonly property bool unusable: Llm.configLevel === "none"
                                 width: 88; height: 24; radius: 4
                                 color: testHit.containsMouse ? root.rowHover : "transparent"
                                 border.width: 1
-                                border.color: root.borderColor
+                                border.color: unusable ? Theme.c("#e06c60", Theme.rev)
+                                                       : root.borderColor
                                 Text {
                                     anchors.centerIn: parent
                                     text: "测试连接"
-                                    color: testHit.containsMouse ? root.textBright : root.textColor
+                                    color: testButton.unusable ? Theme.c("#e06c60", Theme.rev)
+                                           : testHit.containsMouse ? root.textBright : root.textColor
                                     font.pixelSize: 12
                                 }
                                 MouseArea {
@@ -2501,8 +2527,15 @@ Window {
                             }
 
                             Text {
+                                id: testStatusText
                                 anchors.verticalCenter: parent.verticalCenter
-                                width: Math.max(60, parent.width - 100)
+                                /*
+                                 * 88 = 那颗「测试连接」按钮，10 = 所在 Row 的 spacing。
+                                 * 不能问 Row 要宽：Row 的宽是孩子加起来的和，孩子又问它要
+                                 * —— 绕回来只能落到 Math.max 那个 60 的地板上，
+                                 * "还没填模型名"于是被截成"还没填模…"（用户截的就是这处）。
+                                 */
+                                width: Math.max(60, translateColumn.width - 88 - 10)
                                 text: Llm.busy ? "正在测试…" : Llm.status
                                 color: (Llm.status.indexOf("正常") >= 0) ? root.accentColor
                                                                         : root.mutedColor
@@ -2934,11 +2967,40 @@ Window {
                         spacing: 9
                         visible: root.section === "format"
 
-                        Text {
-                            text: "代码格式化"
-                            color: root.textBright
-                            font.pixelSize: 14
-                            font.bold: true
+                        Row {
+                            spacing: 10
+
+                            Text {
+                                anchors.verticalCenter: parent.verticalCenter
+                                text: "代码格式化"
+                                color: root.textBright
+                                font.pixelSize: 14
+                                font.bold: true
+                            }
+
+                            /*
+                             * 一条就够，摆在栏标题右边：原来每一档工具下面都挂一条
+                             * 「怎么装」，十五行就是十五条重复的链接，反而没人点。
+                             * 指到仓库那篇文档的开头（不带锚点），里面每个工具各有
+                             * 一节；锚点契约仍然由自检钉着（见 src/SelfTest.cpp）。
+                             */
+                            Text {
+                                id: fmtDocLink
+                                anchors.verticalCenter: parent.verticalCenter
+                                text: "参考文档 ↗"
+                                color: fmtDocHit.containsMouse ? root.textBright
+                                                               : root.accentColor
+                                font.pixelSize: 11
+                                font.underline: true
+
+                                MouseArea {
+                                    id: fmtDocHit
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: Qt.openUrlExternally(Fmt.docUrl())
+                                }
+                            }
                         }
 
                         Row {
@@ -3093,48 +3155,6 @@ Window {
                                     text: fmtRow.style
                                     color: root.mutedColor
                                     font.pixelSize: 10
-                                }
-
-                                /*
-                                 * 没装 → 给一条跳到仓库那篇「安装依赖」的链接。
-                                 *
-                                 * 原来这里只说"本机没装"，然后就没了 —— 用户问的正是
-                                 * 下一句："那我装什么、去哪装"。地址由 C++ 拼
-                                 * （Fmt.docUrl，锚点 = 工具名），这样以后加一档工具忘了
-                                 * 写文档，自检那条会直接红（见 src/SelfTest.cpp）。
-                                 * 只在没装的时候出场：装好了这条没地方放，而且右栏宽度
-                                 * 是钉过的（栏顶那句解释里说了）。
-                                 */
-                                Row {
-                                    id: docLinkRow
-                                    spacing: 6
-                                    visible: !fmtRow.available
-                                             && Fmt.docUrl(fmtRow.id).length > 0
-
-                                    Text {
-                                        anchors.verticalCenter: parent.verticalCenter
-                                        text: "怎么装："
-                                        color: root.mutedColor
-                                        font.pixelSize: 10
-                                    }
-
-                                    Text {
-                                        id: docLink
-                                        anchors.verticalCenter: parent.verticalCenter
-                                        text: "安装依赖（仓库文档）↗"
-                                        color: docHit.containsMouse ? root.textBright
-                                                                    : root.accentColor
-                                        font.pixelSize: 10
-                                        font.underline: true
-
-                                        MouseArea {
-                                            id: docHit
-                                            anchors.fill: parent
-                                            hoverEnabled: true
-                                            cursorShape: Qt.PointingHandCursor
-                                            onClicked: Qt.openUrlExternally(Fmt.docUrl(fmtRow.id))
-                                        }
-                                    }
                                 }
 
                                 /*

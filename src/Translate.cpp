@@ -230,9 +230,8 @@ QString LlmClient::configSummary() const {
 
     if (m_mode == QLatin1String("local")) {
         if (level == QLatin1String("none"))
-            return QStringLiteral("用不了：本地模型还没配好 —— 要一个能跑 OpenAI 兼容接口的"
-                                  "程序（llama-server / Ollama / LM Studio）和一份 gguf 模型文件。"
-                                  "现在翻译 / 校验 / 识别都会直接报错。");
+            /* 和接口模式一样：没配好由那颗红按钮说，这一行留空 */
+            return QString();
         /* 模型只显示文件名：整条路径太长，这一行只是"用的是哪个" */
         const QString path = m_localModel.trimmed();
         const int cut = qMax(path.lastIndexOf(QLatin1Char('/')),
@@ -244,8 +243,12 @@ QString LlmClient::configSummary() const {
     }
 
     if (level == QLatin1String("none"))
-        return QStringLiteral("用不了：接口地址和模型名不能空 —— 填一个 OpenAI 兼容服务"
-                              "（DeepSeek / 通义 / Kimi / Ollama / LM Studio 都是这一种格式）。");
+        /*
+         * 这一档**不说话**：必填项没填这件事，上面那颗「测试连接」已经整个变红了，
+         * 再补一行字就是把同一件事说两遍（他先要那句短成"内容不能为空"，然后连这句
+         * 也不要了）。界面那侧的 Text 按空串把自己藏掉，不留一段空行。
+         */
+        return QString();
     if (level == QLatin1String("partial"))
         return QStringLiteral("还差一步：没填密钥，发不出去请求。"
                               "在线服务（DeepSeek / OpenAI 这类）必须填；"

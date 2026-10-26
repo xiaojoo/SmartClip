@@ -9002,18 +9002,14 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
                           .arg(rows).arg(styled).arg(rowW).arg(availW)
                           + QStringLiteral("｜%1").arg(first));
                 /*
-                 * 链接**摆出来了没有**（不是"C++ 算不算得出地址"，上面那条管那个）。
-                 * -1 = 这台机每档工具都装上了，界面上没有一条"本机没装"可看 —— 跳过。
+                 * 栏标题右边那条「参考文档」**摆出来了没有**（不是"C++ 算不算得出
+                 * 地址"，下面那两条管那个）。它现在常驻，所以这一条不许跳过 ——
+                 * 量到 0px 就是链接没画出来。
                  */
-                const double linkH = m.value(QStringLiteral("linkHeight")).toDouble();
-                if (linkH < 0.0) {
-                    out() << "        （这台机每档格式化器都装上了，「怎么装」那条链接没有出场机会，"
-                             "这一条跳过）" << Qt::endl;
-                } else {
-                    check(linkH >= 10.0,
-                          QStringLiteral("设置→格式化：没装那一行下面真的摆着一条「怎么装」链接"),
-                          QStringLiteral("那一行高 %1px（0 = 没显示出来）").arg(linkH));
-                }
+                const double docLinkH = m.value(QStringLiteral("docLinkHeight")).toDouble();
+                check(docLinkH >= 10.0,
+                      QStringLiteral("设置→格式化：栏标题右边摆着一条「参考文档」链接"),
+                      QStringLiteral("那颗链接高 %1px（0 = 没显示出来）").arg(docLinkH));
             } else {
                 check(false, QStringLiteral("设置→格式化：每行下面列出了这一语言的格式模版"),
                       QStringLiteral("找不到 settingsPanel，整栏无从谈起"));
@@ -9058,16 +9054,51 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
                       QStringLiteral("%1 / %2 / %3 / 本地 %4 / 本地 %5")
                           .arg(none, partial, ok, localNone, localOk));
 
-                /* 界面上那一行：文案的开头必须跟着档位走 */
+                /*
+                 * 界面上那一行跟着档位走：none 档**这一行是空的**（那件事由「测试连接」
+                 * 那颗变红的按钮说，写两遍就是重复），partial / ok 才各有说法。
+                 */
                 const QString level = llm->configLevel();
                 const QString summary = llm->configSummary();
-                const QString head = level == QLatin1String("none") ? QStringLiteral("用不了：")
-                                       : level == QLatin1String("partial") ? QStringLiteral("还差一步：")
-                                                                           : QStringLiteral("当前：");
-                check(llm->ready() == (level != QLatin1String("none"))
-                          && summary.startsWith(head),
-                      QStringLiteral("模型那一栏的状态行：说的话跟着档位走（%1）").arg(level),
+                const bool levelOk = llm->ready() == (level != QLatin1String("none"));
+                const bool wordsOk = level == QLatin1String("none")
+                    ? summary.isEmpty()
+                    : summary.startsWith(level == QLatin1String("partial")
+                                             ? QStringLiteral("还差一步：")
+                                             : QStringLiteral("当前："));
+                check(levelOk && wordsOk,
+                      QStringLiteral("模型那一栏：none 档那一行留空（红按钮说）、其余档位说的话跟着档位走（%1）")
+                          .arg(level),
                       QStringLiteral("ready=%1 句子=%2").arg(llm->ready()).arg(summary.left(24)));
+
+                /*
+                 * 「测试连接」旁边那句提示**有多宽**：钉的是"只有真超出视口才打省略号"。
+                 * 那句原来写 `parent.width - 100`，而 parent 是个由孩子撑宽的 Row ——
+                 * 绕回来只剩 Math.max 那个 60 的地板，"还没填模型名"就显示成"还没填模…"
+                 * （用户截图报的正是这处）。
+                 */
+                if (QObject *sp = qmlRoot->findChild<QObject *>("settingsPanel")) {
+                    sp->setProperty("section", QStringLiteral("translate"));
+                    settle();
+                    QVariant mp;
+                    QMetaObject::invokeMethod(sp, "modelSectionProbe",
+                                              Q_RETURN_ARG(QVariant, mp));
+                    const QVariantMap pm = mp.toMap();
+                    const double statusW = pm.value(QStringLiteral("statusWidth")).toDouble();
+                    const double portW = pm.value(QStringLiteral("portStatusWidth")).toDouble();
+                    const double columnW = pm.value(QStringLiteral("columnWidth")).toDouble();
+                    out() << "        （模型栏：这一栏" << columnW << "px；测试连接旁那句"
+                          << statusW << "px、端口旁那句" << portW
+                          << "px —— 挂回撑宽的 Row 上两句都会掉到 60 的地板）" << Qt::endl;
+                    check(statusW > 200 && portW > 200 && columnW > 0
+                              && statusW >= columnW - 120 && portW >= columnW - 340,
+                          QStringLiteral("模型栏那两句提示吃掉剩余宽度（超长才省略，不是一上来就截）"),
+                          QStringLiteral("测试连接旁 %1px / 端口旁 %2px / 这一栏 %3px")
+                              .arg(statusW).arg(portW).arg(columnW));
+                } else {
+                    check(false, QStringLiteral("模型栏那句提示吃掉剩余宽度"),
+                          QStringLiteral("找不到 settingsPanel"));
+                }
             } else {
                 check(false, QStringLiteral("模型那一栏的状态行"), QStringLiteral("拿不到 Llm"));
             }
@@ -9092,10 +9123,12 @@ int SelfTest::run(QObject *qmlRoot, ClipboardStore *store, Screenshot *shot, Tra
                     else
                         missing << QStringLiteral("%1→%2").arg(id, url);
                 }
-                check(external > 0 && linked == external,
-                      QStringLiteral("每个外部工具都有一句「怎么装」，锚点 = 工具名"),
-                      QStringLiteral("%1 档里 %2 档有链接 %3")
-                          .arg(external).arg(linked).arg(missing.join(QStringLiteral(" "))));
+                check(external > 0 && linked == external
+                          && !fmt.docUrl().isEmpty() && !fmt.docUrl().contains(QLatin1Char('#')),
+                      QStringLiteral("「参考文档」有地址（不带锚点），每档外部工具还各有一个锚点 = 工具名"),
+                      QStringLiteral("%1 档里 %2 档缺锚点 [%3]｜栏顶那条=%4")
+                          .arg(external).arg(missing.size()).arg(missing.join(QStringLiteral(" ")))
+                          .arg(fmt.docUrl()));
 
                 /*
                  * 文档本身：链接指过去，那边得真有一节讲这个工具。
