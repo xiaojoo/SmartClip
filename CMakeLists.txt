@@ -191,6 +191,11 @@ if(MSVC)
             "找过的根目录=${SMARTCLIP_SDK_ROOT}")
     endif()
     message(STATUS "manifest 合并用 mt.exe: ${SMARTCLIP_MT}")
+    # 这份 manifest 必须进**链接依赖**：不加这一条，只改 manifest、不碰任何 .cpp 的话，
+    # NMake 认为不用重链接，POST_BUILD 的 mt.exe 根本不跑，产物里还是上一版那份 ——
+    # 本机就这么被骗过：改了 manifest、BUILD_EXIT=0，量出来 exe 里 supportedOS 是 0。
+    set_property(TARGET SmartClip APPEND PROPERTY LINK_DEPENDS
+        "${CMAKE_CURRENT_SOURCE_DIR}/packaging/smartclip.manifest")
     # 合并这一步交给 packaging/embed-manifest.bat：`-outputresource:"路径;#1"` 这一串要
     # 同时穿过 CMake 的分号列表、NMake 的注释符 '#'、和 cmd 的引号规则，三种写法都试过
     # 并且每种都量到 mt.exe 自己的报错（c101008d / c1010008 / c1010011，细节写在那个 .bat

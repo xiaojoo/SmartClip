@@ -14,6 +14,7 @@ REM              4 package tree incomplete / 5 packaged exe failed its self-test
 REM              6 no app-local MSVC runtime in the package
 REM              7 a code-signing step failed (see SMARTCLIP_SIGN_CMD below)
 REM              8 an .iss script failed to compile
+REM              9 packaged exe lost its dpiAwareness manifest
 REM
 REM  ASCII only on purpose: cmd reads .bat in the OEM codepage (936 here),
 REM  and a Chinese comment can silently break a line. Same lesson as the
@@ -147,6 +148,24 @@ for %%d in (qml\QtQml qml\QtQuick qml\QtQuick\Controls qml\QtQuick\Layouts ^
             qml\QtQuick\Window qml\QtQuick\Templates) do call :needdir pkg-rec "%%d"
 if "%MISSING%"=="1" goto :fail_pkg
 if not exist "%BUILD%\pkg-rec\vcruntime140.dll" goto :fail_crt
+
+rem gate: the DPI awareness declaration must be inside the packaged exe.
+rem Without it the process starts DPI-unaware, Qt flips the flag at runtime and
+rem Windows repaints the whole desktop -> one black screen at launch (the bug the
+rem user reported twice). CMake already hard-fails when mt.exe is missing, but that
+rem only covers "we compiled it"; this covers "the thing we ship has it".
+rem The check is a small python script, not findstr: findstr /m returns 1 both for
+rem "string not in file" and for "cannot open file", so a locked or missing exe would
+rem be reported as "the declaration is gone" (measured). check-manifest.py answers
+rem 0 = all present, 3 = at least one missing, 1 = could not read -> 1 goes elsewhere.
+rem It checks the WHOLE manifest, not just the new bit: mt.exe -outputresource REPLACES
+rem resource #1, so a manifest file carrying only the dpi lines silently deletes
+rem supportedOS / longPathAware / asInvoker. That is exactly what happened first time
+rem (the main window read back UNAWARE_GDISCALED - the fix did nothing at all).
+python "%ROOT%\packaging\check-manifest.py" "%PKG%\SmartClip.exe" dpiAwareness supportedOS longPathAware asInvoker >nul 2>&1
+if "%ERRORLEVEL%"=="3" goto :fail_manifest
+if "%ERRORLEVEL%"=="0" (echo     manifest gate ok - dpiAwareness found in the packaged exe
+) else if not "%ERRORLEVEL%"=="1" goto :fail_gatechk
 
 rem the real gate: run the self-test from INSIDE the package with Qt removed from
 rem PATH. If it boots, every DLL/plugin/qml module came from the package itself.
@@ -302,6 +321,15 @@ echo [x] no app-local vcruntime140/msvcp140 in the package.
 echo     vcvars64 did not set VCToolsRedistDir - run this from a shell where
 echo     "%VCCall%" works, or the green zip will need VC_redist on the target.
 endlocal & exit /b 6
+:fail_gatechk
+echo [x] could not read %PKG%\SmartClip.exe for the manifest check - the packaging
+echo     step before this one is wrong, this is NOT "the declaration is missing".
+endlocal & exit /b 9
+:fail_manifest
+echo [x] the packaged SmartClip.exe has NO dpiAwareness in its manifest.
+echo     packaging/smartclip.manifest + the mt.exe POST_BUILD step did not run -
+echo     launching it will flash the whole desktop black for one frame.
+endlocal & exit /b 9
 :fail_smoke
 echo [x] the packaged exe did not pass its own self-test - see pkg-smoke.log
 endlocal & exit /b 5

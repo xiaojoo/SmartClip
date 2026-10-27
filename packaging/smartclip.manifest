@@ -1,26 +1,48 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0" xmlns:asmv3="urn:schemas-microsoft-com:asm.v3">
   <!--
-    为什么要有这份文件（本机量出来的）：
-      CMake 默认那份 manifest 里**没有** dpiAware / dpiAwareness（在 exe 里数这两个词
-      都是 0 次）。于是进程先以"DPI 不感知"起来，Qt 6 再在 QGuiApplication 初始化时
-      运行时改这个档位 —— Windows 改这个值要重画整个桌面，结果就是**双击桌面快捷方式
-      启动的那一瞬，整屏黑一帧**。
-      录屏（gdigrab 实际只给到 21.9fps，所以一帧≈45ms）量到的：
-        不设 __COMPAT_LAYER  → 全黑帧 1 张（第 54 帧，均值 0.0、暗像素占比 1.000、
-                               与基线帧不同的像素 91.4% = 整屏）
-        设了 PER_MONITOR_AWARE（= 进程创建时就钉好档位，等价于 manifest 声明）→ 0 张
-    所以正解不是"藏起来"，而是在进程创建之前就把档位交给系统。
-      值取 PerMonitorV2 + PerMonitor 兜底，和 Qt 6 运行时自己会设的那一档一致；
-      只写 windowsSettings 这一段：asInvoker / longPathAware 由 CMake 默认那份带，
-      这里重复写会让链接器合并出两份同名节。
+    这一份是**整份替换**，不是追加：mt.exe 的 -outputresource:"exe;#1" 会拿这个文件
+    把链接器/CMake 原来那份资源 #1 直接盖掉（本机量出来的：只写 dpi 那一段之后，
+    exe 里 supportedOS / longPathAware / asInvoker 全没了）。所以 CMake 默认那份里的
+    每一节都得在这儿重新摆一遍，少一条就丢一条功能。
+
+    为什么要有 dpiAware / dpiAwareness：CMake 默认那份不带这两个，于是进程以"DPI 不感知"
+    起来，Qt 6 再在 QGuiApplication 初始化时运行时改档位 —— Windows 改这个值要重画整个
+    桌面，用户看到的就是"双击桌面快捷方式启动那一瞬整个桌面闪一下"。
+    录屏量的：无声明时整屏全黑 1 帧（45ms 采样里，暗像素占比 1.000、与基线不同 91.4%）。
+
+    为什么 supportedOS 这一段是**这条修复的前提**：PerMonitorV2 只在应用声明了
+    Windows 10 兼容时才生效。上一版丢了这一段，实测主窗口的感知档位停在
+    UNAWARE_GDISCALED（也就是修复完全没上），补回来之后才是 PER_MONITOR_AWARE_V2。
+
+    两处命名空间细节：2005 那一段（dpiAware）和 2016 那一段（dpiAwareness /
+    longPathAware）是两个不同的 xmlns；这里用带前缀的 ws1/ws2 写，避免"默认命名空间
+    换了元素归属跟着换"这类坑。
   -->
+  <assemblyIdentity type="win32" name="com.yourcompany.SmartClip" version="0.1.0.0" processorArchitecture="*"></assemblyIdentity>
+
+  <compatibility xmlns="urn:schemas-microsoft-com:compatibility.v1">
+    <application>
+      <!-- Windows 10 and Windows 11：PerMonitorV2 靠这一条才生效 -->
+      <supportedOS Id="{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}"></supportedOS>
+    </application>
+  </compatibility>
+
   <asmv3:application>
-    <asmv3:windowsSettings xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">
-      <dpiAware>true/pm</dpiAware>
+    <asmv3:windowsSettings xmlns:ws1="http://schemas.microsoft.com/SMI/2005/WindowsSettings">
+      <ws1:dpiAware>true/pm</ws1:dpiAware>
     </asmv3:windowsSettings>
-    <asmv3:windowsSettings xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">
-      <dpiAwareness>PerMonitorV2, PerMonitor</dpiAwareness>
+    <asmv3:windowsSettings xmlns:ws2="http://schemas.microsoft.com/SMI/2016/WindowsSettings">
+      <ws2:dpiAwareness>PerMonitorV2, PerMonitor</ws2:dpiAwareness>
+      <ws2:longPathAware>true</ws2:longPathAware>
     </asmv3:windowsSettings>
   </asmv3:application>
+
+  <trustInfo xmlns="urn:schemas-microsoft-com:asm.v2">
+    <security>
+      <requestedPrivileges xmlns="urn:schemas-microsoft-com:asm.v3">
+        <requestedExecutionLevel level="asInvoker" uiAccess="false"></requestedExecutionLevel>
+      </requestedPrivileges>
+    </security>
+  </trustInfo>
 </assembly>
