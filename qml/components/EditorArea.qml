@@ -247,6 +247,8 @@ Rectangle {
 
     /* 两个编辑组（Main.qml 拿它决定命令发给谁） */
     readonly property var mainView: editorView
+    /* 给 Main.qml 那个布局探针用：量"空状态那一块摆在哪儿"（最大化/还原时会跳） */
+    readonly property var welcomeItem: welcomePanel
     readonly property var mirrorView: mirrorPane
     /* 某一栏被点了（Main.qml 接住，把"当前编辑器"切过去） */
     signal paneFocusRequested(var pane)

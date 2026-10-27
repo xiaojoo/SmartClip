@@ -3919,6 +3919,11 @@ Rectangle {
                               + " gap=" + splitterGap.width
                               + " editor=" + editor.width
                               + " 正文项=" + (editor.mainView ? editor.mainView.width + "x" + editor.mainView.height : "-")
+                              + " welcome=" + (editor.welcomeItem
+                                     ? Math.round(editor.welcomeItem.x) + "," + Math.round(editor.welcomeItem.y)
+                                       + " " + Math.round(editor.welcomeItem.width) + "x"
+                                       + Math.round(editor.welcomeItem.height)
+                                     : "-")
                               + " 窗=" + window.width + "x" + window.height)
             }
             onTriggered: {
